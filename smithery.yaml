@@ -1,0 +1,12 @@
+# Smithery configuration file: https://smithery.ai/docs/config#smitheryyaml
+
+startCommand:
+  type: stdio
+  configSchema:
+    # PageMap requires no API keys or external configuration
+    type: object
+    required: []
+    properties: {}
+  commandFunction:
+    |-
+    (config) => ({command:'uvx',args:['retio-pagemap']})
