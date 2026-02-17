@@ -20,213 +20,348 @@ from urllib.parse import urlparse
 
 PRICE_TERMS: tuple[str, ...] = (
     # symbols / codes
-    "₩", "$", "¥", "€", "£",
-    "CHF", "SEK", "AUD", "CAD", "NZD", "DKK", "NOK",
-    "USD", "EUR", "GBP", "JPY", "KRW",
-    "kr", "R$",
+    "₩",
+    "$",
+    "¥",
+    "€",
+    "£",
+    "CHF",
+    "SEK",
+    "AUD",
+    "CAD",
+    "NZD",
+    "DKK",
+    "NOK",
+    "USD",
+    "EUR",
+    "GBP",
+    "JPY",
+    "KRW",
+    "kr",
+    "R$",
     # suffixes
-    "원", "円", "元",
+    "원",
+    "円",
+    "元",
 )
 
 RATING_TERMS: tuple[str, ...] = (
     # ko
-    "★", "평점", "별점",
+    "★",
+    "평점",
+    "별점",
     # en
-    "stars", "rating", "rated",
+    "stars",
+    "rating",
+    "rated",
     # ja
-    "評価", "レビュー",
+    "評価",
+    "レビュー",
     # fr
     "étoile",
     # de
-    "Bewertung", "Sterne",
+    "Bewertung",
+    "Sterne",
 )
 
 REVIEW_COUNT_TERMS: tuple[str, ...] = (
     # ko
-    "개", "건", "리뷰",
+    "개",
+    "건",
+    "리뷰",
     # en
-    "review", "reviews",
+    "review",
+    "reviews",
     # ja
-    "レビュー", "件",
+    "レビュー",
+    "件",
     # fr
     "avis",
     # de
-    "Bewertung", "Bewertungen", "Rezension",
+    "Bewertung",
+    "Bewertungen",
+    "Rezension",
 )
 
 REPORTER_TERMS: tuple[str, ...] = (
     # ko
-    "기자", "기고", "편집", "취재",
+    "기자",
+    "기고",
+    "편집",
+    "취재",
     # en
     "reporter",
     # ja
-    "記者", "編集",
+    "記者",
+    "編集",
     # fr
-    "journaliste", "rédacteur",
+    "journaliste",
+    "rédacteur",
     # de
-    "Reporter", "Journalist", "Redakteur",
+    "Reporter",
+    "Journalist",
+    "Redakteur",
 )
 
 CONTACT_TERMS: tuple[str, ...] = (
     # ko
-    "전화", "연락처", "주소", "팩스", "이메일",
+    "전화",
+    "연락처",
+    "주소",
+    "팩스",
+    "이메일",
     # en
-    "tel", "address", "fax", "email",
+    "tel",
+    "address",
+    "fax",
+    "email",
     # ja
-    "電話", "住所",
+    "電話",
+    "住所",
     # fr
-    "téléphone", "adresse", "courriel",
+    "téléphone",
+    "adresse",
+    "courriel",
     # de
-    "Telefon", "Kontakt",
+    "Telefon",
+    "Kontakt",
 )
 
 BRAND_TERMS: tuple[str, ...] = (
     # ko
-    "브랜드", "제조사",
+    "브랜드",
+    "제조사",
     # en
-    "brand", "manufacturer",
+    "brand",
+    "manufacturer",
     # ja
-    "ブランド", "メーカー",
+    "ブランド",
+    "メーカー",
     # fr
-    "marque", "fabricant",
+    "marque",
+    "fabricant",
     # de
-    "Marke", "Hersteller",
+    "Marke",
+    "Hersteller",
 )
 
 DEPARTMENT_TERMS: tuple[str, ...] = (
     # ko
-    "기관", "부처", "청", "위원회", "처", "원",
+    "기관",
+    "부처",
+    "청",
+    "위원회",
+    "처",
+    "원",
     # en
-    "department", "ministry",
+    "department",
+    "ministry",
     # ja
-    "省", "庁", "委員会",
+    "省",
+    "庁",
+    "委員会",
     # fr
-    "ministère", "département",
+    "ministère",
+    "département",
     # de
-    "Ministerium", "Behörde", "Amt",
+    "Ministerium",
+    "Behörde",
+    "Amt",
 )
 
 FEATURE_TERMS: tuple[str, ...] = (
     # ko
-    "기능", "특징",
+    "기능",
+    "특징",
     # en
     "feature",
     # ja
-    "機能", "特徴",
+    "機能",
+    "特徴",
     # fr
-    "fonctionnalité", "caractéristique",
+    "fonctionnalité",
+    "caractéristique",
     # de
-    "Funktion", "Merkmal",
+    "Funktion",
+    "Merkmal",
 )
 
 PRICING_TERMS: tuple[str, ...] = (
     # ko
-    "요금", "가격",
+    "요금",
+    "가격",
     # en
-    "price", "pricing",
+    "price",
+    "pricing",
     # symbols
-    "₩", "$", "€",
+    "₩",
+    "$",
+    "€",
     # ja
-    "価格", "料金",
+    "価格",
+    "料金",
     # fr
-    "prix", "tarif",
+    "prix",
+    "tarif",
     # de
-    "Preis", "Preise",
+    "Preis",
+    "Preise",
 )
 
 SEARCH_RESULT_TERMS: tuple[str, ...] = (
     # ko
-    "검색결과", "개의 상품",
-    "items", "건", "총 ",
+    "검색결과",
+    "개의 상품",
+    "items",
+    "건",
+    "총 ",
     # en
-    "search results", "results",
+    "search results",
+    "results",
     # ja
-    "検索結果", "件の商品",
+    "検索結果",
+    "件の商品",
     # fr
-    "résultats", "produits",
+    "résultats",
+    "produits",
     # de
-    "Suchergebnisse", "Ergebnisse", "Produkte",
+    "Suchergebnisse",
+    "Ergebnisse",
+    "Produkte",
 )
 
 LISTING_TERMS: tuple[str, ...] = (
     # ko
-    "베스트", "랭킹", "인기",
-    "신상품", "new arrival", "new in",
+    "베스트",
+    "랭킹",
+    "인기",
+    "신상품",
+    "new arrival",
+    "new in",
     # en
-    "best", "ranking",
+    "best",
+    "ranking",
     # ja
-    "ベスト", "ランキング",
-    "人気", "新着",
+    "ベスト",
+    "ランキング",
+    "人気",
+    "新着",
     # fr
-    "meilleures ventes", "nouveautés",
+    "meilleures ventes",
+    "nouveautés",
     # de
-    "Bestseller", "Beliebt", "Neuheiten",
+    "Bestseller",
+    "Beliebt",
+    "Neuheiten",
 )
 
 FILTER_TERMS: tuple[str, ...] = (
     # ko
-    "필터", "정렬", "카테고리",
+    "필터",
+    "정렬",
+    "카테고리",
     # en
-    "filter", "sort", "category",
+    "filter",
+    "sort",
+    "category",
     # ja
-    "フィルター", "並び替え",
+    "フィルター",
+    "並び替え",
     "カテゴリー",
     # fr
-    "filtre", "tri", "catégorie",
+    "filtre",
+    "tri",
+    "catégorie",
     # de
-    "Filter", "Sortieren", "Kategorie",
+    "Filter",
+    "Sortieren",
+    "Kategorie",
 )
 
 NEXT_BUTTON_TERMS: tuple[str, ...] = (
     # ko
-    "다음", "다음 페이지",
+    "다음",
+    "다음 페이지",
     # en
-    "Next", "next", "Next Page", "next page",
+    "Next",
+    "next",
+    "Next Page",
+    "next page",
     # ja
-    "次へ", "次のページ",
+    "次へ",
+    "次のページ",
     # fr
-    "Suivant", "Page suivante",
+    "Suivant",
+    "Page suivante",
     # de
-    "Weiter", "Nächste Seite",
+    "Weiter",
+    "Nächste Seite",
 )
 
 LOAD_MORE_TERMS: tuple[str, ...] = (
     # ko
-    "더보기", "더 보기",
+    "더보기",
+    "더 보기",
     # en
-    "Load more", "Show more", "View more",
+    "Load more",
+    "Show more",
+    "View more",
     # ja
-    "もっと見る", "さらに表示",
+    "もっと見る",
+    "さらに表示",
     # fr
-    "Voir plus", "Charger plus",
+    "Voir plus",
+    "Charger plus",
     # de
-    "Mehr laden", "Mehr anzeigen",
+    "Mehr laden",
+    "Mehr anzeigen",
 )
 
 PRICE_LABEL_TERMS: tuple[str, ...] = (
     # ko
-    "정가", "할인가", "판매가",
+    "정가",
+    "할인가",
+    "판매가",
     # en
-    "regular price", "sale price", "original price", "list price",
+    "regular price",
+    "sale price",
+    "original price",
+    "list price",
     # ja
-    "定価", "セール価格", "通常価格",
+    "定価",
+    "セール価格",
+    "通常価格",
     # fr
-    "prix", "solde",
+    "prix",
+    "solde",
     # de
-    "Originalpreis", "Sonderpreis",
+    "Originalpreis",
+    "Sonderpreis",
 )
 
 OPTION_TERMS: tuple[str, ...] = (
     # ko
-    "사이즈", "컬러", "색상", "옵션",
+    "사이즈",
+    "컬러",
+    "색상",
+    "옵션",
     # en
-    "size", "color", "colour", "option",
+    "size",
+    "color",
+    "colour",
+    "option",
     # ja
-    "サイズ", "カラー", "オプション",
+    "サイズ",
+    "カラー",
+    "オプション",
     # fr
-    "taille", "couleur", "option",
+    "taille",
+    "couleur",
+    "option",
     # de
-    "Größe", "Farbe", "Option",
+    "Größe",
+    "Farbe",
+    "Option",
 )
 
 # ---------------------------------------------------------------------------
@@ -245,8 +380,8 @@ class LocaleConfig:
     label_pagination: str
     label_next_available: str
     label_page_suffix: str
-    overflow_template: str       # "외 {n}건" — use .format(n=...)
-    review_template: str         # "({count}개 리뷰)" — use .format(count=...)
+    overflow_template: str  # "외 {n}건" — use .format(n=...)
+    review_template: str  # "({count}개 리뷰)" — use .format(count=...)
     default_currency: str
     date_ymd_suffixes: tuple[str, ...]
 

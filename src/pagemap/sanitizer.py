@@ -115,11 +115,7 @@ def add_content_boundary(text: str, source_url: str) -> str:
     tag = f"web_content_{nonce}"
     text = _BOUNDARY_TAG_RE.sub("", text)  # defense-in-depth
     ts = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-    return (
-        f'<{tag} source="{_escape_attr(source_url)}" timestamp="{ts}">\n'
-        f"{text}\n"
-        f"</{tag}>"
-    )
+    return f'<{tag} source="{_escape_attr(source_url)}" timestamp="{ts}">\n{text}\n</{tag}>'
 
 
 def _escape_attr(value: str) -> str:

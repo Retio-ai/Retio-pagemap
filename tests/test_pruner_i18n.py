@@ -63,12 +63,12 @@ class TestRatingRE:
             "5 stars",
             "rating 4.5",
             "rated 4.0",
-            "評価 4.2",        # ja
-            "レビュー",        # ja
-            "étoile",          # fr
-            "Bewertung 4.5",   # de
-            "Sterne",          # de
-            "4.5",             # numeric
+            "評価 4.2",  # ja
+            "レビュー",  # ja
+            "étoile",  # fr
+            "Bewertung 4.5",  # de
+            "Sterne",  # de
+            "4.5",  # numeric
         ],
     )
     def test_matches(self, text):
@@ -77,8 +77,8 @@ class TestRatingRE:
     @pytest.mark.parametrize(
         "text",
         [
-            "note",     # removed — conflicts with English "note"
-            "star",     # removed — "starting", "startup" false positive
+            "note",  # removed — conflicts with English "note"
+            "star",  # removed — "starting", "startup" false positive
         ],
     )
     def test_removed_terms_no_match(self, text):
@@ -101,9 +101,9 @@ class TestReviewCountRE:
             "1 review",
             "100리뷰",
             "50 Bewertungen",  # de
-            "30 Bewertung",    # de
-            "25 avis",         # fr
-            "10件",            # ja
+            "30 Bewertung",  # de
+            "25 avis",  # fr
+            "10件",  # ja
         ],
     )
     def test_matches(self, text):
@@ -122,12 +122,12 @@ class TestReporterRE:
             "홍길동 기자",
             "reporter: John",
             "편집: 김영희",
-            "記者: 田中",       # ja
-            "journaliste",     # fr
-            "rédacteur",       # fr
-            "Reporter: Max",   # de
-            "Journalist",      # de
-            "Redakteur",       # de
+            "記者: 田中",  # ja
+            "journaliste",  # fr
+            "rédacteur",  # fr
+            "Reporter: Max",  # de
+            "Journalist",  # de
+            "Redakteur",  # de
         ],
     )
     def test_matches(self, text):
@@ -148,13 +148,13 @@ class TestContactRE:
             "주소: 서울",
             "address: 123 Main St",
             "email: test@example.com",
-            "電話: 03-1234",    # ja
-            "住所: 東京都",     # ja
-            "téléphone",       # fr
-            "adresse",         # fr
-            "courriel",        # fr
-            "Telefon",         # de
-            "Kontakt",         # de
+            "電話: 03-1234",  # ja
+            "住所: 東京都",  # ja
+            "téléphone",  # fr
+            "adresse",  # fr
+            "courriel",  # fr
+            "Telefon",  # de
+            "Kontakt",  # de
         ],
     )
     def test_matches(self, text):
@@ -174,12 +174,12 @@ class TestBrandRE:
             "brand: Nike",
             "제조사: Apple",
             "manufacturer",
-            "ブランド: Nike",   # ja
-            "メーカー",        # ja
-            "marque: Zara",    # fr
-            "fabricant",       # fr
-            "Marke: Nike",     # de
-            "Hersteller",      # de
+            "ブランド: Nike",  # ja
+            "メーカー",  # ja
+            "marque: Zara",  # fr
+            "fabricant",  # fr
+            "Marke: Nike",  # de
+            "Hersteller",  # de
         ],
     )
     def test_matches(self, text):
@@ -201,14 +201,14 @@ class TestDepartmentRE:
             "ministry of health",
             "위원회",
             "국세청",
-            "省",              # ja
-            "庁",              # ja
-            "委員会",          # ja
-            "ministère",       # fr
-            "département",     # fr
-            "Ministerium",     # de
-            "Behörde",         # de
-            "Amt",             # de
+            "省",  # ja
+            "庁",  # ja
+            "委員会",  # ja
+            "ministère",  # fr
+            "département",  # fr
+            "Ministerium",  # de
+            "Behörde",  # de
+            "Amt",  # de
         ],
     )
     def test_matches(self, text):
@@ -243,12 +243,12 @@ class TestFeatureRE:
             "feature list",
             "기능",
             "특징",
-            "機能",            # ja
-            "特徴",            # ja
+            "機能",  # ja
+            "特徴",  # ja
             "fonctionnalité",  # fr
-            "caractéristique", # fr
-            "Funktion",        # de
-            "Merkmal",         # de
+            "caractéristique",  # fr
+            "Funktion",  # de
+            "Merkmal",  # de
         ],
     )
     def test_matches(self, text):
@@ -271,12 +271,12 @@ class TestPricingRE:
             "€49.99",
             "요금 안내",
             "가격 비교",
-            "価格",            # ja
-            "料金",            # ja
-            "prix: 49€",       # fr
-            "tarif",           # fr
-            "Preis: 49€",      # de
-            "Preise",          # de
+            "価格",  # ja
+            "料金",  # ja
+            "prix: 49€",  # fr
+            "tarif",  # fr
+            "Preis: 49€",  # de
+            "Preise",  # de
         ],
     )
     def test_matches(self, text):

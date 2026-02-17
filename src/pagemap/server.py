@@ -63,12 +63,12 @@ _PRIVATE_NETWORKS = [
     ipaddress.ip_network("192.168.0.0/16"),
     ipaddress.ip_network("127.0.0.0/8"),
     ipaddress.ip_network("169.254.0.0/16"),
-    ipaddress.ip_network("0.0.0.0/8"),       # "This" network
-    ipaddress.ip_network("100.64.0.0/10"),    # CGNAT (Carrier-grade NAT)
+    ipaddress.ip_network("0.0.0.0/8"),  # "This" network
+    ipaddress.ip_network("100.64.0.0/10"),  # CGNAT (Carrier-grade NAT)
     ipaddress.ip_network("::1/128"),
     ipaddress.ip_network("fc00::/7"),
     ipaddress.ip_network("fe80::/10"),
-    ipaddress.ip_network("::ffff:0:0/96"),    # IPv4-mapped IPv6
+    ipaddress.ip_network("::ffff:0:0/96"),  # IPv4-mapped IPv6
 ]
 
 # Safe keys for press_key action — navigation, editing, and common shortcuts only
@@ -339,7 +339,9 @@ async def get_page_map(url: str | None = None) -> str:
         if post_error:
             logger.warning(
                 "SSRF post-nav blocked: request=%s final_url=%s reason=%s",
-                request_id, final_url, post_error,
+                request_id,
+                final_url,
+                post_error,
             )
             return f"Error: Redirect led to blocked URL — {post_error}"
 
@@ -464,12 +466,12 @@ async def execute_action(ref: int, action: str = "click", value: str | None = No
                 _last_page_map = None
             logger.info(
                 "execute_action: request=%s navigation_detected old=%s new=%s",
-                request_id, current_page_map.url, new_url,
+                request_id,
+                current_page_map.url,
+                new_url,
             )
             result += (
-                f"\nCurrent URL: {new_url}"
-                f"\n\n⚠ Page navigated. Refs are now expired. "
-                f"Call get_page_map to refresh."
+                f"\nCurrent URL: {new_url}\n\n⚠ Page navigated. Refs are now expired. Call get_page_map to refresh."
             )
         else:
             result += f"\nCurrent URL: {new_url}"

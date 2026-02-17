@@ -357,7 +357,9 @@ async def detect_interactables_cdp(
                         attr_dict[attrs[i]] = attrs[i + 1]
 
                     name = sanitize_text(
-                        (attr_dict.get("aria-label", "") or attr_dict.get("title", "") or attr_dict.get("alt", "")).strip()
+                        (
+                            attr_dict.get("aria-label", "") or attr_dict.get("title", "") or attr_dict.get("alt", "")
+                        ).strip()
                     )
 
                     # Skip if already captured in AX tree

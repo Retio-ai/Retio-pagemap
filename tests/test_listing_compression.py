@@ -52,9 +52,7 @@ def _make_list_chunk(html: str, text: str = "", xpath: str = "/html/body/ul[1]")
     )
 
 
-def _make_text_chunk(
-    text: str, xpath: str = "/html/body/div[1]", parent_xpath: str = "/html/body"
-) -> HtmlChunk:
+def _make_text_chunk(text: str, xpath: str = "/html/body/div[1]", parent_xpath: str = "/html/body") -> HtmlChunk:
     return HtmlChunk(
         xpath=xpath,
         html=f"<div>{text}</div>",
@@ -240,34 +238,34 @@ class TestSerializeCards:
 class TestExtractPaginationInfo:
     # Korean patterns
     def test_korean_total(self):
-        html = '<div>총 500건</div>'
+        html = "<div>총 500건</div>"
         result = _extract_pagination_info(html)
         assert "총 500건" in result
         assert "페이지네이션" in result
 
     def test_korean_total_with_space(self):
-        html = '<div>총 1,234건</div>'
+        html = "<div>총 1,234건</div>"
         result = _extract_pagination_info(html)
         assert "1,234건" in result
 
     def test_korean_items(self):
-        html = '<div>120개의 상품</div>'
+        html = "<div>120개의 상품</div>"
         result = _extract_pagination_info(html)
         assert "120개의 상품" in result
 
     # English patterns
     def test_english_results(self):
-        html = '<div>1,523 results</div>'
+        html = "<div>1,523 results</div>"
         result = _extract_pagination_info(html)
         assert "1,523 results" in result
 
     def test_english_of_pattern(self):
-        html = '<div>1-20 of 1,523</div>'
+        html = "<div>1-20 of 1,523</div>"
         result = _extract_pagination_info(html)
         assert "1-20 of 1,523" in result
 
     def test_items_pattern(self):
-        html = '<div>500 items</div>'
+        html = "<div>500 items</div>"
         result = _extract_pagination_info(html)
         assert "500 items" in result
 
@@ -301,12 +299,12 @@ class TestExtractPaginationInfo:
         assert "다음 있음" in result
 
     def test_load_more(self):
-        html = '<button>Load more</button>'
+        html = "<button>Load more</button>"
         result = _extract_pagination_info(html)
         assert "다음 있음" in result
 
     def test_show_more(self):
-        html = '<button>Show more</button>'
+        html = "<button>Show more</button>"
         result = _extract_pagination_info(html)
         assert "다음 있음" in result
 
@@ -317,12 +315,12 @@ class TestExtractPaginationInfo:
 
     # Page X of Y patterns
     def test_page_of_pattern(self):
-        html = '<div>Page 2 of 50</div>'
+        html = "<div>Page 2 of 50</div>"
         result = _extract_pagination_info(html)
         assert "~50페이지" in result
 
     def test_korean_page_pattern(self):
-        html = '<div>페이지 3/20</div>'
+        html = "<div>페이지 3/20</div>"
         result = _extract_pagination_info(html)
         assert "~20페이지" in result
 
@@ -442,25 +440,27 @@ class TestBuildPrunedContextIntegration:
 
     def _make_listing_html(self) -> str:
         """Create a minimal listing HTML with product list and pagination."""
-        items_json = json.dumps({
-            "@type": "ItemList",
-            "itemListElement": [
-                {
-                    "@type": "ListItem",
-                    "position": i,
-                    "item": {
-                        "@type": "Product",
-                        "name": f"상품 {i}",
-                        "offers": {
-                            "@type": "Offer",
-                            "price": str(i * 10000),
-                            "priceCurrency": "KRW",
+        items_json = json.dumps(
+            {
+                "@type": "ItemList",
+                "itemListElement": [
+                    {
+                        "@type": "ListItem",
+                        "position": i,
+                        "item": {
+                            "@type": "Product",
+                            "name": f"상품 {i}",
+                            "offers": {
+                                "@type": "Offer",
+                                "price": str(i * 10000),
+                                "priceCurrency": "KRW",
+                            },
                         },
-                    },
-                }
-                for i in range(1, 6)
-            ],
-        })
+                    }
+                    for i in range(1, 6)
+                ],
+            }
+        )
         return f"""<!DOCTYPE html>
 <html><head>
 <script type="application/ld+json">{items_json}</script>
@@ -488,9 +488,7 @@ class TestBuildPrunedContextIntegration:
         from pagemap.pruned_context_builder import build_pruned_context
 
         html = self._make_listing_html()
-        context, token_count, metadata = build_pruned_context(
-            html, page_type="listing", schema_name="Product"
-        )
+        context, token_count, metadata = build_pruned_context(html, page_type="listing", schema_name="Product")
         # Should contain numbered product cards
         assert "1." in context
         assert "상품" in context
@@ -499,9 +497,7 @@ class TestBuildPrunedContextIntegration:
         from pagemap.pruned_context_builder import build_pruned_context
 
         html = self._make_listing_html()
-        context, token_count, metadata = build_pruned_context(
-            html, page_type="listing", schema_name="Product"
-        )
+        context, token_count, metadata = build_pruned_context(html, page_type="listing", schema_name="Product")
         assert "페이지네이션" in context
         assert "다음 있음" in context
 
@@ -509,9 +505,7 @@ class TestBuildPrunedContextIntegration:
         from pagemap.pruned_context_builder import build_pruned_context
 
         html = self._make_listing_html().replace("베스트셀러", "검색결과: 신발")
-        context, token_count, metadata = build_pruned_context(
-            html, page_type="search_results", schema_name="Product"
-        )
+        context, token_count, metadata = build_pruned_context(html, page_type="search_results", schema_name="Product")
         assert "1." in context
         assert "상품" in context
 
@@ -519,9 +513,7 @@ class TestBuildPrunedContextIntegration:
         from pagemap.pruned_context_builder import build_pruned_context
 
         html = self._make_listing_html().replace("베스트셀러", "검색결과: 신발")
-        context, token_count, metadata = build_pruned_context(
-            html, page_type="search_results", schema_name="Product"
-        )
+        context, token_count, metadata = build_pruned_context(html, page_type="search_results", schema_name="Product")
         assert "페이지네이션" in context
 
 
@@ -549,9 +541,7 @@ class TestProductDetailRegression:
 <div>사이즈: 250 255 260</div>
 </main>
 </body></html>"""
-        context, token_count, metadata = build_pruned_context(
-            html, page_type="product_detail", schema_name="Product"
-        )
+        context, token_count, metadata = build_pruned_context(html, page_type="product_detail", schema_name="Product")
         # Should have metadata-based extraction
         assert "Nike Air Max 90" in context
         assert "189,000" in context

@@ -47,10 +47,12 @@ _PRICE_RE = re.compile(
 _NUMERIC_RE = re.compile(r"\d+")
 _DATE_RE = re.compile(r"\d{4}[-./]\d{1,2}[-./]\d{1,2}")
 _RATING_RE = re.compile(
-    r"(?:" + _terms_pattern(RATING_TERMS) + r"|\d\.\d)", re.IGNORECASE,
+    r"(?:" + _terms_pattern(RATING_TERMS) + r"|\d\.\d)",
+    re.IGNORECASE,
 )
 _REVIEW_COUNT_RE = re.compile(
-    r"\d+\s*(?:" + _terms_pattern(REVIEW_COUNT_TERMS) + r")", re.IGNORECASE,
+    r"\d+\s*(?:" + _terms_pattern(REVIEW_COUNT_TERMS) + r")",
+    re.IGNORECASE,
 )
 _REPORTER_RE = re.compile(_terms_pattern(REPORTER_TERMS), re.IGNORECASE)
 _CONTACT_RE = re.compile(_terms_pattern(CONTACT_TERMS), re.IGNORECASE)
@@ -59,9 +61,7 @@ _BRAND_RE = re.compile(_terms_pattern(BRAND_TERMS), re.IGNORECASE)
 # DEPARTMENT_RE: special handling for Korean "원" to avoid false positives
 # with prices like "189,000원". Lookbehind/lookahead excludes digit context.
 _DEPARTMENT_RE = re.compile(
-    r"(?:"
-    + "|".join(re.escape(t) for t in DEPARTMENT_TERMS if t != "원")
-    + r"|(?<![,\d])원(?![,\d]))",
+    r"(?:" + "|".join(re.escape(t) for t in DEPARTMENT_TERMS if t != "원") + r"|(?<![,\d])원(?![,\d]))",
     re.IGNORECASE,
 )
 _FEATURE_RE = re.compile(_terms_pattern(FEATURE_TERMS), re.IGNORECASE)

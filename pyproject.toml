@@ -4,12 +4,12 @@ build-backend = "hatchling.build"
 
 [project]
 name = "retio-pagemap"
-version = "0.1.0"
+version = "0.1.2"
 description = "Structured web page representation for AI agents — 97% HTML token reduction"
 requires-python = ">=3.11"
 license = "MIT"
 authors = [{name = "Retio AI"}]
-readme = "README.md"
+readme = "README_PUBLIC.md"
 keywords = [
     "web-scraping",
     "ai-agent",
@@ -109,14 +109,20 @@ exclude = [
     "research/",
     "results/",
     "scripts/",
+    "todo/",
     ".github/",
     ".claude/",
-    "*.pdf",
-    "uv.lock",
+    ".playwright-mcp/",
+    ".mcpregistry_*",
+    ".env",
+    ".env.example",
+    ".mcp.json",
+    ".mcp.json.example",
+    "README.md",
     "README_DRAFT.md",
     "ROADMAP.md",
-    ".env.example",
-    ".mcp.json.example",
+    "*.pdf",
+    "uv.lock",
 ]
 
 [tool.ruff]

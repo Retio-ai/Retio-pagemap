@@ -250,10 +250,16 @@ def _extract_interactables_from_html(raw_html: str) -> list[Interactable]:
             name = re.sub(r"\s+", " ", name)
         if not name or len(name) > 100:
             continue
-        interactables.append(Interactable(
-            ref=ref, role="button", name=name, affordance="click",
-            region="main", tier=2,
-        ))
+        interactables.append(
+            Interactable(
+                ref=ref,
+                role="button",
+                name=name,
+                affordance="click",
+                region="main",
+                tier=2,
+            )
+        )
         ref += 1
 
     # --- Links with CTA text ---
@@ -274,10 +280,16 @@ def _extract_interactables_from_html(raw_html: str) -> list[Interactable]:
             continue
         # Only keep CTA-like links
         if _CTA_RE.search(name) or _CTA_RE.search(attrs_str):
-            interactables.append(Interactable(
-                ref=ref, role="link", name=name, affordance="click",
-                region="main", tier=2,
-            ))
+            interactables.append(
+                Interactable(
+                    ref=ref,
+                    role="link",
+                    name=name,
+                    affordance="click",
+                    region="main",
+                    tier=2,
+                )
+            )
             ref += 1
 
     # --- Inputs (search, text) ---
@@ -296,10 +308,16 @@ def _extract_interactables_from_html(raw_html: str) -> list[Interactable]:
         role = "searchbox" if input_type == "search" or "search" in name.lower() else "textbox"
         if not name:
             name = input_type
-        interactables.append(Interactable(
-            ref=ref, role=role, name=name, affordance="type",
-            region="main", tier=2,
-        ))
+        interactables.append(
+            Interactable(
+                ref=ref,
+                role=role,
+                name=name,
+                affordance="type",
+                region="main",
+                tier=2,
+            )
+        )
         ref += 1
 
     # --- Selects ---
@@ -317,10 +335,17 @@ def _extract_interactables_from_html(raw_html: str) -> list[Interactable]:
                 break
         options = re.findall(r"<option[^>]*>(.*?)</option>", inner, re.IGNORECASE | re.DOTALL)
         options = [re.sub(r"<[^>]+>", "", o).strip() for o in options if o.strip()]
-        interactables.append(Interactable(
-            ref=ref, role="combobox", name=name or "select",
-            affordance="select", region="main", tier=2, options=options[:10],
-        ))
+        interactables.append(
+            Interactable(
+                ref=ref,
+                role="combobox",
+                name=name or "select",
+                affordance="select",
+                region="main",
+                tier=2,
+                options=options[:10],
+            )
+        )
         ref += 1
 
     # Deduplicate by (role, name)

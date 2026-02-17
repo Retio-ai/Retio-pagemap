@@ -169,10 +169,10 @@ class TestAffordanceMapping:
     def test_all_affordances_are_valid_actions(self):
         """모든 affordance가 서버에서 실행 가능한 액션인지 검증."""
         from pagemap.server import VALID_ACTIONS
+
         for role, affordance in AFFORDANCE_MAP.items():
             assert affordance in VALID_ACTIONS, (
-                f"Role '{role}' has affordance '{affordance}' "
-                f"which is not in VALID_ACTIONS: {VALID_ACTIONS}"
+                f"Role '{role}' has affordance '{affordance}' which is not in VALID_ACTIONS: {VALID_ACTIONS}"
             )
 
     def test_all_interactive_roles_have_affordance(self):

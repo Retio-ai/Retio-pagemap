@@ -13,7 +13,6 @@ import pytest
 
 from pagemap.browser_session import BrowserSession
 
-
 # ── is_alive() ────────────────────────────────────────────────────
 
 
@@ -60,9 +59,7 @@ class TestIsAlive:
         session._browser = MagicMock()
         session._browser.is_connected.return_value = True
         session._page = AsyncMock()
-        session._page.evaluate = AsyncMock(
-            side_effect=Exception("Target closed")
-        )
+        session._page.evaluate = AsyncMock(side_effect=Exception("Target closed"))
 
         assert await session.is_alive() is False
 
@@ -72,9 +69,7 @@ class TestIsAlive:
         session._browser = MagicMock()
         session._browser.is_connected.return_value = True
         session._page = AsyncMock()
-        session._page.evaluate = AsyncMock(
-            side_effect=ConnectionError("pipe broken")
-        )
+        session._page.evaluate = AsyncMock(side_effect=ConnectionError("pipe broken"))
 
         assert await session.is_alive() is False
 
@@ -115,9 +110,7 @@ class TestStopHardening:
     async def test_suppresses_browser_close_error(self):
         session = BrowserSession()
         session._browser = AsyncMock()
-        session._browser.close = AsyncMock(
-            side_effect=Exception("TargetClosedError")
-        )
+        session._browser.close = AsyncMock(side_effect=Exception("TargetClosedError"))
         session._playwright = AsyncMock()
         session._playwright.stop = AsyncMock()
 
@@ -219,9 +212,11 @@ class TestGetSessionRecovery:
         new_session = AsyncMock(spec=BrowserSession)
         new_session.start = AsyncMock(side_effect=RuntimeError("launch failed"))
 
-        with patch.object(srv, "BrowserSession", return_value=new_session):
-            with pytest.raises(RuntimeError, match="launch failed"):
-                await srv._get_session()
+        with (
+            patch.object(srv, "BrowserSession", return_value=new_session),
+            pytest.raises(RuntimeError, match="launch failed"),
+        ):
+            await srv._get_session()
 
         # cleanup
         srv._session = None

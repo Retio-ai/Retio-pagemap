@@ -1,3 +1,5 @@
+<!-- mcp-name: io.github.Retio-ai/pagemap -->
+
 # PageMap
 
 **The browsing MCP server that fits in your context window.**
@@ -6,6 +8,7 @@ Compresses ~100K-token HTML into a 2-5K-token structured map while preserving ev
 
 > *"Give your agent eyes and hands on the web."*
 
+[![CI](https://github.com/Retio-ai/Retio-pagemap/actions/workflows/ci.yml/badge.svg)](https://github.com/Retio-ai/Retio-pagemap/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/retio-pagemap)](https://pypi.org/project/retio-pagemap/)
 [![Python](https://img.shields.io/pypi/pyversions/retio-pagemap)](https://pypi.org/project/retio-pagemap/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -202,6 +205,10 @@ page_map = build_page_map_offline(html, url="https://example.com/product/123")
 
 - Python 3.11+
 - Chromium (`playwright install chromium`)
+
+## Community
+
+Have a question or idea? Join the conversation in [GitHub Discussions](https://github.com/Retio-ai/Retio-pagemap/discussions).
 
 ## License
 

@@ -26,8 +26,7 @@ def _require_cli_deps() -> None:
         from tabulate import tabulate  # noqa: F401
     except ImportError as e:
         print(
-            f"Missing CLI dependency: {e.name}\n"
-            f"Install with: pip install retio-pagemap[cli]",
+            f"Missing CLI dependency: {e.name}\nInstall with: pip install retio-pagemap[cli]",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -506,8 +505,12 @@ def _run_static_benchmark(args: argparse.Namespace, data_dir: Path) -> None:
 
             result = BenchmarkResult(task_results=existing, conditions=conditions)
             _benchmark_postflight(
-                result, tasks, generate_full_report, save_results_json,
-                result_path, report_path,
+                result,
+                tasks,
+                generate_full_report,
+                save_results_json,
+                result_path,
+                report_path,
             )
             return
 
@@ -540,8 +543,12 @@ def _run_static_benchmark(args: argparse.Namespace, data_dir: Path) -> None:
     )
 
     _benchmark_postflight(
-        result, tasks, generate_full_report, save_results_json,
-        result_path, report_path,
+        result,
+        tasks,
+        generate_full_report,
+        save_results_json,
+        result_path,
+        report_path,
     )
 
 
@@ -570,8 +577,12 @@ def _run_live_benchmark(args: argparse.Namespace, data_dir: Path) -> None:
             print(f"All {len(tasks)} tasks completed. Use --force to re-run.")
             result = LiveBenchmarkResult(task_results=existing)
             _benchmark_postflight(
-                result, tasks, generate_live_report, save_live_results_json,
-                result_path, report_path,
+                result,
+                tasks,
+                generate_live_report,
+                save_live_results_json,
+                result_path,
+                report_path,
             )
             return
 
@@ -586,8 +597,12 @@ def _run_live_benchmark(args: argparse.Namespace, data_dir: Path) -> None:
     )
 
     report = _benchmark_postflight(
-        result, tasks, generate_live_report, save_live_results_json,
-        result_path, report_path,
+        result,
+        tasks,
+        generate_live_report,
+        save_live_results_json,
+        result_path,
+        report_path,
     )
 
     # Combined judgment (use static results if available)
@@ -633,8 +648,12 @@ def _run_sim_benchmark(args: argparse.Namespace, data_dir: Path, mode: str) -> N
             print(f"All {total} tasks completed. Use --force to re-run.")
             result = LiveBenchmarkResult(task_results=existing)
             _benchmark_postflight(
-                result, tasks, generate_live_report, save_live_results_json,
-                result_path, data_dir / f"{mode}_benchmark_report.md",
+                result,
+                tasks,
+                generate_live_report,
+                save_live_results_json,
+                result_path,
+                data_dir / f"{mode}_benchmark_report.md",
             )
             return
 
@@ -653,14 +672,20 @@ def _run_sim_benchmark(args: argparse.Namespace, data_dir: Path, mode: str) -> N
 
     if mode == "sim_live":
         from .benchmark.runner import run_sim_live_benchmark
+
         result = run_sim_live_benchmark(**runner_kwargs)
     else:
         from .benchmark.runner import run_sim_static_benchmark
+
         result = asyncio.run(run_sim_static_benchmark(**runner_kwargs))
 
     _benchmark_postflight(
-        result, tasks, generate_live_report, save_live_results_json,
-        result_path, data_dir / f"{mode}_benchmark_report.md",
+        result,
+        tasks,
+        generate_live_report,
+        save_live_results_json,
+        result_path,
+        data_dir / f"{mode}_benchmark_report.md",
     )
 
 
@@ -722,7 +747,9 @@ def main() -> None:
         p_bench = subparsers.add_parser("benchmark", help="Run benchmark")
         p_bench.add_argument("--static", action="store_true")
         p_bench.add_argument("--live", action="store_true")
-        p_bench.add_argument("--sim-live", action="store_true", help="Run simulator-based shopping simulation benchmark")
+        p_bench.add_argument(
+            "--sim-live", action="store_true", help="Run simulator-based shopping simulation benchmark"
+        )
         p_bench.add_argument(
             "--sim-static", action="store_true", help="Run static benchmark on iOS Simulator collected data"
         )

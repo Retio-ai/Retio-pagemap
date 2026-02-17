@@ -166,17 +166,17 @@ class TestPaginationI18n:
     @pytest.mark.parametrize(
         "html",
         [
-            '<a>次へ</a>',
-            '<a>次のページ</a>',
-            '<button>もっと見る</button>',
-            '<button>さらに表示</button>',
-            '<a>Suivant</a>',
-            '<a>Page suivante</a>',
-            '<button>Voir plus</button>',
-            '<a>Weiter</a>',
-            '<a>Nächste Seite</a>',
-            '<button>Mehr laden</button>',
-            '<button>Mehr anzeigen</button>',
+            "<a>次へ</a>",
+            "<a>次のページ</a>",
+            "<button>もっと見る</button>",
+            "<button>さらに表示</button>",
+            "<a>Suivant</a>",
+            "<a>Page suivante</a>",
+            "<button>Voir plus</button>",
+            "<a>Weiter</a>",
+            "<a>Nächste Seite</a>",
+            "<button>Mehr laden</button>",
+            "<button>Mehr anzeigen</button>",
         ],
     )
     def test_multilingual_next_detected(self, html):
@@ -187,10 +187,10 @@ class TestPaginationI18n:
     @pytest.mark.parametrize(
         "html,expected_fragment",
         [
-            ('<div>120件の商品</div>', "120件の商品"),
-            ('<div>500 résultats</div>', "500 résultats"),
-            ('<div>350 Ergebnisse</div>', "350 Ergebnisse"),
-            ('<div>200 Produkte</div>', "200 Produkte"),
+            ("<div>120件の商品</div>", "120件の商品"),
+            ("<div>500 résultats</div>", "500 résultats"),
+            ("<div>350 Ergebnisse</div>", "350 Ergebnisse"),
+            ("<div>200 Produkte</div>", "200 Produkte"),
         ],
     )
     def test_multilingual_total_count(self, html, expected_fragment):
@@ -199,12 +199,12 @@ class TestPaginationI18n:
 
     # Page X of Y — multilingual
     def test_page_of_ja(self):
-        html = '<div>3/20ページ</div>'
+        html = "<div>3/20ページ</div>"
         result = _extract_pagination_info(html)
         assert "20" in result
 
     def test_seite_von_de(self):
-        html = '<div>Seite 3 von 20</div>'
+        html = "<div>Seite 3 von 20</div>"
         result = _extract_pagination_info(html)
         assert "20" in result
 
@@ -216,13 +216,15 @@ class TestPaginationI18n:
 
 class TestBuildPrunedContextLocale:
     def _make_product_html(self) -> str:
-        json_ld = json.dumps({
-            "@type": "Product",
-            "name": "Nike Air Max 90",
-            "offers": {"@type": "Offer", "price": "189000", "priceCurrency": "KRW"},
-            "brand": {"@type": "Brand", "name": "Nike"},
-            "aggregateRating": {"@type": "AggregateRating", "ratingValue": "4.5", "reviewCount": "42"},
-        })
+        json_ld = json.dumps(
+            {
+                "@type": "Product",
+                "name": "Nike Air Max 90",
+                "offers": {"@type": "Offer", "price": "189000", "priceCurrency": "KRW"},
+                "brand": {"@type": "Brand", "name": "Nike"},
+                "aggregateRating": {"@type": "AggregateRating", "ratingValue": "4.5", "reviewCount": "42"},
+            }
+        )
         return f"""<!DOCTYPE html>
 <html><head>
 <script type="application/ld+json">{json_ld}</script>
@@ -241,52 +243,40 @@ class TestBuildPrunedContextLocale:
 
     def test_locale_en(self):
         html = self._make_product_html()
-        context, _, _ = build_pruned_context(
-            html, page_type="product_detail", schema_name="Product", locale="en"
-        )
+        context, _, _ = build_pruned_context(html, page_type="product_detail", schema_name="Product", locale="en")
         assert "Title:" in context
         assert "Rating:" in context
         assert "Brand:" in context
 
     def test_locale_ja(self):
         html = self._make_product_html()
-        context, _, _ = build_pruned_context(
-            html, page_type="product_detail", schema_name="Product", locale="ja"
-        )
+        context, _, _ = build_pruned_context(html, page_type="product_detail", schema_name="Product", locale="ja")
         assert "タイトル:" in context
         assert "評価:" in context
         assert "ブランド:" in context
 
     def test_locale_fr(self):
         html = self._make_product_html()
-        context, _, _ = build_pruned_context(
-            html, page_type="product_detail", schema_name="Product", locale="fr"
-        )
+        context, _, _ = build_pruned_context(html, page_type="product_detail", schema_name="Product", locale="fr")
         assert "Titre:" in context
         assert "Note:" in context
         assert "Marque:" in context
 
     def test_locale_de(self):
         html = self._make_product_html()
-        context, _, _ = build_pruned_context(
-            html, page_type="product_detail", schema_name="Product", locale="de"
-        )
+        context, _, _ = build_pruned_context(html, page_type="product_detail", schema_name="Product", locale="de")
         assert "Titel:" in context
         assert "Bewertung:" in context
         assert "Marke:" in context
 
     def test_review_template_en(self):
         html = self._make_product_html()
-        context, _, _ = build_pruned_context(
-            html, page_type="product_detail", schema_name="Product", locale="en"
-        )
+        context, _, _ = build_pruned_context(html, page_type="product_detail", schema_name="Product", locale="en")
         assert "(42 reviews)" in context
 
     def test_review_template_ja(self):
         html = self._make_product_html()
-        context, _, _ = build_pruned_context(
-            html, page_type="product_detail", schema_name="Product", locale="ja"
-        )
+        context, _, _ = build_pruned_context(html, page_type="product_detail", schema_name="Product", locale="ja")
         assert "(42件のレビュー)" in context
 
     def test_article_title_locale(self):
@@ -295,26 +285,26 @@ class TestBuildPrunedContextLocale:
         <p>2026-02-15</p>
         <p>The stock market saw significant movement today following the announcement of new trade policies.</p>
         </main></body></html>"""
-        context, _, _ = build_pruned_context(
-            html, page_type="article", schema_name="NewsArticle", locale="en"
-        )
+        context, _, _ = build_pruned_context(html, page_type="article", schema_name="NewsArticle", locale="en")
         assert "Title:" in context
 
     def test_listing_pagination_locale(self):
-        items_json = json.dumps({
-            "@type": "ItemList",
-            "itemListElement": [
-                {
-                    "@type": "ListItem",
-                    "position": 1,
-                    "item": {
-                        "@type": "Product",
-                        "name": "Product 1",
-                        "offers": {"@type": "Offer", "price": "29.99", "priceCurrency": "USD"},
-                    },
-                }
-            ],
-        })
+        items_json = json.dumps(
+            {
+                "@type": "ItemList",
+                "itemListElement": [
+                    {
+                        "@type": "ListItem",
+                        "position": 1,
+                        "item": {
+                            "@type": "Product",
+                            "name": "Product 1",
+                            "offers": {"@type": "Offer", "price": "29.99", "priceCurrency": "USD"},
+                        },
+                    }
+                ],
+            }
+        )
         html = f"""<!DOCTYPE html>
 <html><head>
 <script type="application/ld+json">{items_json}</script>
@@ -323,8 +313,6 @@ class TestBuildPrunedContextLocale:
 <a href="?page=10">10</a>
 <a>Next</a>
 </main></body></html>"""
-        context, _, _ = build_pruned_context(
-            html, page_type="listing", schema_name="Product", locale="en"
-        )
+        context, _, _ = build_pruned_context(html, page_type="listing", schema_name="Product", locale="en")
         assert "Pagination" in context
         assert "Next available" in context

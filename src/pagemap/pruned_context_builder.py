@@ -47,8 +47,7 @@ PRICE_PATTERN = re.compile(
     r"|£\s*[\d,]+(?:\.\d{2})?"
     r"|€\s*[\d,]+(?:\.\d{2})?"
     r"|\$\d+(?:\.\d{2})?"
-    r"|\d{2,3}(?:,\d{3})+)"
-    + r"|" + "|".join(re.escape(t) for t in PRICE_LABEL_TERMS),
+    r"|\d{2,3}(?:,\d{3})+)" + r"|" + "|".join(re.escape(t) for t in PRICE_LABEL_TERMS),
 )
 RATING_PATTERN = re.compile(
     r"(?:★|⭐|평점|별점|\d+\.\d+\s*[/점]|\d+(?:\.\d+)?점|리뷰\s*\d+"
@@ -369,7 +368,9 @@ _next_terms = NEXT_BUTTON_TERMS + LOAD_MORE_TERMS
 _HAS_NEXT_RE = re.compile(
     r"(?:"
     + "|".join(r">" + re.escape(t) + r"<" for t in _next_terms)
-    + r"|aria-label=[\"'](?:" + "|".join(re.escape(t) for t in _next_terms) + r")[\"']"
+    + r"|aria-label=[\"'](?:"
+    + "|".join(re.escape(t) for t in _next_terms)
+    + r")[\"']"
     + r"|class=[\"'][^\"']*next[^\"']*[\"']"
     + r")",
     re.IGNORECASE,
@@ -804,9 +805,7 @@ def build_pruned_context(
             pruned_html, max_tokens, chunks=selected_chunks, metadata=metadata, lc=lc
         )
     elif page_type == "listing":
-        context = _compress_for_listing(
-            pruned_html, max_tokens, chunks=selected_chunks, metadata=metadata, lc=lc
-        )
+        context = _compress_for_listing(pruned_html, max_tokens, chunks=selected_chunks, metadata=metadata, lc=lc)
     elif page_type in ("article", "news"):
         context = _compress_for_article(pruned_html, max_tokens, lc=lc)
     else:
