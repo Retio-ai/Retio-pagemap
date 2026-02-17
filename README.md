@@ -28,7 +28,7 @@ PageMap gives your agent a **compressed, actionable** view of any web page:
 
 > Benchmarked across 9 e-commerce sites, 66 tasks. PageMap uses **5.6x fewer tokens** while being the only tool that supports **interaction**.
 >
-> \* Playwright MCP figures are from 62-task static benchmark using pre-collected snapshots. SPA sites with empty snapshots lower all snapshot-based scores. See [benchmark report](src/pagemap/data/benchmark_report.md) for details.
+> \* Playwright MCP figures are from 62-task static benchmark using pre-collected snapshots. SPA sites with empty snapshots lower all snapshot-based scores.
 
 ---
 
