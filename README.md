@@ -23,10 +23,12 @@ PageMap gives your agent a **compressed, actionable** view of any web page:
 | **Tokens / page** | **2-5K** | 50-540K | 10-50K | 10-50K |
 | **Interaction** | **click / type / select** | Raw tree parsing | Read-only | Read-only |
 | **Multi-page sessions** | **Unlimited** | Breaks at 2-3 pages | N/A | N/A |
-| **Task success (66 tasks)** | **95.2%** | — | 60.9% | 61.2% |
-| **Cost / 62 tasks** | **$0.58** | — | $2.66 | $1.54 |
+| **Task success (66 tasks)** | **95.2%** | 39.7% \* | 60.9% | 61.2% |
+| **Cost / 66 tasks** | **$0.58** | $6.71 \* | $2.66 | $1.54 |
 
 > Benchmarked across 9 e-commerce sites, 66 tasks. PageMap uses **5.6x fewer tokens** while being the only tool that supports **interaction**.
+>
+> \* Playwright MCP figures are from 62-task static benchmark using pre-collected snapshots. SPA sites with empty snapshots lower all snapshot-based scores. See [benchmark report](src/pagemap/data/benchmark_report.md) for details.
 
 ---
 
@@ -88,7 +90,7 @@ Type: product_detail
 <span>2,341 reviews</span>
 
 ## Images
-[1] https://cdn.example.com/air-max-90-1.jpg
+  [1] https://cdn.example.com/air-max-90-1.jpg
 ```
 
 An agent reads the page and executes `execute_action(ref=3, action="select", value="260")` to select a size — all in one context window.
@@ -145,7 +147,54 @@ PageMap treats all web content as **untrusted input**:
 
 Built-in i18n for price, review, rating, and pagination extraction:
 
-Korean, English, Japanese, French, German
+| Language | Locale | Price formats | Keywords |
+|----------|:------:|---------------|----------|
+| Korean | `ko` | 원, ₩ | 리뷰, 평점, 다음, 더보기 |
+| English | `en` | $, £, € | reviews, rating, next, load more |
+| Japanese | `ja` | ¥, 円 | レビュー, 評価, 次へ |
+| French | `fr` | €, CHF | avis, note, suivant |
+| German | `de` | €, CHF | Bewertungen, Bewertung, weiter |
+
+Locale is auto-detected from the URL domain.
+
+---
+
+## Python API
+
+```python
+import asyncio
+from pagemap.browser_session import BrowserSession
+from pagemap.page_map_builder import build_page_map_live
+from pagemap.serializer import to_agent_prompt, to_json
+
+async def main():
+    async with BrowserSession() as session:
+        page_map = await build_page_map_live(session, "https://example.com/product/123")
+
+        # Agent-optimized text format
+        print(to_agent_prompt(page_map))
+
+        # Structured JSON
+        print(to_json(page_map))
+
+        # Direct field access
+        print(page_map.page_type)        # "product_detail"
+        print(page_map.interactables)    # [Interactable(ref=1, role="button", ...)]
+        print(page_map.pruned_context)   # compressed HTML
+        print(page_map.images)           # ["https://cdn.example.com/img.jpg"]
+        print(page_map.metadata)         # {"name": "...", "price": "..."}
+
+asyncio.run(main())
+```
+
+For offline processing (no browser):
+
+```python
+from pagemap.page_map_builder import build_page_map_offline
+
+html = open("page.html").read()
+page_map = build_page_map_offline(html, url="https://example.com/product/123")
+```
 
 ---
 

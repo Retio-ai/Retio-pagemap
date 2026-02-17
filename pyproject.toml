@@ -78,6 +78,7 @@ Issues = "https://github.com/Retio-ai/pagemap/issues"
 
 [project.scripts]
 pagemap = "pagemap.cli:main"
+retio-pagemap = "pagemap.server:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/pagemap"]
