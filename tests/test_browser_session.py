@@ -662,8 +662,6 @@ class TestScrollMethods:
 
     @pytest.mark.asyncio
     async def test_scroll_calls_evaluate_with_params(self):
-        from pagemap.browser_session import _SCROLL_POSITION_JS
-
         session = BrowserSession.__new__(BrowserSession)
         mock_page = AsyncMock()
         pos_result = {"scrollX": 0, "scrollY": 500}
@@ -671,7 +669,7 @@ class TestScrollMethods:
         mock_page.wait_for_timeout = AsyncMock()
         session._page = mock_page
 
-        result = await session.scroll(delta_x=0, delta_y=800)
+        await session.scroll(delta_x=0, delta_y=800)
 
         # First call: scrollBy, second call: position query
         assert mock_page.evaluate.call_count == 2
