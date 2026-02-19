@@ -17,6 +17,7 @@ from playwright.async_api import (
     Browser,
     BrowserContext,
     CDPSession,
+    Dialog,
     Page,
     Playwright,
     Route,
@@ -40,6 +41,19 @@ BLOCKED_URL_SCHEMES = (
     "data:",
 )
 DEFAULT_LOCALE = "ko-KR"
+
+_MAX_DIALOG_BUFFER = 10
+
+
+@dataclass(frozen=True)
+class DialogInfo:
+    """Record of a JS dialog that was auto-handled."""
+
+    dialog_type: str  # "alert", "confirm", "prompt", "beforeunload"
+    message: str
+    dismissed: bool  # True=dismiss, False=accept
+
+
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -125,6 +139,8 @@ class BrowserSession:
         self._context: BrowserContext | None = None
         self._page: Page | None = None
         self._cdp_session: CDPSession | None = None
+        self._pending_dialogs: list[DialogInfo] = []
+        self._pending_new_page: Page | None = None
 
     @property
     def page(self) -> Page:
@@ -168,8 +184,7 @@ class BrowserSession:
                 "--disable-sync",
                 "--disable-gpu",
                 "--no-first-run",
-                # S3: Popup/new-window blocking
-                "--block-new-web-contents",
+                # Popups handled by context.on("page") → auto-switch
                 # S3: WebRTC IP leak prevention
                 "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
                 # S3: Disable dangerous features (single flag — last wins)
@@ -203,6 +218,11 @@ class BrowserSession:
             # S3: Prevent file downloads
             accept_downloads=False,
         )
+        # Auto-handle JS dialogs (alert/confirm/prompt/beforeunload)
+        self._context.on("dialog", self._on_dialog)
+        # Handle popups/new tabs: auto-track for consume_new_page()
+        self._context.on("page", self._on_new_page)
+
         self._page = await self._context.new_page()
 
         # S3: Block dangerous URL schemes at context level (covers all pages)
@@ -281,6 +301,8 @@ class BrowserSession:
             self._playwright = None
         self._page = None
         self._context = None
+        self._pending_dialogs = []
+        self._pending_new_page = None
         logger.info("Browser session stopped")
 
     async def __aenter__(self) -> BrowserSession:
@@ -289,6 +311,76 @@ class BrowserSession:
 
     async def __aexit__(self, *args) -> None:
         await self.stop()
+
+    async def _on_dialog(self, dialog: Dialog) -> None:
+        """Auto-handle JS dialogs with guaranteed accept/dismiss.
+
+        Policy: alert/beforeunload → accept, confirm/prompt → dismiss.
+        CRITICAL: Must ALWAYS call accept() or dismiss() — failure freezes page.
+        """
+        try:
+            dtype = dialog.type
+            message = dialog.message
+            if dtype in ("alert", "beforeunload"):
+                await dialog.accept()
+                dismissed = False
+            else:  # confirm, prompt
+                await dialog.dismiss()
+                dismissed = True
+            info = DialogInfo(dialog_type=dtype, message=message, dismissed=dismissed)
+            self._pending_dialogs.append(info)
+            if len(self._pending_dialogs) > _MAX_DIALOG_BUFFER:
+                self._pending_dialogs = self._pending_dialogs[-_MAX_DIALOG_BUFFER:]
+            action_word = "dismissed" if dismissed else "accepted"
+            logger.info(
+                "JS dialog auto-handled: type=%s action=%s message=%.100s",
+                dtype,
+                action_word,
+                message,
+            )
+        except Exception:
+            logger.warning("JS dialog handler failed, attempting dismiss fallback", exc_info=True)
+            with suppress(Exception):
+                await dialog.dismiss()
+
+    def drain_dialogs(self) -> list[DialogInfo]:
+        """Return and clear pending dialog records (atomic, no lock needed)."""
+        dialogs = self._pending_dialogs
+        self._pending_dialogs = []
+        return dialogs
+
+    async def _on_new_page(self, page: Page) -> None:
+        """Handle new page/popup opened in browser context.
+
+        Stores the latest popup for consumption by consume_new_page().
+        Closes any previously unconsumed popup (single-page model).
+        """
+        old = self._pending_new_page
+        self._pending_new_page = page
+        if old is not None and not old.is_closed():
+            with suppress(Exception):
+                await old.close()
+            logger.debug("Unclaimed popup closed: %s", old.url)
+        logger.info("New page/popup detected: %s", page.url)
+
+    def consume_new_page(self) -> Page | None:
+        """Return and clear the pending new page (if any)."""
+        page = self._pending_new_page
+        self._pending_new_page = None
+        return page
+
+    async def switch_page(self, new_page: Page) -> None:
+        """Switch to a new page, detaching CDP and closing the old page."""
+        old_page = self._page
+        if self._cdp_session is not None:
+            with suppress(Exception):
+                await self._cdp_session.detach()
+            self._cdp_session = None
+        self._page = new_page
+        if old_page is not None and not old_page.is_closed():
+            with suppress(Exception):
+                await old_page.close()
+        logger.info("Switched to new page: %s", new_page.url)
 
     async def navigate(self, url: str) -> None:
         """Navigate to a URL and wait for load."""
@@ -371,6 +463,44 @@ class BrowserSession:
     async def screenshot(self, path: str | Path | None = None) -> bytes:
         """Take a screenshot."""
         return await self.page.screenshot(path=str(path) if path else None)
+
+    async def go_back(self, wait_until: str = "load", timeout_ms: int = 30000) -> str | None:
+        """Navigate back in browser history.
+
+        Returns the new URL after navigation, or None if no history entry.
+        """
+        response = await self.page.go_back(wait_until=wait_until, timeout=timeout_ms)
+        if response is None:
+            # No previous page in history
+            return None
+        await self.page.wait_for_timeout(1000)  # settle for dynamic content
+        return self.page.url
+
+    async def get_scroll_position(self) -> dict:
+        """Get current scroll position and page dimensions."""
+        return await self.page.evaluate(_SCROLL_POSITION_JS)
+
+    async def scroll(self, delta_x: int = 0, delta_y: int = 0) -> dict:
+        """Scroll the page by the given deltas.
+
+        Uses parameterized evaluate (not f-string) for injection safety.
+        Returns scroll position after scrolling.
+        """
+        await self.page.evaluate("([dx, dy]) => window.scrollBy(dx, dy)", [delta_x, delta_y])
+        await self.page.wait_for_timeout(500)  # lazy-load settle
+        return await self.page.evaluate(_SCROLL_POSITION_JS)
+
+
+# ── Scroll position JS (static, no interpolation) ──────────────────
+
+_SCROLL_POSITION_JS = """() => ({
+    scrollX: Math.round(window.scrollX),
+    scrollY: Math.round(window.scrollY),
+    scrollWidth: document.documentElement.scrollWidth,
+    scrollHeight: document.documentElement.scrollHeight,
+    clientWidth: document.documentElement.clientWidth,
+    clientHeight: document.documentElement.clientHeight,
+})"""
 
 
 @asynccontextmanager

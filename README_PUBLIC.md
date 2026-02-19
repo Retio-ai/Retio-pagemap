@@ -24,7 +24,7 @@ PageMap gives your agent a **compressed, actionable** view of any web page:
 | | PageMap | Playwright MCP | Firecrawl | Jina Reader |
 |--|:------:|:---------:|:-----------:|:--------:|
 | **Tokens / page** | **2-5K** | 50-540K | 10-50K | 10-50K |
-| **Interaction** | **click / type / select** | Raw tree parsing | Read-only | Read-only |
+| **Interaction** | **click / type / select / hover** | Raw tree parsing | Read-only | Read-only |
 | **Multi-page sessions** | **Unlimited** | Breaks at 2-3 pages | N/A | N/A |
 | **Task success (66 tasks)** | **95.2%** | 39.7% \* | 60.9% | 61.2% |
 | **Cost / 66 tasks** | **$0.58** | $6.71 \* | $2.66 | $1.54 |
@@ -57,13 +57,18 @@ Add to your project's `.mcp.json`:
 }
 ```
 
-Restart your IDE. Three tools become available:
+Restart your IDE. Eight tools become available:
 
 | Tool | Description |
 |------|-------------|
 | `get_page_map` | Navigate to URL, return structured PageMap with ref numbers |
-| `execute_action` | Click, type, select on elements by ref number |
+| `execute_action` | Click, type, select, hover on elements by ref number |
 | `get_page_state` | Lightweight page state check (URL, title) |
+| `take_screenshot` | Capture viewport or full-page screenshot |
+| `navigate_back` | Go back in browser history |
+| `scroll_page` | Scroll up/down by page, half-page, or pixel amount |
+| `fill_form` | Batch-fill multiple form fields in one call |
+| `wait_for` | Wait for text to appear or disappear on the page |
 
 ### CLI
 
@@ -135,13 +140,27 @@ URL → Playwright Browser
 
 ---
 
+## Reliability
+
+`execute_action` is built for real-world web pages:
+
+- **Locator fallback chain** — `get_by_role(exact)` → CSS selector → degraded match. Handles duplicate labels, dynamic IDs, and shadow DOM
+- **Auto-retry** — up to 2 retries within 15s budget with locator re-resolution. Click retried only on pre-dispatch failures to prevent double-submission
+- **DOM change detection** — structural fingerprint comparison catches URL-stable mutations (modals, SPA navigations, accordion toggles). Stale refs auto-invalidated
+- **Popup & tab handling** — new tabs/popups auto-detected, SSRF-checked, and switched to. Blocked popups closed automatically
+- **JS dialog handling** — alert/beforeunload auto-accepted, confirm/prompt auto-dismissed. Dialog content buffered and reported to the agent
+- **Crash recovery** — 30s action timeout, browser death detection, automatic session invalidation with recovery guidance
+
+---
+
 ## Security
 
 PageMap treats all web content as **untrusted input**:
 
-- **SSRF Defense** — scheme whitelist, private IP blocking, post-redirect revalidation
+- **SSRF Defense** — 4-layer protection: scheme whitelist, DNS rebinding defense, private IP blocking, post-redirect DNS revalidation, context-level route guard
+- **Browser Hardening** — WebRTC IP leak prevention, ServiceWorker blocking, internal protocol blocking (`view-source:`, `blob:`, `data:`), Markdown injection defense
 - **Prompt Injection Defense** — nonce-based content boundaries, role-prefix stripping, Unicode control char removal
-- **Action Sandboxing** — whitelisted actions only, dangerous key combos blocked
+- **Action Sandboxing** — whitelisted actions only, dangerous key combos blocked, affordance-action compatibility pre-check
 - **Input Validation** — value length limits, timeout enforcement, error sanitization
 
 ### Local Development

@@ -172,7 +172,7 @@ class TestActionValidation:
     """Tests for action type and value constraints."""
 
     def test_valid_actions(self):
-        assert {"click", "type", "select", "press_key"} == VALID_ACTIONS
+        assert {"click", "type", "select", "press_key", "hover"} == VALID_ACTIONS
 
     def test_type_max_length(self):
         assert MAX_TYPE_VALUE_LENGTH == 1000

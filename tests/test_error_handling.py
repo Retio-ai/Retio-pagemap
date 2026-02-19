@@ -74,6 +74,8 @@ def _make_mock_session(
     """Create a mock BrowserSession."""
     session = MagicMock()
     session.get_page_url = AsyncMock(return_value=current_url)
+    session.consume_new_page = MagicMock(return_value=None)
+    session.drain_dialogs = MagicMock(return_value=[])
 
     locator = AsyncMock()
     locator.first = AsyncMock()

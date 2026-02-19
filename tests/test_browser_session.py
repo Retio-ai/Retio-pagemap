@@ -288,6 +288,7 @@ def _build_mock_chain():
     mock_context = AsyncMock()
     mock_context.new_page = AsyncMock(return_value=mock_page)
     mock_context.route = AsyncMock()
+    mock_context.on = MagicMock()
 
     mock_browser = AsyncMock()
     mock_browser.new_context = AsyncMock(return_value=mock_context)
@@ -321,11 +322,12 @@ class TestBrowserLaunchArgs:
         return self.mock_browser.new_context.call_args.kwargs
 
     @pytest.mark.asyncio
-    async def test_popup_blocking_arg(self):
+    async def test_popup_blocking_arg_removed(self):
+        """--block-new-web-contents must NOT be present (popups handled by context.on('page'))."""
         with patch("pagemap.browser_session.async_playwright", return_value=self.mock_pw_cm):
             session = BrowserSession()
             await session.start()
-        assert "--block-new-web-contents" in self._get_launch_args()
+        assert "--block-new-web-contents" not in self._get_launch_args()
 
     @pytest.mark.asyncio
     async def test_webrtc_ip_leak_prevention(self):
@@ -550,3 +552,157 @@ class TestSchemeBlockRoute:
         """Verify all expected schemes are in the constant."""
         expected = {"chrome://", "devtools://", "chrome-extension://", "file://", "view-source://", "blob:", "data:"}
         assert set(BLOCKED_URL_SCHEMES) == expected
+
+
+# ── Context Event Handler Registration ──────────────────────────────
+
+
+class TestContextHandlerRegistration:
+    """Verify dialog and page handlers are registered on context during start()."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self):
+        self.mock_pw_cm, self.mock_chromium, self.mock_browser, self.mock_context, self.mock_page = _build_mock_chain()
+
+    @pytest.mark.asyncio
+    async def test_dialog_and_page_handlers_registered(self):
+        with patch("pagemap.browser_session.async_playwright", return_value=self.mock_pw_cm):
+            session = BrowserSession()
+            await session.start()
+
+        on_calls = self.mock_context.on.call_args_list
+        event_names = [c[0][0] for c in on_calls]
+        assert "dialog" in event_names
+        assert "page" in event_names
+
+    @pytest.mark.asyncio
+    async def test_dialog_handler_is_session_method(self):
+        with patch("pagemap.browser_session.async_playwright", return_value=self.mock_pw_cm):
+            session = BrowserSession()
+            await session.start()
+
+        on_calls = self.mock_context.on.call_args_list
+        dialog_calls = [c for c in on_calls if c[0][0] == "dialog"]
+        assert dialog_calls[0][0][1] == session._on_dialog
+
+    @pytest.mark.asyncio
+    async def test_page_handler_is_session_method(self):
+        with patch("pagemap.browser_session.async_playwright", return_value=self.mock_pw_cm):
+            session = BrowserSession()
+            await session.start()
+
+        on_calls = self.mock_context.on.call_args_list
+        page_calls = [c for c in on_calls if c[0][0] == "page"]
+        assert page_calls[0][0][1] == session._on_new_page
+
+
+# ── New session methods: go_back, scroll, get_scroll_position ───────
+
+
+class TestGoBackMethod:
+    """Tests for BrowserSession.go_back() method."""
+
+    @pytest.mark.asyncio
+    async def test_go_back_returns_url_on_success(self):
+        session = BrowserSession.__new__(BrowserSession)
+        mock_page = AsyncMock()
+        mock_page.go_back = AsyncMock(return_value=MagicMock())  # non-None = success
+        mock_page.wait_for_timeout = AsyncMock()
+        mock_page.url = "https://example.com/prev"
+        session._page = mock_page
+
+        result = await session.go_back()
+        assert result == "https://example.com/prev"
+        mock_page.go_back.assert_called_once_with(wait_until="load", timeout=30000)
+
+    @pytest.mark.asyncio
+    async def test_go_back_returns_none_on_no_history(self):
+        session = BrowserSession.__new__(BrowserSession)
+        mock_page = AsyncMock()
+        mock_page.go_back = AsyncMock(return_value=None)
+        session._page = mock_page
+
+        result = await session.go_back()
+        assert result is None
+        mock_page.wait_for_timeout.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_go_back_custom_params(self):
+        session = BrowserSession.__new__(BrowserSession)
+        mock_page = AsyncMock()
+        mock_page.go_back = AsyncMock(return_value=MagicMock())
+        mock_page.wait_for_timeout = AsyncMock()
+        mock_page.url = "https://example.com"
+        session._page = mock_page
+
+        await session.go_back(wait_until="domcontentloaded", timeout_ms=10000)
+        mock_page.go_back.assert_called_once_with(wait_until="domcontentloaded", timeout=10000)
+
+
+class TestScrollMethods:
+    """Tests for BrowserSession.scroll() and get_scroll_position()."""
+
+    @pytest.mark.asyncio
+    async def test_get_scroll_position_calls_evaluate(self):
+        session = BrowserSession.__new__(BrowserSession)
+        mock_page = AsyncMock()
+        expected = {
+            "scrollX": 0,
+            "scrollY": 100,
+            "scrollWidth": 1280,
+            "scrollHeight": 5000,
+            "clientWidth": 1280,
+            "clientHeight": 800,
+        }
+        mock_page.evaluate = AsyncMock(return_value=expected)
+        session._page = mock_page
+
+        result = await session.get_scroll_position()
+        assert result == expected
+
+    @pytest.mark.asyncio
+    async def test_scroll_calls_evaluate_with_params(self):
+        from pagemap.browser_session import _SCROLL_POSITION_JS
+
+        session = BrowserSession.__new__(BrowserSession)
+        mock_page = AsyncMock()
+        pos_result = {"scrollX": 0, "scrollY": 500}
+        mock_page.evaluate = AsyncMock(return_value=pos_result)
+        mock_page.wait_for_timeout = AsyncMock()
+        session._page = mock_page
+
+        result = await session.scroll(delta_x=0, delta_y=800)
+
+        # First call: scrollBy, second call: position query
+        assert mock_page.evaluate.call_count == 2
+        first_call = mock_page.evaluate.call_args_list[0]
+        assert first_call[0][0] == "([dx, dy]) => window.scrollBy(dx, dy)"
+        assert first_call[0][1] == [0, 800]
+
+    @pytest.mark.asyncio
+    async def test_scroll_settle_time(self):
+        session = BrowserSession.__new__(BrowserSession)
+        mock_page = AsyncMock()
+        mock_page.evaluate = AsyncMock(return_value={})
+        mock_page.wait_for_timeout = AsyncMock()
+        session._page = mock_page
+
+        await session.scroll(delta_y=100)
+        mock_page.wait_for_timeout.assert_called_once_with(500)
+
+    @pytest.mark.asyncio
+    async def test_scroll_parameterized_not_fstring(self):
+        """Verify scroll uses parameterized evaluate (security: no f-string injection)."""
+        session = BrowserSession.__new__(BrowserSession)
+        mock_page = AsyncMock()
+        mock_page.evaluate = AsyncMock(return_value={})
+        mock_page.wait_for_timeout = AsyncMock()
+        session._page = mock_page
+
+        # Even with suspicious values, they're passed as parameters, not interpolated
+        await session.scroll(delta_x=0, delta_y=100)
+        first_call = mock_page.evaluate.call_args_list[0]
+        js_code = first_call[0][0]
+        # The JS code should be a static string, not contain the actual values
+        assert "100" not in js_code
+        assert "0" not in js_code or js_code == "([dx, dy]) => window.scrollBy(dx, dy)"
