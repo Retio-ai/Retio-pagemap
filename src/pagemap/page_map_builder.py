@@ -162,8 +162,16 @@ async def build_page_map_live(
     schema = detect_schema(page_url)
     site_id = _extract_site_id(page_url)
 
-    # Parallel: detect interactables + get HTML for pruning
-    interactables = await detect_all(session.page, enable_tier3=enable_tier3)
+    # Detect interactables (isolated: failure yields empty list + warning)
+    warnings: list[str] = []
+    try:
+        interactables, detect_warnings = await detect_all(session.page, enable_tier3=enable_tier3)
+        warnings.extend(detect_warnings)
+    except Exception as e:
+        logger.error("Interactive detection completely failed: %s", e)
+        interactables = []
+        warnings.append(f"Interactive element detection failed ({type(e).__name__}): only page content is available")
+
     raw_html = await session.get_page_html()
 
     # Build pruned context with auto-detected locale
@@ -196,6 +204,7 @@ async def build_page_map_live(
         generation_ms=elapsed_ms,
         images=images,
         metadata=metadata,
+        warnings=warnings,
     )
 
     total_tokens = _estimate_total_tokens(page_map)
@@ -493,8 +502,15 @@ async def build_page_map_from_snapshot(
     # Load HTML into browser for AX tree
     await session.load_html(raw_html)
 
-    # Detect interactables from loaded page
-    interactables = await detect_all(session.page, enable_tier3=enable_tier3)
+    # Detect interactables from loaded page (isolated: failure yields empty list + warning)
+    warnings: list[str] = []
+    try:
+        interactables, detect_warnings = await detect_all(session.page, enable_tier3=enable_tier3)
+        warnings.extend(detect_warnings)
+    except Exception as e:
+        logger.error("Interactive detection completely failed: %s", e)
+        interactables = []
+        warnings.append(f"Interactive element detection failed ({type(e).__name__}): only page content is available")
 
     # Build pruned context with auto-detected locale
     locale = detect_locale(url)
@@ -534,6 +550,7 @@ async def build_page_map_from_snapshot(
         generation_ms=elapsed_ms,
         images=images,
         metadata=structured_meta,
+        warnings=warnings,
     )
 
     total_tokens = _estimate_total_tokens(page_map)

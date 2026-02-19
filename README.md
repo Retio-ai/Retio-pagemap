@@ -144,6 +144,23 @@ PageMap treats all web content as **untrusted input**:
 - **Action Sandboxing** — whitelisted actions only, dangerous key combos blocked
 - **Input Validation** — value length limits, timeout enforcement, error sanitization
 
+### Local Development
+
+By default, PageMap blocks all private network access (localhost, 192.168.x.x, etc.)
+as an SSRF defense. For local development workflows, enable `--allow-local`:
+
+**Option A: CLI flag**
+```json
+{ "command": "uvx", "args": ["retio-pagemap", "--allow-local"] }
+```
+
+**Option B: Environment variable** (containerized deployments)
+```json
+{ "command": "uvx", "args": ["retio-pagemap"], "env": {"PAGEMAP_ALLOW_LOCAL": "1"} }
+```
+
+Cloud metadata endpoints (169.254.x.x, metadata.google.internal) remain blocked.
+
 ---
 
 ## Multilingual Support

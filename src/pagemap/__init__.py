@@ -22,6 +22,7 @@ class Interactable:
     tier: int  # 1-4 detection tier
     value: str = ""  # current value (for inputs)
     options: list[str] = field(default_factory=list)  # for selects/comboboxes
+    selector: str = ""  # CSS selector for precise DOM targeting (internal)
 
     def __str__(self) -> str:
         parts = [f"[{self.ref}]", f"{self.role}:", self.name, f"({self.affordance})"]
@@ -45,6 +46,7 @@ class PageMap:
     generation_ms: float
     images: list[str] = field(default_factory=list)  # product image URLs
     metadata: dict = field(default_factory=dict)  # structured extraction result
+    warnings: list[str] = field(default_factory=list)  # degraded mode notices
 
     @property
     def total_interactables(self) -> int:

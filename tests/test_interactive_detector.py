@@ -11,13 +11,17 @@ Tests cover:
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock, MagicMock
+
 from pagemap import Interactable
 from pagemap.interactive_detector import (
     AFFORDANCE_MAP,
     INTERACTIVE_ROLES,
     _classify_tier,
     _extract_options,
+    _process_tier3_batch,
     _walk_ax_tree,
+    detect_interactables_cdp,
 )
 
 # ── Test fixtures ──────────────────────────────────────────────────────
@@ -319,3 +323,193 @@ class TestSequentialNumbering:
         _walk_ax_tree(tree, results, [0])
         refs = [r.ref for r in results]
         assert refs == [1, 2, 3]
+
+
+# ── Tier 3 batch processing tests ────────────────────────────────────
+
+
+class TestProcessTier3Batch:
+    """Tests for _process_tier3_batch() pure function."""
+
+    def test_element_with_name_produces_interactable(self):
+        elements = [{"tag": "div", "role": "div", "name": "Custom Button", "textFallback": ""}]
+        result = _process_tier3_batch(elements, set(), 0)
+        assert len(result) == 1
+        assert result[0].name == "Custom Button"
+        assert result[0].role == "div"
+        assert result[0].tier == 3
+        assert result[0].affordance == "click"
+        assert result[0].region == "unknown"
+        assert result[0].ref == 1
+
+    def test_text_fallback_used_when_no_name(self):
+        elements = [{"tag": "span", "role": "span", "name": "", "textFallback": "Click me"}]
+        result = _process_tier3_batch(elements, set(), 0)
+        assert len(result) == 1
+        assert result[0].name == "Click me"
+
+    def test_no_name_no_fallback_skipped(self):
+        elements = [{"tag": "div", "role": "div", "name": "", "textFallback": ""}]
+        result = _process_tier3_batch(elements, set(), 0)
+        assert len(result) == 0
+
+    def test_existing_name_dedup_case_insensitive(self):
+        elements = [{"tag": "div", "role": "div", "name": "Add to Cart", "textFallback": ""}]
+        result = _process_tier3_batch(elements, {"add to cart"}, 0)
+        assert len(result) == 0
+
+    def test_intra_batch_dedup(self):
+        elements = [
+            {"tag": "div", "role": "div", "name": "Delete", "textFallback": ""},
+            {"tag": "span", "role": "span", "name": "Delete", "textFallback": ""},
+        ]
+        result = _process_tier3_batch(elements, set(), 0)
+        assert len(result) == 1
+
+    def test_ref_numbering_from_start(self):
+        elements = [
+            {"tag": "div", "role": "div", "name": "A", "textFallback": ""},
+            {"tag": "div", "role": "div", "name": "B", "textFallback": ""},
+        ]
+        result = _process_tier3_batch(elements, set(), 10)
+        assert result[0].ref == 11
+        assert result[1].ref == 12
+
+    def test_empty_input(self):
+        result = _process_tier3_batch([], set(), 0)
+        assert result == []
+
+    def test_sanitize_text_applied(self):
+        elements = [{"tag": "div", "role": "div", "name": "Buy\u200b Now", "textFallback": ""}]
+        result = _process_tier3_batch(elements, set(), 0)
+        assert "\u200b" not in result[0].name
+        assert result[0].name == "Buy Now"
+
+    def test_role_from_element(self):
+        elements = [{"tag": "a", "role": "custom-role", "name": "Link", "textFallback": ""}]
+        result = _process_tier3_batch(elements, set(), 0)
+        assert result[0].role == "custom-role"
+
+    def test_defaults_when_keys_missing(self):
+        elements = [{"name": "Fallback"}]
+        result = _process_tier3_batch(elements, set(), 0)
+        assert len(result) == 1
+        assert result[0].role == "div"
+
+
+# ── Tier 3 CDP batch async tests ─────────────────────────────────────
+
+
+class TestDetectInteractablesCdpBatch:
+    """Tests for detect_interactables_cdp() with batch Runtime.evaluate."""
+
+    @staticmethod
+    def _make_mock_page(cdp_return_value):
+        mock_cdp = AsyncMock()
+        mock_cdp.send = AsyncMock(return_value=cdp_return_value)
+        mock_cdp.detach = AsyncMock()
+
+        mock_page = MagicMock()
+        mock_page.context = MagicMock()
+        mock_page.context.new_cdp_session = AsyncMock(return_value=mock_cdp)
+        return mock_page, mock_cdp
+
+    async def test_single_runtime_evaluate_call(self):
+        page, cdp = self._make_mock_page({"result": {"value": {"error": None, "elements": []}}})
+        await detect_interactables_cdp(page)
+        cdp.send.assert_called_once()
+        args = cdp.send.call_args
+        assert args[0][0] == "Runtime.evaluate"
+        assert args[0][1]["includeCommandLineAPI"] is True
+        assert args[0][1]["returnByValue"] is True
+
+    async def test_returns_interactables_from_batch(self):
+        page, _ = self._make_mock_page(
+            {
+                "result": {
+                    "value": {
+                        "error": None,
+                        "elements": [
+                            {"tag": "div", "role": "div", "name": "Action", "textFallback": ""},
+                        ],
+                    }
+                }
+            }
+        )
+        result = await detect_interactables_cdp(page)
+        assert len(result) == 1
+        assert result[0].name == "Action"
+        assert result[0].tier == 3
+
+    async def test_js_error_returns_empty(self):
+        page, _ = self._make_mock_page({"result": {"value": {"error": "no_getEventListeners", "elements": []}}})
+        result = await detect_interactables_cdp(page)
+        assert result == []
+
+    async def test_cdp_exception_returns_empty(self):
+        mock_cdp = AsyncMock()
+        mock_cdp.send = AsyncMock(side_effect=Exception("connection closed"))
+        mock_cdp.detach = AsyncMock()
+        mock_page = MagicMock()
+        mock_page.context = MagicMock()
+        mock_page.context.new_cdp_session = AsyncMock(return_value=mock_cdp)
+
+        result = await detect_interactables_cdp(mock_page)
+        assert result == []
+        mock_cdp.detach.assert_awaited_once()
+
+    async def test_cdp_session_always_detached(self):
+        page, cdp = self._make_mock_page({"result": {"value": {"error": None, "elements": []}}})
+        await detect_interactables_cdp(page)
+        cdp.detach.assert_awaited_once()
+
+    async def test_dedup_against_existing(self):
+        page, _ = self._make_mock_page(
+            {
+                "result": {
+                    "value": {
+                        "error": None,
+                        "elements": [
+                            {"tag": "div", "role": "div", "name": "Already Found", "textFallback": ""},
+                            {"tag": "div", "role": "div", "name": "New Element", "textFallback": ""},
+                        ],
+                    }
+                }
+            }
+        )
+        existing = [
+            Interactable(
+                ref=1,
+                role="button",
+                name="Already Found",
+                affordance="click",
+                region="main",
+                tier=1,
+            )
+        ]
+        result = await detect_interactables_cdp(page, existing=existing)
+        assert len(result) == 1
+        assert result[0].name == "New Element"
+        assert result[0].ref == 2
+
+    async def test_malformed_result_returns_empty(self):
+        page, _ = self._make_mock_page({"result": {"value": "not a dict"}})
+        result = await detect_interactables_cdp(page)
+        assert result == []
+
+    async def test_no_existing_elements(self):
+        page, _ = self._make_mock_page(
+            {
+                "result": {
+                    "value": {
+                        "error": None,
+                        "elements": [
+                            {"tag": "div", "role": "div", "name": "Solo", "textFallback": ""},
+                        ],
+                    }
+                }
+            }
+        )
+        result = await detect_interactables_cdp(page, existing=None)
+        assert len(result) == 1
+        assert result[0].ref == 1

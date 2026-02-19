@@ -14,7 +14,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
-from playwright.async_api import Page
+from playwright.async_api import CDPSession, Page
 
 from . import Interactable
 from .sanitizer import sanitize_text
@@ -117,6 +117,218 @@ SKIP_ROLES = frozenset(
     }
 )
 
+# ── Tier 3 batch JS ──────────────────────────────────────────────────
+# Single Runtime.evaluate call replaces ~200 sequential CDP IPC round-trips.
+# Requires includeCommandLineAPI=true for getEventListeners() access.
+
+_TIER3_BATCH_JS = """\
+(() => {
+  const SELECTORS = [
+    "div[tabindex]:not([role])",
+    "span[tabindex]:not([role])",
+    "div[onclick]",
+    "span[onclick]",
+    "a:not([href])[onclick]"
+  ];
+  const CLICK_EVENTS = ["click", "mousedown", "pointerdown", "touchstart"];
+  const MAX = 200;
+
+  if (typeof getEventListeners !== "function")
+    return {error: "no_getEventListeners", elements: []};
+
+  function getUniqueSelector(el) {
+    if (!el || el.nodeType !== 1) return "";
+    if (el.id) return "#" + CSS.escape(el.id);
+    const TA = ["data-testid", "data-test-id", "data-cy", "data-test"];
+    for (const a of TA) {
+      const v = el.getAttribute(a);
+      if (v) return "[" + a + '="' + CSS.escape(v) + '"]';
+    }
+    const al = el.getAttribute("aria-label");
+    if (al) {
+      const s = el.localName + '[aria-label="' + CSS.escape(al) + '"]';
+      try { if (document.querySelectorAll(s).length === 1) return s; } catch(e) {}
+    }
+    const na = el.getAttribute("name");
+    if (na) {
+      const s = el.localName + '[name="' + CSS.escape(na) + '"]';
+      try { if (document.querySelectorAll(s).length === 1) return s; } catch(e) {}
+    }
+    if (el.localName === "a") {
+      const hr = el.getAttribute("href");
+      if (hr) {
+        const s = 'a[href="' + CSS.escape(hr) + '"]';
+        try { if (document.querySelectorAll(s).length === 1) return s; } catch(e) {}
+      }
+    }
+    const path = [];
+    let cur = el;
+    while (cur && cur.nodeType === 1) {
+      let seg = cur.localName;
+      if (cur.id) { path.unshift("#" + CSS.escape(cur.id)); break; }
+      const parent = cur.parentElement;
+      if (parent) {
+        const sibs = Array.from(parent.children).filter(
+          s => s.localName === cur.localName
+        );
+        if (sibs.length > 1) {
+          seg += ":nth-of-type(" + (sibs.indexOf(cur) + 1) + ")";
+        }
+      }
+      path.unshift(seg);
+      cur = cur.parentElement;
+    }
+    return path.join(" > ");
+  }
+
+  const seen = new Set();
+  const candidates = [];
+  for (const sel of SELECTORS) {
+    try {
+      for (const el of document.querySelectorAll(sel)) {
+        if (seen.has(el)) continue;
+        seen.add(el);
+        candidates.push(el);
+        if (candidates.length >= MAX) break;
+      }
+    } catch (e) {}
+    if (candidates.length >= MAX) break;
+  }
+
+  const results = [];
+  for (const el of candidates) {
+    const listeners = getEventListeners(el);
+    let hasClick = false;
+    for (const evt of CLICK_EVENTS) {
+      if (listeners[evt] && listeners[evt].length > 0) { hasClick = true; break; }
+    }
+    if (!hasClick) continue;
+
+    const name = (
+      el.getAttribute("aria-label") || el.getAttribute("title") || el.getAttribute("alt") || ""
+    ).trim();
+    let textFallback = "";
+    if (!name) {
+      const t = (el.textContent || "").trim().replace(/\\s+/g, " ");
+      if (t.length > 0 && t.length < 80) textFallback = t;
+    }
+
+    results.push({
+      tag: el.localName || "div",
+      role: el.getAttribute("role") || el.localName || "div",
+      name: name,
+      textFallback: textFallback,
+      cssSelector: getUniqueSelector(el)
+    });
+  }
+  return {error: null, elements: results};
+})()
+"""
+
+
+_UNIQUE_SELECTOR_JS = """\
+function() {
+    const el = this;
+    if (!el || el.nodeType !== 1) return "";
+    if (el.id) return "#" + CSS.escape(el.id);
+    const TA = ["data-testid", "data-test-id", "data-cy", "data-test"];
+    for (const a of TA) {
+        const v = el.getAttribute(a);
+        if (v) return "[" + a + '="' + CSS.escape(v) + '"]';
+    }
+    const al = el.getAttribute("aria-label");
+    if (al) {
+        const sel = el.localName + '[aria-label="' + CSS.escape(al) + '"]';
+        try { if (document.querySelectorAll(sel).length === 1) return sel; } catch(e) {}
+    }
+    const na = el.getAttribute("name");
+    if (na) {
+        const sel = el.localName + '[name="' + CSS.escape(na) + '"]';
+        try { if (document.querySelectorAll(sel).length === 1) return sel; } catch(e) {}
+    }
+    if (el.localName === "a") {
+        const href = el.getAttribute("href");
+        if (href) {
+            const sel = 'a[href="' + CSS.escape(href) + '"]';
+            try { if (document.querySelectorAll(sel).length === 1) return sel; } catch(e) {}
+        }
+    }
+    const path = [];
+    let cur = el;
+    while (cur && cur.nodeType === 1) {
+        let seg = cur.localName;
+        if (cur.id) { path.unshift("#" + CSS.escape(cur.id)); break; }
+        const parent = cur.parentElement;
+        if (parent) {
+            const sibs = Array.from(parent.children).filter(
+                s => s.localName === cur.localName
+            );
+            if (sibs.length > 1) {
+                seg += ":nth-of-type(" + (sibs.indexOf(cur) + 1) + ")";
+            }
+        }
+        path.unshift(seg);
+        cur = cur.parentElement;
+    }
+    return path.join(" > ");
+}
+"""
+
+
+async def _resolve_css_selectors(
+    cdp: CDPSession,
+    interactables: list[Interactable],
+    backend_id_map: dict[int, int],
+) -> None:
+    """Resolve CSS selectors for interactables using their backendDOMNodeIds.
+
+    Modifies interactables in-place by setting selector field.
+    Individual element failures are silently skipped (best-effort).
+
+    Args:
+        cdp: Active CDP session (will NOT be detached by this function)
+        interactables: List of Interactable objects to update
+        backend_id_map: Mapping of ref -> backendDOMNodeId
+    """
+    if not backend_id_map:
+        return
+
+    ref_to_item = {item.ref: item for item in interactables}
+
+    for ref, backend_node_id in backend_id_map.items():
+        item = ref_to_item.get(ref)
+        if item is None:
+            continue
+
+        try:
+            resolve_result = await cdp.send(
+                "DOM.resolveNode",
+                {"backendNodeId": backend_node_id},
+            )
+            object_id = resolve_result.get("object", {}).get("objectId")
+            if not object_id:
+                continue
+
+            fn_result = await cdp.send(
+                "Runtime.callFunctionOn",
+                {
+                    "objectId": object_id,
+                    "functionDeclaration": _UNIQUE_SELECTOR_JS,
+                    "returnByValue": True,
+                },
+            )
+            selector = fn_result.get("result", {}).get("value", "")
+            if selector:
+                item.selector = selector
+
+        except Exception:
+            logger.debug(
+                "CSS selector resolution failed for ref=%d backendNodeId=%d",
+                ref,
+                backend_node_id,
+            )
+            continue
+
 
 @dataclass
 class _AXNode:
@@ -163,6 +375,7 @@ def _walk_ax_tree(
     ref_counter: list[int],
     current_region: str = "unknown",
     seen_names: set[str] | None = None,
+    backend_id_map: dict[int, int] | None = None,
 ) -> None:
     """Recursively walk AX tree and extract interactive elements.
 
@@ -172,6 +385,7 @@ def _walk_ax_tree(
         ref_counter: mutable counter [current_ref] for sequential numbering
         current_region: inherited region from landmark ancestors
         seen_names: deduplication set of (role, name) pairs
+        backend_id_map: optional output map of ref -> backendDOMNodeId
     """
     if seen_names is None:
         seen_names = set()
@@ -218,9 +432,15 @@ def _walk_ax_tree(
                 )
             )
 
+            # Track backendDOMNodeId for CSS selector resolution
+            if backend_id_map is not None:
+                backend_dom_id = node.get("backendDOMNodeId")
+                if backend_dom_id is not None:
+                    backend_id_map[ref_counter[0]] = backend_dom_id
+
     # Recurse into children
     for child in node.get("children", []):
-        _walk_ax_tree(child, results, ref_counter, current_region, seen_names)
+        _walk_ax_tree(child, results, ref_counter, current_region, seen_names, backend_id_map)
 
 
 async def detect_interactables_ax(
@@ -246,23 +466,84 @@ async def detect_interactables_ax(
         result = await cdp.send("Accessibility.getFullAXTree")
         nodes = result.get("nodes", [])
         snapshot = _cdp_ax_nodes_to_tree(nodes) if nodes else None
+
+        if not snapshot:
+            logger.warning("Empty AX tree snapshot")
+            return []
+
+        results: list[Interactable] = []
+        ref_counter = [0]
+        backend_id_map: dict[int, int] = {}
+        _walk_ax_tree(snapshot, results, ref_counter, backend_id_map=backend_id_map)
+
+        # Resolve CSS selectors while CDP session is still alive
+        if backend_id_map:
+            await _resolve_css_selectors(cdp, results, backend_id_map)
+
+        logger.info(
+            "Tier 1-2: %d interactables (%d Tier 1, %d Tier 2, %d with selector)",
+            len(results),
+            sum(1 for r in results if r.tier == 1),
+            sum(1 for r in results if r.tier == 2),
+            sum(1 for r in results if r.selector),
+        )
+        return results
     finally:
         await cdp.detach()
 
-    if not snapshot:
-        logger.warning("Empty AX tree snapshot")
-        return []
 
+def _process_tier3_batch(
+    raw_elements: list[dict],
+    existing_names: set[str],
+    ref_start: int,
+) -> list[Interactable]:
+    """Process batch JS results into Tier 3 Interactables.
+
+    Pure function (no I/O) for easy unit testing.
+
+    Args:
+        raw_elements: dicts with keys {tag, role, name, textFallback}
+        existing_names: lowercased names from Tier 1-2 for dedup
+        ref_start: last ref number assigned (next will be ref_start + 1)
+
+    Returns:
+        List of new Tier 3 Interactable objects
+    """
     results: list[Interactable] = []
-    ref_counter = [0]
-    _walk_ax_tree(snapshot, results, ref_counter)
+    ref_counter = ref_start
+    seen_in_batch: set[str] = set()
 
-    logger.info(
-        "Tier 1-2: %d interactables (%d Tier 1, %d Tier 2)",
-        len(results),
-        sum(1 for r in results if r.tier == 1),
-        sum(1 for r in results if r.tier == 2),
-    )
+    for elem in raw_elements:
+        raw_name = (elem.get("name", "") or elem.get("textFallback", "")).strip()
+        name = sanitize_text(raw_name)
+
+        if not name:
+            continue
+
+        name_lower = name.lower()
+        if name_lower in existing_names:
+            continue
+
+        if name_lower in seen_in_batch:
+            continue
+        seen_in_batch.add(name_lower)
+
+        tag = elem.get("tag", "div")
+        role = elem.get("role", tag)
+
+        ref_counter += 1
+        results.append(
+            Interactable(
+                ref=ref_counter,
+                role=role,
+                name=name,
+                affordance="click",
+                region="unknown",
+                tier=3,
+                selector=elem.get("cssSelector", ""),
+            )
+        )
+
     return results
 
 
@@ -272,8 +553,8 @@ async def detect_interactables_cdp(
 ) -> list[Interactable]:
     """Detect additional interactive elements via CDP event listeners (Tier 3).
 
-    Finds elements with click/pointer event handlers that aren't already
-    captured by the AX tree (Tier 1-2).
+    Uses a single Runtime.evaluate call with includeCommandLineAPI to access
+    getEventListeners(), collapsing ~200 sequential CDP calls into 1.
 
     Args:
         page: Playwright page object
@@ -282,136 +563,41 @@ async def detect_interactables_cdp(
     Returns:
         List of NEW Tier 3 Interactable elements (not overlapping with existing)
     """
-    cdp = await page.context.new_cdp_session(page)
-    results: list[Interactable] = []
     ref_start = max((e.ref for e in existing), default=0) if existing else 0
-    ref_counter = [ref_start]
+    existing_names: set[str] = set()
+    if existing:
+        existing_names = {e.name.lower() for e in existing if e.name}
 
+    cdp = await page.context.new_cdp_session(page)
     try:
-        doc = await cdp.send("DOM.getDocument", {"depth": 0})
-        root_id = doc["root"]["nodeId"]
+        result = await cdp.send(
+            "Runtime.evaluate",
+            {
+                "expression": _TIER3_BATCH_JS,
+                "returnByValue": True,
+                "includeCommandLineAPI": True,
+            },
+        )
 
-        # Find potential interactive elements not covered by standard ARIA
-        # Focus on div/span with tabindex or click handlers
-        selectors = [
-            "div[tabindex]:not([role])",
-            "span[tabindex]:not([role])",
-            "div[onclick]",
-            "span[onclick]",
-            "a:not([href])[onclick]",
-        ]
+        value = result.get("result", {}).get("value")
+        if not value or not isinstance(value, dict):
+            logger.warning("CDP Tier 3: unexpected result format from Runtime.evaluate")
+            return []
 
-        existing_names = set()
-        if existing:
-            existing_names = {e.name.lower() for e in existing if e.name}
+        error = value.get("error")
+        if error:
+            logger.warning("CDP Tier 3: JS-side error: %s", error)
+            return []
 
-        for selector in selectors:
-            try:
-                query = await cdp.send(
-                    "DOM.querySelectorAll",
-                    {
-                        "nodeId": root_id,
-                        "selector": selector,
-                    },
-                )
-            except Exception:
-                continue
-
-            for node_id in query.get("nodeIds", []):
-                if node_id == 0:
-                    continue
-                try:
-                    node = await cdp.send("DOM.describeNode", {"nodeId": node_id})
-                    node_info = node["node"]
-                    backend_id = node_info["backendNodeId"]
-
-                    # Get event listeners to confirm interactivity
-                    obj = await cdp.send(
-                        "DOM.resolveNode",
-                        {
-                            "backendNodeId": backend_id,
-                        },
-                    )
-                    object_id = obj["object"].get("objectId")
-                    if not object_id:
-                        continue
-
-                    listeners = await cdp.send(
-                        "DOMDebugger.getEventListeners",
-                        {
-                            "objectId": object_id,
-                        },
-                    )
-                    click_events = [
-                        evt["type"]
-                        for evt in listeners.get("listeners", [])
-                        if evt["type"] in ("click", "mousedown", "pointerdown", "touchstart")
-                    ]
-                    if not click_events:
-                        continue
-
-                    # Extract name from attributes
-                    attrs = node_info.get("attributes", [])
-                    attr_dict = {}
-                    for i in range(0, len(attrs) - 1, 2):
-                        attr_dict[attrs[i]] = attrs[i + 1]
-
-                    name = sanitize_text(
-                        (
-                            attr_dict.get("aria-label", "") or attr_dict.get("title", "") or attr_dict.get("alt", "")
-                        ).strip()
-                    )
-
-                    # Skip if already captured in AX tree
-                    if name.lower() in existing_names:
-                        continue
-
-                    # Get text content as fallback name
-                    if not name:
-                        try:
-                            text_obj = await cdp.send(
-                                "DOM.getOuterHTML",
-                                {
-                                    "backendNodeId": backend_id,
-                                },
-                            )
-                            # Extract visible text (rough)
-                            import re
-
-                            html_text = text_obj.get("outerHTML", "")
-                            clean = re.sub(r"<[^>]+>", " ", html_text)
-                            clean = re.sub(r"\s+", " ", clean).strip()
-                            if len(clean) < 80:
-                                name = sanitize_text(clean)
-                        except Exception:
-                            pass
-
-                    if not name:
-                        continue
-
-                    tag = node_info.get("localName", "div")
-                    role = attr_dict.get("role", tag)
-
-                    ref_counter[0] += 1
-                    results.append(
-                        Interactable(
-                            ref=ref_counter[0],
-                            role=role,
-                            name=name,
-                            affordance="click",
-                            region="unknown",
-                            tier=3,
-                        )
-                    )
-
-                except Exception:
-                    continue
+        raw_elements = value.get("elements", [])
 
     except Exception as e:
         logger.warning("CDP Tier 3 detection failed: %s", e)
+        return []
     finally:
         await cdp.detach()
 
+    results = _process_tier3_batch(raw_elements, existing_names, ref_start)
     logger.info("Tier 3: %d additional interactables from CDP", len(results))
     return results
 
@@ -419,7 +605,7 @@ async def detect_interactables_cdp(
 async def detect_all(
     page: Page,
     enable_tier3: bool = True,
-) -> list[Interactable]:
+) -> tuple[list[Interactable], list[str]]:
     """Run full interactive element detection (Tier 1-3).
 
     Args:
@@ -427,12 +613,19 @@ async def detect_all(
         enable_tier3: whether to run CDP-based Tier 3 detection
 
     Returns:
-        Combined list of all interactables, sequentially numbered
+        Tuple of (combined interactables list, warning messages)
     """
-    # Tier 1-2 from AX tree
-    ax_elements = await detect_interactables_ax(page)
+    warnings: list[str] = []
 
-    # Tier 3 from CDP
+    # Tier 1-2 from AX tree (isolated: failure yields empty list + warning)
+    try:
+        ax_elements = await detect_interactables_ax(page)
+    except Exception as e:
+        logger.warning("AX tree Tier 1-2 detection failed: %s", e)
+        ax_elements = []
+        warnings.append(f"AX tree detection failed ({type(e).__name__}): interactive elements may be incomplete")
+
+    # Tier 3 from CDP (already isolated internally)
     cdp_elements = []
     if enable_tier3:
         cdp_elements = await detect_interactables_cdp(page, existing=ax_elements)
@@ -449,4 +642,4 @@ async def detect_all(
         sum(1 for e in all_elements if e.tier == 2),
         sum(1 for e in all_elements if e.tier == 3),
     )
-    return all_elements
+    return all_elements, warnings

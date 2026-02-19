@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,6 +19,7 @@ from playwright.async_api import (
     CDPSession,
     Page,
     Playwright,
+    Route,
     async_playwright,
 )
 
@@ -26,6 +27,18 @@ logger = logging.getLogger(__name__)
 
 # Default browser config
 DEFAULT_VIEWPORT = {"width": 1280, "height": 800}
+
+# S3: Dangerous URL schemes blocked at context level.
+# about:blank is explicitly allowed (used by SSRF reset in server.py).
+BLOCKED_URL_SCHEMES = (
+    "chrome://",
+    "devtools://",
+    "chrome-extension://",
+    "file://",
+    "view-source://",
+    "blob:",
+    "data:",
+)
 DEFAULT_LOCALE = "ko-KR"
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -69,6 +82,7 @@ def _cdp_ax_nodes_to_tree(nodes: list[dict]) -> dict | None:
             "value": value,
             "focused": focused,
             "children": [],
+            "backendDOMNodeId": n.get("backendDOMNodeId"),
         }
         node_map[node_id] = tree_node
 
@@ -146,7 +160,7 @@ class BrowserSession:
             args=[
                 "--disable-blink-features=AutomationControlled",
                 f"--lang={self.config.locale}",
-                # Security hardening
+                # Core isolation
                 "--disable-extensions",
                 "--disable-plugins",
                 "--disable-dev-shm-usage",
@@ -154,6 +168,25 @@ class BrowserSession:
                 "--disable-sync",
                 "--disable-gpu",
                 "--no-first-run",
+                # S3: Popup/new-window blocking
+                "--block-new-web-contents",
+                # S3: WebRTC IP leak prevention
+                "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+                # S3: Disable dangerous features (single flag — last wins)
+                "--disable-features=ServiceWorker,WebRtcHideLocalIpsWithMdns",
+                # S3: Auto-deny permission prompts (camera, geo, mic, etc.)
+                "--deny-permission-prompts",
+                # S3: Suppress crash/telemetry outbound calls
+                "--disable-breakpad",
+                "--no-pings",
+                "--disable-domain-reliability",
+                "--disable-component-update",
+                "--disable-client-side-phishing-detection",
+                # S3: Block external app/intent deep links
+                "--disable-external-intent-requests",
+                # S3: No error/repost dialogs in headless
+                "--noerrdialogs",
+                "--disable-prompt-on-repost",
             ],
         )
         self._context = await self._browser.new_context(
@@ -163,16 +196,74 @@ class BrowserSession:
             },
             locale=self.config.locale,
             user_agent=self.config.user_agent,
+            # S3: Block ServiceWorker registration (prevents SSRF route guard bypass)
+            service_workers="block",
+            # S3: Deny all permissions (geo, camera, mic, notifications, etc.)
+            permissions=[],
+            # S3: Prevent file downloads
+            accept_downloads=False,
         )
         self._page = await self._context.new_page()
 
-        # Block dangerous URL schemes via route intercept
-        await self._page.route(
-            lambda url: url.startswith(("chrome://", "devtools://", "chrome-extension://", "file://")),
-            lambda route: route.abort("blockedbyclient"),
-        )
+        # S3: Block dangerous URL schemes at context level (covers all pages)
+        await self._install_scheme_block_route()
 
         logger.info("Browser session started (headless=%s)", self.config.headless)
+
+    async def _install_scheme_block_route(self) -> None:
+        """Block dangerous URL schemes at context level (covers all pages).
+
+        about:blank is explicitly allowed (used by SSRF reset in server.py).
+        """
+
+        async def _handler(route: Route) -> None:
+            url = route.request.url
+            if url == "about:blank":
+                await route.continue_()
+                return
+            for scheme in BLOCKED_URL_SCHEMES:
+                if url.startswith(scheme):
+                    logger.debug("Scheme blocked: %s", url)
+                    await route.abort("blockedbyclient")
+                    return
+            if url.startswith("about:"):
+                await route.abort("blockedbyclient")
+                return
+            await route.continue_()
+
+        await self._context.route("**/*", _handler)
+
+    async def install_ssrf_route_guard(self, url_validator: Callable[[str], str | None]) -> None:
+        """Install a context-level route guard to block SSRF via JS-initiated navigation.
+
+        Intercepts document/subdocument requests and validates their URLs
+        using the provided sync validator. Image/script/stylesheet requests
+        are allowed through for performance.
+
+        Args:
+            url_validator: Sync function that returns None if URL is safe,
+                          or an error message string if blocked.
+        """
+
+        async def _route_handler(route: Route) -> None:
+            request = route.request
+            resource_type = request.resource_type
+            # Only validate document navigations (page, iframe)
+            if resource_type in ("document", "subdocument"):
+                error = url_validator(request.url)
+                if error:
+                    logger.warning(
+                        "Route guard blocked: url=%s type=%s reason=%s",
+                        request.url,
+                        resource_type,
+                        error,
+                    )
+                    await route.abort("blockedbyclient")
+                    return
+            await route.continue_()
+
+        await self.context.route("**/*", _route_handler)
+        logger.info("SSRF route guard installed on browser context")
 
     async def stop(self) -> None:
         """Close browser and clean up. Safe to call on a crashed browser."""

@@ -328,3 +328,74 @@ class TestSsrfAdvanced:
     def test_public_100_non_cgnat_allowed(self):
         # 100.128.0.1 is NOT in 100.64.0.0/10 (CGNAT ends at 100.127.x.x)
         assert _validate_url("http://100.128.0.1/") is None
+
+
+# ── Octal Pure Parsing ──────────────────────────────────────────────
+
+
+class TestNormalizeIpOctalPureParsing:
+    """Tests that octal IP parsing uses pure arithmetic (no DNS queries)."""
+
+    def test_octal_loopback(self):
+        # 0177 = 127 in octal
+        assert _normalize_ip("0177.0.0.1") == "127.0.0.1"
+
+    def test_octal_10_network(self):
+        # 012 = 10 in octal
+        assert _normalize_ip("012.0.0.1") == "10.0.0.1"
+
+    def test_octal_all_octets(self):
+        # 0300.0375.0.01 = 192.253.0.1
+        assert _normalize_ip("0300.0375.0.01") == "192.253.0.1"
+
+    def test_invalid_octal_digit_8(self):
+        # 8 is not a valid octal digit
+        assert _normalize_ip("0189.0.0.1") is None
+
+    def test_invalid_octal_digit_9(self):
+        assert _normalize_ip("099.0.0.1") is None
+
+    def test_five_octets_rejected(self):
+        assert _normalize_ip("0177.0.0.0.1") is None
+
+    def test_three_octets_rejected(self):
+        assert _normalize_ip("0177.0.1") is None
+
+    def test_empty_octet_rejected(self):
+        assert _normalize_ip("0177..0.1") is None
+
+    def test_octet_overflow_octal_256(self):
+        # 0400 in octal = 256, exceeds 255
+        assert _normalize_ip("0400.0.0.1") is None
+
+    def test_no_dns_called(self):
+        """Ensure socket.gethostbyname is never called during octal parsing."""
+        from unittest.mock import patch
+
+        with patch("socket.gethostbyname") as mock_dns:
+            _normalize_ip("0177.0.0.1")
+            mock_dns.assert_not_called()
+
+    def test_no_dns_called_invalid(self):
+        from unittest.mock import patch
+
+        with patch("socket.gethostbyname") as mock_dns:
+            _normalize_ip("0189.0.0.1")
+            mock_dns.assert_not_called()
+
+    def test_validate_url_blocks_octal_loopback(self):
+        err = _validate_url("http://0177.0.0.1/")
+        assert err is not None
+        assert "private" in err.lower() or "blocked" in err.lower()
+
+    def test_validate_url_blocks_octal_10_network(self):
+        err = _validate_url("http://012.0.0.1/")
+        assert err is not None
+
+    def test_non_octal_dotted_passthrough(self):
+        # No leading zero → not octal, already handled by ipaddress
+        assert _normalize_ip("192.168.1.1") == "192.168.1.1"
+
+    def test_mixed_octal_and_decimal(self):
+        # 0300 = 192, 0250 = 168, 1, 1
+        assert _normalize_ip("0300.0250.1.1") == "192.168.1.1"

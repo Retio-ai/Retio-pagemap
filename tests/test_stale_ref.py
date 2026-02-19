@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from pagemap import Interactable, PageMap
+from pagemap.dom_change_detector import DomFingerprint
 from pagemap.server import execute_action
 
 
@@ -62,6 +63,7 @@ def _make_mock_session(current_url: str = "https://example.com") -> MagicMock:
     locator.first.click = AsyncMock()
     locator.first.fill = AsyncMock()
     locator.first.select_option = AsyncMock()
+    locator.count = AsyncMock(return_value=1)
 
     page = MagicMock()
     page.get_by_role = MagicMock(return_value=locator)
@@ -215,3 +217,259 @@ class TestNoActivePageMap:
             result2 = await execute_action(ref=1, action="click")
             assert "No active Page Map" in result2
             assert "may have navigated" in result2
+
+
+# =========================================================================
+# Helpers for DOM change detection tests
+# =========================================================================
+
+
+def _fp(
+    *,
+    total_interactives: int = 10,
+    has_dialog: bool = False,
+    body_child_count: int = 5,
+    title: str = "Test Page",
+) -> DomFingerprint:
+    return DomFingerprint(
+        interactive_counts={"button": total_interactives},
+        total_interactives=total_interactives,
+        has_dialog=has_dialog,
+        body_child_count=body_child_count,
+        title=title,
+    )
+
+
+class TestDomChangeDetection:
+    """Integration tests for DOM change detection in execute_action."""
+
+    @pytest.mark.asyncio
+    async def test_click_dom_major_change_warns_and_clears(self):
+        """click causes dialog appearance → major warning, _last_page_map cleared."""
+        import pagemap.server as srv
+
+        srv._last_page_map = _make_page_map("https://example.com")
+        mock_session = _make_mock_session(current_url="https://example.com")
+
+        pre = _fp(has_dialog=False)
+        post = _fp(has_dialog=True)
+
+        with (
+            patch("pagemap.server._get_session", return_value=mock_session),
+            patch(
+                "pagemap.server.capture_dom_fingerprint",
+                side_effect=[pre, post],
+            ),
+        ):
+            result = await execute_action(ref=1, action="click")
+
+        assert "Page content changed" in result
+        assert "dialog appeared" in result
+        assert "get_page_map" in result
+        assert srv._last_page_map is None
+
+    @pytest.mark.asyncio
+    async def test_click_dom_minor_change_warns_preserves(self):
+        """click causes small interactive change → minor warning, page map kept."""
+        import pagemap.server as srv
+
+        page_map = _make_page_map("https://example.com")
+        srv._last_page_map = page_map
+        mock_session = _make_mock_session(current_url="https://example.com")
+
+        pre = _fp(total_interactives=100)
+        post = _fp(total_interactives=101)
+
+        with (
+            patch("pagemap.server._get_session", return_value=mock_session),
+            patch(
+                "pagemap.server.capture_dom_fingerprint",
+                side_effect=[pre, post],
+            ),
+        ):
+            result = await execute_action(ref=1, action="click")
+
+        assert "Page content updated" in result
+        assert "Consider calling" in result
+        assert srv._last_page_map is page_map
+
+    @pytest.mark.asyncio
+    async def test_click_dom_no_change_no_warning(self):
+        """click with identical DOM → no warning."""
+        import pagemap.server as srv
+
+        page_map = _make_page_map("https://example.com")
+        srv._last_page_map = page_map
+        mock_session = _make_mock_session(current_url="https://example.com")
+
+        fp = _fp()
+
+        with (
+            patch("pagemap.server._get_session", return_value=mock_session),
+            patch(
+                "pagemap.server.capture_dom_fingerprint",
+                side_effect=[fp, fp],
+            ),
+        ):
+            result = await execute_action(ref=1, action="click")
+
+        assert "Page content changed" not in result
+        assert "Page content updated" not in result
+        assert srv._last_page_map is page_map
+
+    @pytest.mark.asyncio
+    async def test_press_key_dom_major_change_warns(self):
+        """press_key (Escape) causes DOM change → major warning."""
+        import pagemap.server as srv
+
+        srv._last_page_map = _make_page_map("https://example.com")
+        mock_session = _make_mock_session(current_url="https://example.com")
+
+        pre = _fp(title="Page - Modal")
+        post = _fp(title="Page")
+
+        with (
+            patch("pagemap.server._get_session", return_value=mock_session),
+            patch(
+                "pagemap.server.capture_dom_fingerprint",
+                side_effect=[pre, post],
+            ),
+        ):
+            result = await execute_action(ref=1, action="press_key", value="Escape")
+
+        assert "Page content changed" in result
+        assert "title changed" in result
+        assert srv._last_page_map is None
+
+    @pytest.mark.asyncio
+    async def test_type_dom_major_change_warns(self):
+        """type action causes large DOM change → major warning."""
+        import pagemap.server as srv
+
+        srv._last_page_map = _make_page_map("https://example.com")
+        mock_session = _make_mock_session(current_url="https://example.com")
+
+        pre = _fp(total_interactives=10)
+        post = _fp(total_interactives=20)
+
+        with (
+            patch("pagemap.server._get_session", return_value=mock_session),
+            patch(
+                "pagemap.server.capture_dom_fingerprint",
+                side_effect=[pre, post],
+            ),
+        ):
+            result = await execute_action(ref=2, action="type", value="search term")
+
+        assert "Page content changed" in result
+        assert srv._last_page_map is None
+
+    @pytest.mark.asyncio
+    async def test_url_change_takes_precedence(self):
+        """URL change → navigation warning (DOM check not run)."""
+        import pagemap.server as srv
+
+        srv._last_page_map = _make_page_map("https://example.com")
+        mock_session = _make_mock_session(current_url="https://example.com/page2")
+
+        with (
+            patch("pagemap.server._get_session", return_value=mock_session),
+            patch(
+                "pagemap.server.capture_dom_fingerprint",
+            ) as mock_capture,
+        ):
+            # Pre-fingerprint is called once, but post should NOT be called
+            mock_capture.return_value = _fp()
+            result = await execute_action(ref=1, action="click")
+
+        assert "Page navigated" in result
+        # capture called for pre only; post is in else branch (not reached)
+        assert mock_capture.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_dom_fingerprint_failure_graceful(self):
+        """capture failure → URL-only fallback, no DOM warning."""
+        import pagemap.server as srv
+
+        page_map = _make_page_map("https://example.com")
+        srv._last_page_map = page_map
+        mock_session = _make_mock_session(current_url="https://example.com")
+
+        with (
+            patch("pagemap.server._get_session", return_value=mock_session),
+            patch(
+                "pagemap.server.capture_dom_fingerprint",
+                return_value=None,
+            ),
+        ):
+            result = await execute_action(ref=1, action="click")
+
+        assert "Page content changed" not in result
+        assert "Page content updated" not in result
+        assert srv._last_page_map is page_map
+
+    @pytest.mark.asyncio
+    async def test_pre_fingerprint_none_skips_post_capture(self):
+        """pre=None → post capture not called."""
+        import pagemap.server as srv
+
+        srv._last_page_map = _make_page_map("https://example.com")
+        mock_session = _make_mock_session(current_url="https://example.com")
+
+        with (
+            patch("pagemap.server._get_session", return_value=mock_session),
+            patch(
+                "pagemap.server.capture_dom_fingerprint",
+                return_value=None,
+            ) as mock_capture,
+        ):
+            await execute_action(ref=1, action="click")
+
+        # Called once for pre (returned None), post not attempted
+        assert mock_capture.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_dom_change_clears_then_second_call_errors(self):
+        """DOM change clears page map → next call gets 'No active Page Map'."""
+        import pagemap.server as srv
+
+        srv._last_page_map = _make_page_map("https://example.com")
+        mock_session = _make_mock_session(current_url="https://example.com")
+
+        pre = _fp(has_dialog=False)
+        post = _fp(has_dialog=True)
+
+        with (
+            patch("pagemap.server._get_session", return_value=mock_session),
+            patch(
+                "pagemap.server.capture_dom_fingerprint",
+                side_effect=[pre, post],
+            ),
+        ):
+            result1 = await execute_action(ref=1, action="click")
+            assert "Page content changed" in result1
+            assert srv._last_page_map is None
+
+            result2 = await execute_action(ref=1, action="click")
+            assert "No active Page Map" in result2
+
+    @pytest.mark.asyncio
+    async def test_mock_call_count_verification(self):
+        """Verify capture is called exactly twice (pre + post) on same-URL action."""
+        import pagemap.server as srv
+
+        srv._last_page_map = _make_page_map("https://example.com")
+        mock_session = _make_mock_session(current_url="https://example.com")
+
+        fp = _fp()
+
+        with (
+            patch("pagemap.server._get_session", return_value=mock_session),
+            patch(
+                "pagemap.server.capture_dom_fingerprint",
+                side_effect=[fp, fp],
+            ) as mock_capture,
+        ):
+            await execute_action(ref=1, action="click")
+
+        assert mock_capture.call_count == 2

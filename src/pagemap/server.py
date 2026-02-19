@@ -17,13 +17,19 @@ import ipaddress
 import json
 import logging
 import re
+import socket
 import sys
 import uuid
+from contextlib import suppress
 from urllib.parse import urlparse
 
 from mcp.server.fastmcp import FastMCP
+from playwright.async_api import Error as PlaywrightError
+from playwright.async_api import Locator, Page
 
+from . import Interactable
 from .browser_session import BrowserConfig, BrowserSession
+from .dom_change_detector import capture_dom_fingerprint, detect_dom_changes
 
 # Configure logging to stderr only (STDIO transport requires clean stdout)
 logging.basicConfig(
@@ -69,6 +75,20 @@ _PRIVATE_NETWORKS = [
     ipaddress.ip_network("fc00::/7"),
     ipaddress.ip_network("fe80::/10"),
     ipaddress.ip_network("::ffff:0:0/96"),  # IPv4-mapped IPv6
+]
+
+# Cloud metadata — always blocked regardless of --allow-local
+_CLOUD_METADATA_HOSTS = frozenset({"metadata.google.internal", "169.254.169.254"})
+_CLOUD_METADATA_NETWORKS = [ipaddress.ip_network("169.254.0.0/16")]
+
+# Networks unlocked by --allow-local (loopback + RFC 1918 + IPv6 ULA only)
+_LOCAL_NETWORKS = [
+    ipaddress.ip_network("127.0.0.0/8"),  # IPv4 loopback
+    ipaddress.ip_network("::1/128"),  # IPv6 loopback
+    ipaddress.ip_network("10.0.0.0/8"),  # RFC 1918
+    ipaddress.ip_network("172.16.0.0/12"),  # RFC 1918
+    ipaddress.ip_network("192.168.0.0/16"),  # RFC 1918
+    ipaddress.ip_network("fc00::/7"),  # IPv6 ULA
 ]
 
 # Safe keys for press_key action — navigation, editing, and common shortcuts only
@@ -128,8 +148,59 @@ MAX_SELECT_VALUE_LENGTH = 500
 # Timeout for entire page map build operation (seconds)
 PAGE_MAP_TIMEOUT_SECONDS = 60
 
+# Affordance-action compatibility: None = compatible with any affordance
+ACTION_AFFORDANCE_COMPAT: dict[str, frozenset[str] | None] = {
+    "click": None,  # click works on any element
+    "type": frozenset({"type"}),
+    "select": frozenset({"select"}),
+    "press_key": None,  # global keyboard, no target check
+}
+
+AFFORDANCE_SUGGESTED_ACTION: dict[str, str] = {
+    "click": "click",
+    "type": "type",
+    "select": "select",
+}
+
+# ── Retry configuration ──────────────────────────────────────────────
+MAX_ACTION_RETRIES = 2
+_RETRY_DELAYS = (0.3, 1.0)
+_RETRY_BUDGET_SECONDS = 15.0
+_MIN_ATTEMPT_SECONDS = 5.0  # minimum time to justify another attempt
+
+# Timeout for entire execute_action operation (seconds)
+EXECUTE_ACTION_TIMEOUT_SECONDS = 30
+
+_BROWSER_DEAD_PATTERNS = (
+    "target closed",
+    "target page",
+    "browser has been closed",
+    "connection closed",
+    "browser disconnected",
+)
+
+
+def _is_browser_dead_error(exc: Exception) -> bool:
+    """Detect browser crash/disconnect errors."""
+    msg = str(exc).lower()
+    return any(p in msg for p in _BROWSER_DEAD_PATTERNS)
+
 
 # ── URL validation ───────────────────────────────────────────────────
+
+
+def _is_cloud_metadata_ip(
+    addr: ipaddress.IPv4Address | ipaddress.IPv6Address,
+) -> bool:
+    """Return True if IP is in a cloud metadata range (always blocked)."""
+    return any(addr in net for net in _CLOUD_METADATA_NETWORKS)
+
+
+def _is_local_ip(
+    addr: ipaddress.IPv4Address | ipaddress.IPv6Address,
+) -> bool:
+    """Return True if IP is loopback or RFC 1918 (--allow-local exemption)."""
+    return any(addr in net for net in _LOCAL_NETWORKS)
 
 
 def _normalize_ip(hostname: str) -> str | None:
@@ -138,9 +209,9 @@ def _normalize_ip(hostname: str) -> str | None:
     Returns normalized IP string, or None if hostname is not an IP address.
     Handles bypass attempts like 0177.0.0.1 (octal), 0x7f000001 (hex),
     and 2130706433 (decimal).
-    """
-    import socket
 
+    Uses pure arithmetic parsing — no DNS queries are performed.
+    """
     # Try direct parse first
     try:
         return str(ipaddress.ip_address(hostname))
@@ -164,15 +235,35 @@ def _normalize_ip(hostname: str) -> str | None:
         except (ValueError, OverflowError):
             pass
 
-    # Octal octets (e.g. 0177.0.0.01)
+    # Octal octets (e.g. 0177.0.0.01) — pure arithmetic, no DNS
     if "." in hostname:
         parts = hostname.split(".")
-        if all(p.isdigit() or (p.startswith("0") and len(p) > 1) for p in parts if p):
-            try:
-                resolved = socket.inet_aton(socket.gethostbyname(hostname))
-                return str(ipaddress.ip_address(resolved))
-            except OSError:
-                pass
+        if len(parts) == 4:
+            has_octal = False
+            octets: list[int] = []
+            valid = True
+            for p in parts:
+                if not p:
+                    valid = False
+                    break
+                if len(p) > 1 and p.startswith("0"):
+                    # Octal: validate all digits are 0-7
+                    if not all(c in "01234567" for c in p):
+                        valid = False
+                        break
+                    has_octal = True
+                    octets.append(int(p, 8))
+                elif p.isdigit():
+                    octets.append(int(p, 10))
+                else:
+                    valid = False
+                    break
+            if valid and has_octal and len(octets) == 4:
+                if all(0 <= o <= 255 for o in octets):
+                    ip_int = (octets[0] << 24) | (octets[1] << 16) | (octets[2] << 8) | octets[3]
+                    return str(ipaddress.ip_address(ip_int))
+                # Octet overflow — return None (blocked as invalid)
+                return None
 
     return None
 
@@ -197,25 +288,148 @@ def _validate_url(url: str) -> str | None:
     if not hostname:
         return "URL must include a hostname."
 
-    # Blocked hostnames
-    if hostname in BLOCKED_HOSTS:
+    # Cloud metadata hosts: always blocked (never exempted by --allow-local)
+    if hostname in _CLOUD_METADATA_HOSTS:
+        return f"Access to '{hostname}' is blocked."
+
+    # Other blocked hosts (e.g. "localhost"): blocked unless --allow-local
+    if hostname in BLOCKED_HOSTS and not _allow_local:
         return f"Access to '{hostname}' is blocked."
 
     # Normalize IP formats (octal, hex, decimal) before checking
     normalized_ip = _normalize_ip(hostname)
     check_ip = normalized_ip or hostname
 
-    # IP address check — block private/reserved ranges
+    # IP address check
     try:
         addr = ipaddress.ip_address(check_ip)
+
+        # Cloud metadata IP range: always blocked
+        if _is_cloud_metadata_ip(addr):
+            return f"Access to cloud metadata IP '{hostname}' is blocked."
+
+        # Private/reserved IP: blocked unless --allow-local covers this range
         for network in _PRIVATE_NETWORKS:
             if addr in network:
+                if _allow_local and _is_local_ip(addr):
+                    return None  # permitted by --allow-local
                 return f"Access to private/reserved IP '{hostname}' is blocked."
     except ValueError:
         # Not an IP literal — that's fine, it's a domain name
         pass
 
     return None
+
+
+# ── DNS rebinding defense ────────────────────────────────────────────
+
+DNS_RESOLVE_TIMEOUT_SECONDS = 2.0
+
+
+async def _resolve_dns(hostname: str) -> list[str]:
+    """Resolve hostname to deduplicated IP address list.
+
+    Uses asyncio.to_thread to avoid blocking the event loop.
+    Raises ValueError on DNS failure or timeout.
+    """
+
+    def _sync_resolve() -> list[str]:
+        results = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+        # Deduplicate IPs (getaddrinfo may return duplicates for different socket types)
+        seen: set[str] = set()
+        ips: list[str] = []
+        for _family, _type, _proto, _canonname, sockaddr in results:
+            ip = sockaddr[0]
+            if ip not in seen:
+                seen.add(ip)
+                ips.append(ip)
+        return ips
+
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(_sync_resolve),
+            timeout=DNS_RESOLVE_TIMEOUT_SECONDS,
+        )
+    except TimeoutError as e:
+        raise ValueError(f"DNS resolution timed out for '{hostname}'") from e
+    except socket.gaierror as e:
+        raise ValueError(f"DNS resolution failed for '{hostname}': {e}") from e
+
+
+def _validate_resolved_ips(ips: list[str], hostname: str) -> str | None:
+    """Check resolved IPs against private/reserved ranges.
+
+    Returns None if all IPs are public, or an error message if any is private.
+    Uses dual check: explicit _PRIVATE_NETWORKS list + is_global fallback.
+    """
+    if not ips:
+        return f"DNS resolution returned no addresses for '{hostname}'."
+
+    for ip_str in ips:
+        try:
+            addr = ipaddress.ip_address(ip_str)
+        except ValueError:
+            return f"Invalid IP '{ip_str}' resolved from '{hostname}'."
+
+        # Cloud metadata: always blocked
+        if _is_cloud_metadata_ip(addr):
+            return f"DNS rebinding blocked: '{hostname}' resolved to cloud metadata IP {ip_str}."
+
+        # Check 1: explicit private network membership
+        is_private = any(addr in net for net in _PRIVATE_NETWORKS)
+        if is_private:
+            if _allow_local and _is_local_ip(addr):
+                continue  # permitted by --allow-local
+            return f"DNS rebinding blocked: '{hostname}' resolved to private IP {ip_str}."
+
+        # Check 2 (defense-in-depth): is_global catches reserved ranges
+        # not in our explicit list (e.g., documentation, benchmarking ranges)
+        # These are never local dev IPs — not exempted by --allow-local
+        if not addr.is_global:
+            return f"DNS rebinding blocked: '{hostname}' resolved to non-global IP {ip_str}."
+
+    return None
+
+
+async def _validate_url_with_dns(url: str) -> str | None:
+    """Validate URL with DNS resolution for domain hostnames.
+
+    Combines sync URL validation (scheme, IP literal) with async DNS
+    resolution for domain names. Returns None if safe, error string if blocked.
+    """
+    # Fast path: sync validation (scheme, blocked hosts, IP literals)
+    error = _validate_url(url)
+    if error:
+        return error
+
+    # Extract hostname for DNS check
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return "Invalid URL format."
+
+    hostname = (parsed.hostname or "").lower()
+    if not hostname:
+        return None  # Already caught by _validate_url
+
+    # Skip DNS for IP literals — already validated by _validate_url
+    try:
+        ipaddress.ip_address(hostname)
+        return None  # IP literal, already checked
+    except ValueError:
+        pass
+
+    # Also skip if _normalize_ip recognizes it (octal/hex/decimal)
+    if _normalize_ip(hostname) is not None:
+        return None  # Non-standard IP format, already checked
+
+    # Domain name — resolve and validate IPs
+    try:
+        ips = await _resolve_dns(hostname)
+    except ValueError as e:
+        return str(e)
+
+    return _validate_resolved_ips(ips, hostname)
 
 
 # ── Error sanitization ───────────────────────────────────────────────
@@ -246,11 +460,41 @@ def _safe_error(context: str, exc: Exception) -> str:
     return f"Error ({context}): {exc_msg}"
 
 
+# ── Retry error classification ───────────────────────────────────────
+
+_RETRYABLE_PATTERNS = (
+    "Timeout",  # actionability timeout
+    "not visible",  # element temporarily hidden
+    "not stable",  # mid-animation
+    "intercept",  # overlay temporarily blocking
+    "not attached",  # detached during re-render
+    "detached",  # element detached from DOM
+)
+
+# Click is NOT idempotent — only retry on pre-dispatch failures
+_CLICK_SAFE_PATTERNS = (
+    "not visible",
+    "not stable",
+    "intercept",
+)
+
+
+def _is_retryable_error(exc: Exception, action: str) -> bool:
+    """Determine if error is transient and safe to retry for this action."""
+    msg = str(exc).lower()
+    if action == "click":
+        return any(p.lower() in msg for p in _CLICK_SAFE_PATTERNS)
+    return any(p.lower() in msg for p in _RETRYABLE_PATTERNS)
+
+
 # ── Global state with lock ───────────────────────────────────────────
 
 _session_lock = asyncio.Lock()
 _session = None
 _last_page_map = None
+
+# Runtime flag — set once by main() before mcp.run(), read-only after that
+_allow_local: bool = False
 
 
 async def _get_session():
@@ -272,6 +516,7 @@ async def _get_session():
             config = BrowserConfig(headless=True)
             _session = BrowserSession(config)
             await _session.start()
+            await _session.install_ssrf_route_guard(_validate_url)
             logger.info("Browser session started")
         return _session
 
@@ -308,9 +553,9 @@ async def get_page_map(url: str | None = None) -> str:
 
     request_id = uuid.uuid4().hex[:12]
 
-    # Validate URL before navigation
+    # Validate URL before navigation (sync + async DNS check)
     if url is not None:
-        error = _validate_url(url)
+        error = await _validate_url_with_dns(url)
         if error:
             logger.warning("SSRF blocked: request=%s url=%s reason=%s", request_id, url, error)
             return f"Error: {error}"
@@ -333,9 +578,9 @@ async def get_page_map(url: str | None = None) -> str:
             timeout=PAGE_MAP_TIMEOUT_SECONDS,
         )
 
-        # Post-navigation URL revalidation (detect redirect-based SSRF)
+        # Post-navigation URL revalidation (detect redirect-based SSRF + DNS rebinding)
         final_url = await session.get_page_url()
-        post_error = _validate_url(final_url)
+        post_error = await _validate_url_with_dns(final_url)
         if post_error:
             logger.warning(
                 "SSRF post-nav blocked: request=%s final_url=%s reason=%s",
@@ -363,6 +608,141 @@ async def get_page_map(url: str | None = None) -> str:
     except Exception as e:
         logger.error("get_page_map: request=%s failed", request_id)
         return _safe_error("get_page_map", e)
+
+
+async def _resolve_locator(page: Page, target: Interactable) -> tuple[Locator, str]:
+    """Resolve a Playwright Locator for the target element with fallback chain.
+
+    Strategy order:
+      1. get_by_role(role, name, exact=True) if count == 1 (standard fast path)
+      2. CSS selector if available (precise fallback)
+      3. get_by_role with count > 1 (degraded, with warning)
+      4. ValueError if nothing works
+
+    Returns:
+        Tuple of (locator, strategy_str) where strategy is "role" or "css"
+
+    Raises:
+        ValueError: when no strategy can locate the element
+    """
+    role_count = 0
+
+    # Strategy 1: get_by_role (skip if name is empty — too broad)
+    if target.name.strip():
+        try:
+            role_locator = page.get_by_role(target.role, name=target.name, exact=True)
+            role_count = await role_locator.count()
+        except PlaywrightError:
+            role_count = 0
+
+        if role_count == 1:
+            return role_locator, "role"
+
+    # Strategy 2: CSS selector fallback
+    if target.selector:
+        try:
+            css_locator = page.locator(target.selector)
+            css_count = await css_locator.count()
+            if css_count >= 1:
+                return css_locator, "css"
+        except PlaywrightError:
+            pass
+
+    # Strategy 3: role locator with multiple matches (degraded)
+    if role_count > 1:
+        logger.warning(
+            "Ambiguous: %d matches for [%d] %s '%s', using first",
+            role_count,
+            target.ref,
+            target.role,
+            target.name,
+        )
+        return page.get_by_role(target.role, name=target.name, exact=True), "role"
+
+    # Strategy 4: everything failed
+    raise ValueError(
+        f'Could not locate [{target.ref}] {target.role} "{target.name}". '
+        f"The page may have changed. Call get_page_map to refresh."
+    )
+
+
+async def _execute_locator_action_with_retry(
+    page: Page,
+    target: Interactable,
+    action: str,
+    value: str | None,
+    request_id: str,
+    original_url: str,
+) -> str:
+    """Execute locator-based action with retry on transient failures.
+
+    Key value: re-resolves locator on retry (role->CSS strategy switch).
+    Click retried only on pre-dispatch failures (double-submission safety).
+
+    Returns: locator method ("role" or "css")
+    Raises: ValueError (element not found), PlaywrightError (non-retryable/exhausted)
+    """
+    import time
+
+    t0 = time.monotonic()
+    last_error: Exception | None = None
+
+    for attempt in range(MAX_ACTION_RETRIES + 1):
+        # ── Wall-clock budget check ──
+        if attempt > 0:
+            elapsed = time.monotonic() - t0
+            remaining = _RETRY_BUDGET_SECONDS - elapsed
+            if remaining < _MIN_ATTEMPT_SECONDS:
+                logger.info("Retry budget exhausted (%.1fs elapsed), giving up", elapsed)
+                break
+
+            # ── URL change check (SSRF + navigation safety) ──
+            current_url = page.url
+            if current_url != original_url:
+                logger.info("URL changed during retry, aborting retry loop")
+                break  # fall through to raise last_error
+
+            # ── Backoff delay ──
+            delay = _RETRY_DELAYS[attempt - 1]
+            logger.info(
+                "execute_action retry: request=%s ref=%d attempt=%d/%d delay=%.1fs",
+                request_id,
+                target.ref,
+                attempt + 1,
+                MAX_ACTION_RETRIES + 1,
+                delay,
+            )
+            await asyncio.sleep(delay)
+
+        # ── Resolve locator ──
+        try:
+            locator, method = await _resolve_locator(page, target)
+        except ValueError:
+            if attempt == 0:
+                raise  # First attempt: propagate immediately
+            continue  # Keep previous error, try next attempt
+
+        # ── Execute action ──
+        try:
+            if action == "click":
+                await locator.first.click(timeout=5000)
+            elif action == "type":
+                await locator.first.fill(value, timeout=5000)
+            elif action == "select":
+                await locator.first.select_option(value, timeout=5000)
+            return method  # Success
+        except PlaywrightError as exc:
+            last_error = exc
+            if not _is_retryable_error(exc, action):
+                raise
+            if attempt == MAX_ACTION_RETRIES:
+                raise
+            # Continue to next attempt
+
+    # Budget exhausted or URL changed
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("Retry loop exited unexpectedly")
 
 
 @mcp.tool()
@@ -429,39 +809,88 @@ async def execute_action(ref: int, action: str = "click", value: str | None = No
     if target is None:
         return f"Error: ref [{ref}] not found. Valid refs: 1-{len(current_page_map.interactables)}"
 
+    # ── Affordance-action compatibility check ──
+    allowed = ACTION_AFFORDANCE_COMPAT.get(action)
+    if allowed is not None and target.affordance not in allowed:
+        suggested = AFFORDANCE_SUGGESTED_ACTION.get(target.affordance, target.affordance)
+        return (
+            f'Error: Cannot {action} on [{ref}] {target.role} "{target.name}" '
+            f"(affordance={target.affordance}). "
+            f'Try action="{suggested}" instead.'
+        )
+
     logger.info("execute_action: request=%s ref=%d action=%s", request_id, ref, action)
 
-    try:
+    async def _execute_action_core() -> str:
+        """Core execute_action logic, wrapped by asyncio.wait_for."""
+        global _last_page_map
+
         session = await _get_session()
         page = session.page
 
-        if action == "click":
-            locator = page.get_by_role(target.role, name=target.name)
-            await locator.first.click(timeout=5000)
-            await page.wait_for_timeout(1000)
-            result = f"Clicked [{ref}] {target.role}: {target.name}"
+        # ── Pre-action DOM fingerprint ──
+        # NOTE: Safe without lock — STDIO transport is single-request.
+        # For HTTP transport (future), wrap action+fingerprint in broader lock.
+        pre_fingerprint = await capture_dom_fingerprint(page)
 
-        elif action == "type":
-            locator = page.get_by_role(target.role, name=target.name)
-            await locator.first.fill(value, timeout=5000)
-            result = f"Typed into [{ref}] {target.role}: {target.name}"
-
-        elif action == "select":
-            locator = page.get_by_role(target.role, name=target.name)
-            await locator.first.select_option(value, timeout=5000)
-            result = f"Selected option in [{ref}] {target.role}: {target.name}"
-
-        elif action == "press_key":
+        if action == "press_key":
             await page.keyboard.press(value)
             await page.wait_for_timeout(500)
             result = f"Pressed key '{value}'"
-
         else:
-            return "Error: Unexpected action."
+            # Execute action with retry on transient failures
+            try:
+                method = await _execute_locator_action_with_retry(
+                    page,
+                    target,
+                    action,
+                    value,
+                    request_id,
+                    current_page_map.url,
+                )
+            except ValueError as loc_err:
+                return f"Error: {loc_err}"
+            # PlaywrightError falls through to outer except handler
 
-        # -- Stale ref detection --
+            # Post-action settle
+            if action == "click":
+                await page.wait_for_timeout(1000)
+
+            # Build result message
+            if action == "click":
+                result = f"Clicked [{ref}] {target.role}: {target.name}"
+            elif action == "type":
+                result = f"Typed into [{ref}] {target.role}: {target.name}"
+            elif action == "select":
+                result = f"Selected option in [{ref}] {target.role}: {target.name}"
+            else:
+                return "Error: Unexpected action."
+
+            if method == "css":
+                result += " (resolved via CSS selector)"
+
+        # -- Stale ref detection + SSRF check on navigation --
         new_url = await session.get_page_url()
         if new_url != current_page_map.url:
+            # SSRF check: validate the new URL (DNS rebinding defense)
+            ssrf_error = await _validate_url_with_dns(new_url)
+            if ssrf_error:
+                logger.warning(
+                    "SSRF post-action blocked: request=%s new_url=%s reason=%s",
+                    request_id,
+                    new_url,
+                    ssrf_error,
+                )
+                # Navigate away to prevent content access
+                with suppress(Exception):
+                    await page.goto("about:blank")
+                async with _session_lock:
+                    _last_page_map = None
+                return (
+                    f"Error: Action caused navigation to blocked URL — {ssrf_error}\n"
+                    "Page has been reset. Call get_page_map with a safe URL."
+                )
+
             async with _session_lock:
                 _last_page_map = None
             logger.info(
@@ -474,11 +903,59 @@ async def execute_action(ref: int, action: str = "click", value: str | None = No
                 f"\nCurrent URL: {new_url}\n\n⚠ Page navigated. Refs are now expired. Call get_page_map to refresh."
             )
         else:
-            result += f"\nCurrent URL: {new_url}"
+            # URL didn't change — check for DOM changes (SPA, modals, etc.)
+            dom_warning = ""
+            if pre_fingerprint is not None:
+                post_fingerprint = await capture_dom_fingerprint(page)
+                if post_fingerprint is not None:
+                    verdict = detect_dom_changes(pre_fingerprint, post_fingerprint)
+                    if verdict.severity == "major":
+                        async with _session_lock:
+                            _last_page_map = None
+                        reasons_str = "; ".join(verdict.reasons)
+                        logger.info(
+                            "execute_action: request=%s dom_change=major reasons=%s",
+                            request_id,
+                            reasons_str,
+                        )
+                        dom_warning = (
+                            f"\n\n⚠ Page content changed ({reasons_str}). "
+                            "Refs are now expired. Call get_page_map to refresh."
+                        )
+                    elif verdict.severity == "minor":
+                        logger.info(
+                            "execute_action: request=%s dom_change=minor reasons=%s",
+                            request_id,
+                            "; ".join(verdict.reasons),
+                        )
+                        dom_warning = "\n\n⚠ Page content updated. Consider calling get_page_map if interactions fail."
+            result += f"\nCurrent URL: {new_url}{dom_warning}"
 
         return result
 
+    try:
+        return await asyncio.wait_for(
+            _execute_action_core(),
+            timeout=EXECUTE_ACTION_TIMEOUT_SECONDS,
+        )
+    except TimeoutError:
+        logger.error(
+            "execute_action: request=%s timed_out after %ds",
+            request_id,
+            EXECUTE_ACTION_TIMEOUT_SECONDS,
+        )
+        async with _session_lock:
+            _last_page_map = None
+        return (
+            f"Error: Action timed out after {EXECUTE_ACTION_TIMEOUT_SECONDS}s. "
+            "The page may be unresponsive. Call get_page_map to refresh."
+        )
     except Exception as e:
+        if _is_browser_dead_error(e):
+            logger.error("execute_action: request=%s browser_dead", request_id)
+            async with _session_lock:
+                _last_page_map = None
+            return "Error: Browser connection lost during action. Call get_page_map to recover and refresh refs."
         return _safe_error(f"execute_action [{ref}] {action}", e)
 
 
@@ -513,10 +990,47 @@ async def get_page_state() -> str:
         return _safe_error("get_page_state", e)
 
 
+def _parse_server_args(argv: list[str] | None = None) -> bool:
+    """Parse --allow-local from CLI args and PAGEMAP_ALLOW_LOCAL env var.
+
+    Uses parse_known_args to ignore unrecognized flags (e.g. 'serve' from
+    cli.py). Uses add_help=False to prevent stdout pollution on -h (MCP
+    stdio transport uses stdout for JSON-RPC).
+    """
+    import argparse
+    import os
+
+    parser = argparse.ArgumentParser(
+        description="PageMap MCP server",
+        add_help=False,
+    )
+    parser.add_argument(
+        "--allow-local",
+        action="store_true",
+        default=False,
+        help="Allow localhost and private IP access for local development",
+    )
+    args, _ = parser.parse_known_args(argv)
+
+    env_val = os.environ.get("PAGEMAP_ALLOW_LOCAL", "").strip().lower()
+    return args.allow_local or env_val in ("1", "true", "yes")
+
+
 def main():
     """Entry point for the MCP server."""
     import atexit
     import signal
+    import sys
+
+    global _allow_local
+    _allow_local = _parse_server_args(sys.argv[1:])
+
+    if _allow_local:
+        logger.warning(
+            "SECURITY: Local network access enabled (--allow-local). "
+            "localhost and private IPs (127.x, 10.x, 172.16-31.x, 192.168.x) "
+            "are accessible. Cloud metadata endpoints remain blocked."
+        )
 
     def _sync_cleanup(*_args):
         """Best-effort synchronous cleanup for atexit/signal handlers."""
@@ -533,7 +1047,10 @@ def main():
     signal.signal(signal.SIGTERM, _sync_cleanup)
     signal.signal(signal.SIGINT, _sync_cleanup)
 
-    logger.info("Starting Page Map MCP server (stdio transport)")
+    logger.info(
+        "Starting Page Map MCP server (stdio transport, allow_local=%s)",
+        _allow_local,
+    )
     mcp.run(transport="stdio")
 
 

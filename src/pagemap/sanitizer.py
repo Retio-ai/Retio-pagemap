@@ -39,6 +39,18 @@ _BOUNDARY_TAG_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Markdown injection: [text](javascript:...) and image ![alt](data:...)
+_MARKDOWN_LINK_DANGEROUS_RE = re.compile(
+    r"\[([^\]]*)\]\(\s*(javascript|vbscript|data|blob)\s*:[^)]*\)",
+    re.IGNORECASE,
+)
+
+# Markdown autolink: <javascript:alert(1)>
+_MARKDOWN_AUTOLINK_DANGEROUS_RE = re.compile(
+    r"<\s*(javascript|vbscript|data|blob)\s*:[^>]*>",
+    re.IGNORECASE,
+)
+
 
 def sanitize_text(text: str, max_len: int = 256) -> str:
     """Sanitize a short text field (element names, titles, metadata values).
@@ -66,6 +78,10 @@ def sanitize_text(text: str, max_len: int = 256) -> str:
 
     # Strip boundary tags to prevent content escaping
     text = _BOUNDARY_TAG_RE.sub("", text)
+
+    # Neutralize Markdown injection
+    text = _MARKDOWN_LINK_DANGEROUS_RE.sub(r"[\1](blocked:\2)", text)
+    text = _MARKDOWN_AUTOLINK_DANGEROUS_RE.sub("[blocked link]", text)
 
     # Collapse whitespace
     text = re.sub(r"\s{2,}", " ", text).strip()
@@ -97,6 +113,10 @@ def sanitize_content_block(text: str, max_len: int = 50_000) -> str:
 
     # Strip boundary tags to prevent content escaping
     text = _BOUNDARY_TAG_RE.sub("", text)
+
+    # Neutralize Markdown injection
+    text = _MARKDOWN_LINK_DANGEROUS_RE.sub(r"[\1](blocked:\2)", text)
+    text = _MARKDOWN_AUTOLINK_DANGEROUS_RE.sub("[blocked link]", text)
 
     # Truncate
     if len(text) > max_len:

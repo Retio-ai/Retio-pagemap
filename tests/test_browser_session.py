@@ -1,12 +1,15 @@
 """Tests for browser session configuration and utilities.
 
 Tests BrowserConfig defaults, security launch args, CDP AX tree conversion,
-and property guards. Does not require a running browser.
+property guards, and S3 browser hardening. Does not require a running browser.
 """
+
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from pagemap.browser_session import (
+    BLOCKED_URL_SCHEMES,
     DEFAULT_LOCALE,
     DEFAULT_USER_AGENT,
     DEFAULT_VIEWPORT,
@@ -272,3 +275,278 @@ class TestCdpAxNodesToTree:
         tree = _cdp_ax_nodes_to_tree(nodes)
         assert tree["value"] == ""
         assert tree["focused"] is False
+
+
+# ── S3: Browser Launch Args ──────────────────────────────────────
+
+
+def _build_mock_chain():
+    """Build a full mock chain: async_playwright → browser → context → page → route."""
+    mock_page = AsyncMock()
+    mock_page.route = AsyncMock()
+
+    mock_context = AsyncMock()
+    mock_context.new_page = AsyncMock(return_value=mock_page)
+    mock_context.route = AsyncMock()
+
+    mock_browser = AsyncMock()
+    mock_browser.new_context = AsyncMock(return_value=mock_context)
+
+    mock_chromium = AsyncMock()
+    mock_chromium.launch = AsyncMock(return_value=mock_browser)
+
+    mock_pw = AsyncMock()
+    mock_pw.chromium = mock_chromium
+
+    mock_pw_cm = AsyncMock()
+    mock_pw_cm.start = AsyncMock(return_value=mock_pw)
+
+    return mock_pw_cm, mock_chromium, mock_browser, mock_context, mock_page
+
+
+class TestBrowserLaunchArgs:
+    """S3: Verify hardened Chromium launch args."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self):
+        self.mock_pw_cm, self.mock_chromium, self.mock_browser, self.mock_context, self.mock_page = _build_mock_chain()
+
+    def _get_launch_args(self):
+        """Extract the args list passed to chromium.launch()."""
+        call_kwargs = self.mock_chromium.launch.call_args
+        return call_kwargs.kwargs.get("args", call_kwargs[1].get("args", []))
+
+    def _get_context_kwargs(self):
+        """Extract kwargs passed to browser.new_context()."""
+        return self.mock_browser.new_context.call_args.kwargs
+
+    @pytest.mark.asyncio
+    async def test_popup_blocking_arg(self):
+        with patch("pagemap.browser_session.async_playwright", return_value=self.mock_pw_cm):
+            session = BrowserSession()
+            await session.start()
+        assert "--block-new-web-contents" in self._get_launch_args()
+
+    @pytest.mark.asyncio
+    async def test_webrtc_ip_leak_prevention(self):
+        with patch("pagemap.browser_session.async_playwright", return_value=self.mock_pw_cm):
+            session = BrowserSession()
+            await session.start()
+        assert "--force-webrtc-ip-handling-policy=disable_non_proxied_udp" in self._get_launch_args()
+
+    @pytest.mark.asyncio
+    async def test_disable_features_single_flag(self):
+        """--disable-features must be a single arg to avoid last-wins behavior."""
+        with patch("pagemap.browser_session.async_playwright", return_value=self.mock_pw_cm):
+            session = BrowserSession()
+            await session.start()
+        args = self._get_launch_args()
+        disable_features = [a for a in args if a.startswith("--disable-features=")]
+        assert len(disable_features) == 1, "Multiple --disable-features flags found (last wins!)"
+        assert "ServiceWorker" in disable_features[0]
+        assert "WebRtcHideLocalIpsWithMdns" in disable_features[0]
+
+    @pytest.mark.asyncio
+    async def test_deny_permission_prompts(self):
+        with patch("pagemap.browser_session.async_playwright", return_value=self.mock_pw_cm):
+            session = BrowserSession()
+            await session.start()
+        assert "--deny-permission-prompts" in self._get_launch_args()
+
+    @pytest.mark.asyncio
+    async def test_telemetry_suppression_args(self):
+        with patch("pagemap.browser_session.async_playwright", return_value=self.mock_pw_cm):
+            session = BrowserSession()
+            await session.start()
+        args = self._get_launch_args()
+        for flag in (
+            "--disable-breakpad",
+            "--no-pings",
+            "--disable-domain-reliability",
+            "--disable-component-update",
+            "--disable-client-side-phishing-detection",
+        ):
+            assert flag in args, f"Missing telemetry suppression flag: {flag}"
+
+    @pytest.mark.asyncio
+    async def test_external_intent_blocking(self):
+        with patch("pagemap.browser_session.async_playwright", return_value=self.mock_pw_cm):
+            session = BrowserSession()
+            await session.start()
+        assert "--disable-external-intent-requests" in self._get_launch_args()
+
+    @pytest.mark.asyncio
+    async def test_dialog_suppression_args(self):
+        with patch("pagemap.browser_session.async_playwright", return_value=self.mock_pw_cm):
+            session = BrowserSession()
+            await session.start()
+        args = self._get_launch_args()
+        assert "--noerrdialogs" in args
+        assert "--disable-prompt-on-repost" in args
+
+    @pytest.mark.asyncio
+    async def test_no_sandbox_not_present(self):
+        """--no-sandbox is a security downgrade and must never be included."""
+        with patch("pagemap.browser_session.async_playwright", return_value=self.mock_pw_cm):
+            session = BrowserSession()
+            await session.start()
+        assert "--no-sandbox" not in self._get_launch_args()
+
+    @pytest.mark.asyncio
+    async def test_context_service_workers_blocked(self):
+        with patch("pagemap.browser_session.async_playwright", return_value=self.mock_pw_cm):
+            session = BrowserSession()
+            await session.start()
+        assert self._get_context_kwargs()["service_workers"] == "block"
+
+    @pytest.mark.asyncio
+    async def test_context_permissions_empty(self):
+        with patch("pagemap.browser_session.async_playwright", return_value=self.mock_pw_cm):
+            session = BrowserSession()
+            await session.start()
+        assert self._get_context_kwargs()["permissions"] == []
+
+    @pytest.mark.asyncio
+    async def test_context_downloads_disabled(self):
+        with patch("pagemap.browser_session.async_playwright", return_value=self.mock_pw_cm):
+            session = BrowserSession()
+            await session.start()
+        assert self._get_context_kwargs()["accept_downloads"] is False
+
+
+# ── S3: Scheme Block Route ───────────────────────────────────────
+
+
+class TestSchemeBlockRoute:
+    """S3: Verify context-level URL scheme blocking."""
+
+    @pytest.fixture
+    def handler(self):
+        """Extract the route handler from _install_scheme_block_route."""
+        session = BrowserSession.__new__(BrowserSession)
+        mock_context = AsyncMock()
+        session._context = mock_context
+        return session, mock_context
+
+    async def _extract_handler(self, session, mock_context):
+        await session._install_scheme_block_route()
+        return mock_context.route.call_args[0][1]
+
+    def _make_route(self, url: str):
+        route = AsyncMock()
+        route.request = MagicMock()
+        route.request.url = url
+        return route
+
+    @pytest.mark.asyncio
+    async def test_blocks_chrome_scheme(self, handler):
+        session, ctx = handler
+        h = await self._extract_handler(session, ctx)
+        route = self._make_route("chrome://settings")
+        await h(route)
+        route.abort.assert_called_once_with("blockedbyclient")
+
+    @pytest.mark.asyncio
+    async def test_blocks_devtools_scheme(self, handler):
+        session, ctx = handler
+        h = await self._extract_handler(session, ctx)
+        route = self._make_route("devtools://devtools/bundled/inspector.html")
+        await h(route)
+        route.abort.assert_called_once_with("blockedbyclient")
+
+    @pytest.mark.asyncio
+    async def test_blocks_chrome_extension_scheme(self, handler):
+        session, ctx = handler
+        h = await self._extract_handler(session, ctx)
+        route = self._make_route("chrome-extension://abc/page.html")
+        await h(route)
+        route.abort.assert_called_once_with("blockedbyclient")
+
+    @pytest.mark.asyncio
+    async def test_blocks_file_scheme(self, handler):
+        session, ctx = handler
+        h = await self._extract_handler(session, ctx)
+        route = self._make_route("file:///etc/passwd")
+        await h(route)
+        route.abort.assert_called_once_with("blockedbyclient")
+
+    @pytest.mark.asyncio
+    async def test_blocks_view_source_scheme(self, handler):
+        session, ctx = handler
+        h = await self._extract_handler(session, ctx)
+        route = self._make_route("view-source://example.com")
+        await h(route)
+        route.abort.assert_called_once_with("blockedbyclient")
+
+    @pytest.mark.asyncio
+    async def test_blocks_blob_scheme(self, handler):
+        session, ctx = handler
+        h = await self._extract_handler(session, ctx)
+        route = self._make_route("blob:https://evil.com/abc")
+        await h(route)
+        route.abort.assert_called_once_with("blockedbyclient")
+
+    @pytest.mark.asyncio
+    async def test_blocks_data_scheme(self, handler):
+        session, ctx = handler
+        h = await self._extract_handler(session, ctx)
+        route = self._make_route("data:text/html,<script>alert(1)</script>")
+        await h(route)
+        route.abort.assert_called_once_with("blockedbyclient")
+
+    @pytest.mark.asyncio
+    async def test_blocks_about_newtab(self, handler):
+        session, ctx = handler
+        h = await self._extract_handler(session, ctx)
+        route = self._make_route("about:newtab")
+        await h(route)
+        route.abort.assert_called_once_with("blockedbyclient")
+
+    @pytest.mark.asyncio
+    async def test_blocks_about_srcdoc(self, handler):
+        session, ctx = handler
+        h = await self._extract_handler(session, ctx)
+        route = self._make_route("about:srcdoc")
+        await h(route)
+        route.abort.assert_called_once_with("blockedbyclient")
+
+    @pytest.mark.asyncio
+    async def test_allows_about_blank(self, handler):
+        """about:blank must pass — used by SSRF reset in server.py."""
+        session, ctx = handler
+        h = await self._extract_handler(session, ctx)
+        route = self._make_route("about:blank")
+        await h(route)
+        route.continue_.assert_called_once()
+        route.abort.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_allows_https(self, handler):
+        session, ctx = handler
+        h = await self._extract_handler(session, ctx)
+        route = self._make_route("https://example.com")
+        await h(route)
+        route.continue_.assert_called_once()
+        route.abort.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_allows_http(self, handler):
+        session, ctx = handler
+        h = await self._extract_handler(session, ctx)
+        route = self._make_route("http://example.com")
+        await h(route)
+        route.continue_.assert_called_once()
+        route.abort.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_registered_on_context_not_page(self, handler):
+        """Route must be installed at context level, not page level."""
+        session, ctx = handler
+        await session._install_scheme_block_route()
+        ctx.route.assert_called_once()
+        assert ctx.route.call_args[0][0] == "**/*"
+
+    def test_blocked_url_schemes_completeness(self):
+        """Verify all expected schemes are in the constant."""
+        expected = {"chrome://", "devtools://", "chrome-extension://", "file://", "view-source://", "blob:", "data:"}
+        assert set(BLOCKED_URL_SCHEMES) == expected

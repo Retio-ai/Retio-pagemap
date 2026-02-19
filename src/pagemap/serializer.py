@@ -46,6 +46,7 @@ def to_json(page_map: PageMap, indent: int = 2) -> str:
         "pruned_context": page_map.pruned_context,
         "images": page_map.images,
         **({"metadata": page_map.metadata} if page_map.metadata else {}),
+        **({"warnings": page_map.warnings} if page_map.warnings else {}),
         "meta": {
             "pruned_tokens": page_map.pruned_tokens,
             "interactable_count": page_map.total_interactables,
@@ -93,6 +94,13 @@ def to_agent_prompt(page_map: PageMap, include_meta: bool = False) -> str:
         lines.append(f"Title: {sanitize_text(page_map.title)}")
     lines.append(f"Type: {page_map.page_type}")
     lines.append("")
+
+    # Warnings section (degraded mode notices)
+    if page_map.warnings:
+        lines.append("## Warnings")
+        for w in page_map.warnings:
+            lines.append(f"- {w}")
+        lines.append("")
 
     # Actions section
     if page_map.interactables:
