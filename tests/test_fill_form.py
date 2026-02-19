@@ -270,6 +270,7 @@ class TestFillFormInputValidation:
     async def test_type_missing_value(self):
         fields = [FormField(ref=1, action="type", value=None)]
         import pagemap.server as srv
+
         srv._last_page_map = _make_page_map()
         result = await fill_form(fields=fields)
         assert "requires a 'value'" in result
@@ -278,6 +279,7 @@ class TestFillFormInputValidation:
     async def test_select_missing_value(self):
         fields = [FormField(ref=3, action="select", value=None)]
         import pagemap.server as srv
+
         srv._last_page_map = _make_page_map()
         result = await fill_form(fields=fields)
         assert "requires a 'value'" in result
@@ -303,6 +305,7 @@ class TestFillFormInputValidation:
     @pytest.mark.asyncio
     async def test_ref_not_found(self):
         import pagemap.server as srv
+
         srv._last_page_map = _make_page_map()
         fields = [FormField(ref=999, action="click")]
         result = await fill_form(fields=fields)
@@ -311,6 +314,7 @@ class TestFillFormInputValidation:
     @pytest.mark.asyncio
     async def test_affordance_mismatch(self):
         import pagemap.server as srv
+
         srv._last_page_map = _make_page_map()
         # Try to type on a button (affordance=click)
         fields = [FormField(ref=4, action="type", value="text")]
@@ -328,6 +332,7 @@ class TestFillFormBasic:
     @pytest.mark.asyncio
     async def test_single_type(self):
         import pagemap.server as srv
+
         srv._last_page_map = _make_page_map()
         mock_session = _make_mock_session()
 
@@ -337,6 +342,7 @@ class TestFillFormBasic:
             patch("pagemap.server.detect_dom_changes") as mock_detect,
         ):
             from pagemap.dom_change_detector import DomChangeVerdict
+
             mock_detect.return_value = DomChangeVerdict(changed=False, severity="none", reasons=[])
             result = await fill_form(fields=[FormField(ref=1, action="type", value="test@email.com")])
 
@@ -346,6 +352,7 @@ class TestFillFormBasic:
     @pytest.mark.asyncio
     async def test_single_select(self):
         import pagemap.server as srv
+
         srv._last_page_map = _make_page_map()
         mock_session = _make_mock_session()
 
@@ -355,6 +362,7 @@ class TestFillFormBasic:
             patch("pagemap.server.detect_dom_changes") as mock_detect,
         ):
             from pagemap.dom_change_detector import DomChangeVerdict
+
             mock_detect.return_value = DomChangeVerdict(changed=False, severity="none", reasons=[])
             result = await fill_form(fields=[FormField(ref=3, action="select", value="US")])
 
@@ -364,6 +372,7 @@ class TestFillFormBasic:
     @pytest.mark.asyncio
     async def test_single_click(self):
         import pagemap.server as srv
+
         srv._last_page_map = _make_page_map()
         mock_session = _make_mock_session()
 
@@ -373,6 +382,7 @@ class TestFillFormBasic:
             patch("pagemap.server.detect_dom_changes") as mock_detect,
         ):
             from pagemap.dom_change_detector import DomChangeVerdict
+
             mock_detect.return_value = DomChangeVerdict(changed=False, severity="none", reasons=[])
             result = await fill_form(fields=[FormField(ref=5, action="click")])
 
@@ -382,6 +392,7 @@ class TestFillFormBasic:
     @pytest.mark.asyncio
     async def test_mixed_batch(self):
         import pagemap.server as srv
+
         srv._last_page_map = _make_page_map()
         mock_session = _make_mock_session()
 
@@ -391,12 +402,15 @@ class TestFillFormBasic:
             patch("pagemap.server.detect_dom_changes") as mock_detect,
         ):
             from pagemap.dom_change_detector import DomChangeVerdict
+
             mock_detect.return_value = DomChangeVerdict(changed=False, severity="none", reasons=[])
-            result = await fill_form(fields=[
-                FormField(ref=1, action="type", value="user@email.com"),
-                FormField(ref=2, action="type", value="secret123"),
-                FormField(ref=5, action="click"),
-            ])
+            result = await fill_form(
+                fields=[
+                    FormField(ref=1, action="type", value="user@email.com"),
+                    FormField(ref=2, action="type", value="secret123"),
+                    FormField(ref=5, action="click"),
+                ]
+            )
 
         assert "3/3 fields completed" in result
         assert "typed" in result
@@ -405,6 +419,7 @@ class TestFillFormBasic:
     @pytest.mark.asyncio
     async def test_click_without_value(self):
         import pagemap.server as srv
+
         srv._last_page_map = _make_page_map()
         mock_session = _make_mock_session()
 
@@ -414,6 +429,7 @@ class TestFillFormBasic:
             patch("pagemap.server.detect_dom_changes") as mock_detect,
         ):
             from pagemap.dom_change_detector import DomChangeVerdict
+
             mock_detect.return_value = DomChangeVerdict(changed=False, severity="none", reasons=[])
             result = await fill_form(fields=[FormField(ref=4, action="click", value=None)])
 
@@ -422,6 +438,7 @@ class TestFillFormBasic:
     @pytest.mark.asyncio
     async def test_response_format_header(self):
         import pagemap.server as srv
+
         srv._last_page_map = _make_page_map()
         mock_session = _make_mock_session()
 
@@ -431,6 +448,7 @@ class TestFillFormBasic:
             patch("pagemap.server.detect_dom_changes") as mock_detect,
         ):
             from pagemap.dom_change_detector import DomChangeVerdict
+
             mock_detect.return_value = DomChangeVerdict(changed=False, severity="none", reasons=[])
             result = await fill_form(fields=[FormField(ref=1, action="type", value="hi")])
 
@@ -441,6 +459,7 @@ class TestFillFormBasic:
     async def test_css_fallback_noted(self):
         """CSS selector fallback should be noted in result."""
         import pagemap.server as srv
+
         srv._last_page_map = _make_page_map()
         mock_session = _make_mock_session()
         page = mock_session.page
@@ -463,6 +482,7 @@ class TestFillFormBasic:
             patch("pagemap.server.detect_dom_changes") as mock_detect,
         ):
             from pagemap.dom_change_detector import DomChangeVerdict
+
             mock_detect.return_value = DomChangeVerdict(changed=False, severity="none", reasons=[])
             result = await fill_form(fields=[FormField(ref=1, action="type", value="test")])
 
@@ -479,6 +499,7 @@ class TestFillFormNavigation:
     async def test_mid_batch_navigation_stops(self):
         """Navigation after 2nd field → stop, report partial."""
         import pagemap.server as srv
+
         srv._last_page_map = _make_page_map()
         mock_session = _make_mock_session()
 
@@ -498,11 +519,13 @@ class TestFillFormNavigation:
             patch("pagemap.server.capture_dom_fingerprint", return_value=_fp()),
             patch("pagemap.server._validate_url_with_dns", return_value=None),
         ):
-            result = await fill_form(fields=[
-                FormField(ref=1, action="type", value="user"),
-                FormField(ref=2, action="type", value="pass"),
-                FormField(ref=4, action="click"),
-            ])
+            result = await fill_form(
+                fields=[
+                    FormField(ref=1, action="type", value="user"),
+                    FormField(ref=2, action="type", value="pass"),
+                    FormField(ref=4, action="click"),
+                ]
+            )
 
         assert "navigated" in result.lower()
         assert "dashboard" in result
@@ -511,6 +534,7 @@ class TestFillFormNavigation:
     @pytest.mark.asyncio
     async def test_ssrf_navigation_blocked(self):
         import pagemap.server as srv
+
         srv._last_page_map = _make_page_map()
         mock_session = _make_mock_session()
         mock_session.get_page_url = AsyncMock(return_value="http://169.254.169.254/metadata")
@@ -529,6 +553,7 @@ class TestFillFormNavigation:
     async def test_last_field_navigation(self):
         """Navigation after last field → full completion + nav warning."""
         import pagemap.server as srv
+
         srv._last_page_map = _make_page_map()
         mock_session = _make_mock_session()
 
@@ -557,6 +582,7 @@ class TestFillFormNavigation:
     async def test_partial_completion_report(self):
         """Partial report shows which fields completed before stop."""
         import pagemap.server as srv
+
         srv._last_page_map = _make_page_map()
         mock_session = _make_mock_session()
 
@@ -568,10 +594,12 @@ class TestFillFormNavigation:
             patch("pagemap.server.capture_dom_fingerprint", return_value=_fp()),
             patch("pagemap.server._validate_url_with_dns", return_value=None),
         ):
-            result = await fill_form(fields=[
-                FormField(ref=1, action="type", value="user"),
-                FormField(ref=2, action="type", value="pass"),
-            ])
+            result = await fill_form(
+                fields=[
+                    FormField(ref=1, action="type", value="user"),
+                    FormField(ref=2, action="type", value="pass"),
+                ]
+            )
 
         assert "1/2 fields completed" in result
         assert "typed" in result
@@ -586,6 +614,7 @@ class TestFillFormPopup:
     @pytest.mark.asyncio
     async def test_popup_detected_switches(self):
         import pagemap.server as srv
+
         srv._last_page_map = _make_page_map()
         mock_session = _make_mock_session()
 
@@ -610,6 +639,7 @@ class TestFillFormPopup:
     @pytest.mark.asyncio
     async def test_popup_ssrf_blocked(self):
         import pagemap.server as srv
+
         srv._last_page_map = _make_page_map()
         mock_session = _make_mock_session()
 
@@ -639,6 +669,7 @@ class TestFillFormDomChange:
     @pytest.mark.asyncio
     async def test_major_dom_change(self):
         import pagemap.server as srv
+
         srv._last_page_map = _make_page_map()
         mock_session = _make_mock_session()
 
@@ -658,6 +689,7 @@ class TestFillFormDomChange:
     @pytest.mark.asyncio
     async def test_minor_dom_change(self):
         import pagemap.server as srv
+
         page_map = _make_page_map()
         srv._last_page_map = page_map
         mock_session = _make_mock_session()
@@ -678,6 +710,7 @@ class TestFillFormDomChange:
     @pytest.mark.asyncio
     async def test_no_dom_change(self):
         import pagemap.server as srv
+
         page_map = _make_page_map()
         srv._last_page_map = page_map
         mock_session = _make_mock_session()
@@ -690,6 +723,7 @@ class TestFillFormDomChange:
             patch("pagemap.server.detect_dom_changes") as mock_detect,
         ):
             from pagemap.dom_change_detector import DomChangeVerdict
+
             mock_detect.return_value = DomChangeVerdict(changed=False, severity="none", reasons=[])
             result = await fill_form(fields=[FormField(ref=1, action="type", value="hi")])
 
@@ -707,6 +741,7 @@ class TestFillFormErrors:
     @pytest.mark.asyncio
     async def test_locator_error_stops(self):
         import pagemap.server as srv
+
         srv._last_page_map = _make_page_map()
         mock_session = _make_mock_session()
         locator = mock_session.page.get_by_role.return_value
@@ -721,10 +756,12 @@ class TestFillFormErrors:
             patch("pagemap.server._get_session", return_value=mock_session),
             patch("pagemap.server.capture_dom_fingerprint", return_value=_fp()),
         ):
-            result = await fill_form(fields=[
-                FormField(ref=1, action="type", value="test"),
-                FormField(ref=2, action="type", value="pass"),
-            ])
+            result = await fill_form(
+                fields=[
+                    FormField(ref=1, action="type", value="test"),
+                    FormField(ref=2, action="type", value="pass"),
+                ]
+            )
 
         assert "locator error" in result
         assert "0/2" in result
@@ -732,6 +769,7 @@ class TestFillFormErrors:
     @pytest.mark.asyncio
     async def test_playwright_error_stops(self):
         import pagemap.server as srv
+
         srv._last_page_map = _make_page_map()
         mock_session = _make_mock_session()
         locator = mock_session.page.get_by_role.return_value
@@ -741,10 +779,12 @@ class TestFillFormErrors:
             patch("pagemap.server._get_session", return_value=mock_session),
             patch("pagemap.server.capture_dom_fingerprint", return_value=_fp()),
         ):
-            result = await fill_form(fields=[
-                FormField(ref=1, action="type", value="test"),
-                FormField(ref=2, action="type", value="pass"),
-            ])
+            result = await fill_form(
+                fields=[
+                    FormField(ref=1, action="type", value="test"),
+                    FormField(ref=2, action="type", value="pass"),
+                ]
+            )
 
         assert "action error" in result
         assert "0/2" in result
@@ -752,6 +792,7 @@ class TestFillFormErrors:
     @pytest.mark.asyncio
     async def test_browser_dead(self):
         import pagemap.server as srv
+
         srv._last_page_map = _make_page_map()
         mock_session = _make_mock_session()
         locator = mock_session.page.get_by_role.return_value
@@ -766,6 +807,7 @@ class TestFillFormErrors:
     @pytest.mark.asyncio
     async def test_timeout(self):
         import pagemap.server as srv
+
         srv._last_page_map = _make_page_map()
         mock_session = _make_mock_session()
 
@@ -789,6 +831,7 @@ class TestFillFormErrors:
     async def test_partial_result_on_error(self):
         """First field succeeds, second fails → partial report."""
         import pagemap.server as srv
+
         srv._last_page_map = _make_page_map()
         mock_session = _make_mock_session()
         locator = mock_session.page.get_by_role.return_value
@@ -807,10 +850,12 @@ class TestFillFormErrors:
             patch("pagemap.server._get_session", return_value=mock_session),
             patch("pagemap.server.capture_dom_fingerprint", return_value=_fp()),
         ):
-            result = await fill_form(fields=[
-                FormField(ref=1, action="type", value="user"),
-                FormField(ref=2, action="type", value="pass"),
-            ])
+            result = await fill_form(
+                fields=[
+                    FormField(ref=1, action="type", value="user"),
+                    FormField(ref=2, action="type", value="pass"),
+                ]
+            )
 
         assert "1/2" in result
         assert "typed" in result
@@ -827,6 +872,7 @@ class TestFillFormDialogs:
     async def test_dialog_warning_appended(self):
         import pagemap.server as srv
         from pagemap.browser_session import DialogInfo
+
         srv._last_page_map = _make_page_map()
         mock_session = _make_mock_session()
         mock_session.drain_dialogs = MagicMock(
@@ -839,6 +885,7 @@ class TestFillFormDialogs:
             patch("pagemap.server.detect_dom_changes") as mock_detect,
         ):
             from pagemap.dom_change_detector import DomChangeVerdict
+
             mock_detect.return_value = DomChangeVerdict(changed=False, severity="none", reasons=[])
             result = await fill_form(fields=[FormField(ref=1, action="type", value="hi")])
 

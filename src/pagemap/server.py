@@ -215,12 +215,8 @@ WAIT_FOR_MAX_TIMEOUT = 30.0
 WAIT_FOR_MAX_TEXT_LENGTH = 500
 WAIT_FOR_OVERALL_TIMEOUT_SECONDS = 35
 
-_WAIT_FOR_TEXT_APPEAR_JS = (
-    "(text) => document.body && document.body.innerText.includes(text)"
-)
-_WAIT_FOR_TEXT_GONE_JS = (
-    "(text) => !document.body || !document.body.innerText.includes(text)"
-)
+_WAIT_FOR_TEXT_APPEAR_JS = "(text) => document.body && document.body.innerText.includes(text)"
+_WAIT_FOR_TEXT_GONE_JS = "(text) => !document.body || !document.body.innerText.includes(text)"
 
 
 def _is_browser_dead_error(exc: Exception) -> bool:
@@ -1336,28 +1332,19 @@ async def fill_form(fields: list[FormField]) -> str:
             if f.value is None:
                 return f"Error: Field {i} (ref={f.ref}, action=type) requires a 'value'."
             if len(f.value) > MAX_TYPE_VALUE_LENGTH:
-                return (
-                    f"Error: Field {i} value too long ({len(f.value)} chars, "
-                    f"max {MAX_TYPE_VALUE_LENGTH})."
-                )
+                return f"Error: Field {i} value too long ({len(f.value)} chars, max {MAX_TYPE_VALUE_LENGTH})."
         if f.action == "select":
             if f.value is None:
                 return f"Error: Field {i} (ref={f.ref}, action=select) requires a 'value'."
             if len(f.value) > MAX_SELECT_VALUE_LENGTH:
-                return (
-                    f"Error: Field {i} value too long ({len(f.value)} chars, "
-                    f"max {MAX_SELECT_VALUE_LENGTH})."
-                )
+                return f"Error: Field {i} value too long ({len(f.value)} chars, max {MAX_SELECT_VALUE_LENGTH})."
 
     # ── Page map check + ref resolution ──
     async with _session_lock:
         current_page_map = _last_page_map
 
     if current_page_map is None:
-        return (
-            "Error: No active Page Map. "
-            "Call get_page_map first to load current page refs."
-        )
+        return "Error: No active Page Map. Call get_page_map first to load current page refs."
 
     # Build ref→Interactable lookup
     ref_map: dict[int, Interactable] = {item.ref: item for item in current_page_map.interactables}
@@ -1366,10 +1353,7 @@ async def fill_form(fields: list[FormField]) -> str:
     for i, f in enumerate(fields):
         target = ref_map.get(f.ref)
         if target is None:
-            return (
-                f"Error: Field {i} ref [{f.ref}] not found. "
-                f"Valid refs: 1-{len(current_page_map.interactables)}"
-            )
+            return f"Error: Field {i} ref [{f.ref}] not found. Valid refs: 1-{len(current_page_map.interactables)}"
         allowed = ACTION_AFFORDANCE_COMPAT.get(f.action)
         if allowed is not None and target.affordance not in allowed:
             suggested = AFFORDANCE_SUGGESTED_ACTION.get(target.affordance, target.affordance)
@@ -1412,10 +1396,7 @@ async def fill_form(fields: list[FormField]) -> str:
                     current_page_map.url,
                 )
             except ValueError as loc_err:
-                completed.append(
-                    f"[{f.ref}] {target.role} \"{target.name}\": "
-                    f"Error — {loc_err}"
-                )
+                completed.append(f'[{f.ref}] {target.role} "{target.name}": Error — {loc_err}')
                 return _format_fill_form_result(
                     completed,
                     completed_count,
@@ -1426,10 +1407,7 @@ async def fill_form(fields: list[FormField]) -> str:
             except PlaywrightError as pw_err:
                 if _is_browser_dead_error(pw_err):
                     raise  # Let outer handler deal with browser death
-                completed.append(
-                    f"[{f.ref}] {target.role} \"{target.name}\": "
-                    f"Error — {_truncate(str(pw_err), 100)}"
-                )
+                completed.append(f'[{f.ref}] {target.role} "{target.name}": Error — {_truncate(str(pw_err), 100)}')
                 return _format_fill_form_result(
                     completed,
                     completed_count,
@@ -1440,11 +1418,11 @@ async def fill_form(fields: list[FormField]) -> str:
 
             # Record success
             if f.action == "type":
-                completed.append(f"[{f.ref}] {target.role} \"{target.name}\": typed")
+                completed.append(f'[{f.ref}] {target.role} "{target.name}": typed')
             elif f.action == "select":
-                completed.append(f"[{f.ref}] {target.role} \"{target.name}\": selected")
+                completed.append(f'[{f.ref}] {target.role} "{target.name}": selected')
             elif f.action == "click":
-                completed.append(f"[{f.ref}] {target.role} \"{target.name}\": clicked")
+                completed.append(f'[{f.ref}] {target.role} "{target.name}": clicked')
             completed_count += 1
 
             if method == "css":
@@ -1524,10 +1502,7 @@ async def fill_form(fields: list[FormField]) -> str:
                     completed_count,
                     len(fields),
                     stopped_reason="navigation" if completed_count < len(fields) else None,
-                    nav_warning=(
-                        f"⚠ Page navigated to {new_url}. "
-                        "Refs are now expired. Call get_page_map to refresh."
-                    ),
+                    nav_warning=(f"⚠ Page navigated to {new_url}. Refs are now expired. Call get_page_map to refresh."),
                     session=session,
                 )
 
@@ -1542,14 +1517,10 @@ async def fill_form(fields: list[FormField]) -> str:
                         _last_page_map = None
                     reasons_str = "; ".join(verdict.reasons)
                     dom_warning = (
-                        f"\n⚠ Page content changed ({reasons_str}). "
-                        "Refs are now expired. Call get_page_map to refresh."
+                        f"\n⚠ Page content changed ({reasons_str}). Refs are now expired. Call get_page_map to refresh."
                     )
                 elif verdict.severity == "minor":
-                    dom_warning = (
-                        "\n⚠ Page content updated. "
-                        "Consider calling get_page_map if interactions fail."
-                    )
+                    dom_warning = "\n⚠ Page content updated. Consider calling get_page_map if interactions fail."
 
         result = _format_fill_form_result(
             completed,
@@ -1575,10 +1546,7 @@ async def fill_form(fields: list[FormField]) -> str:
         )
         async with _session_lock:
             _last_page_map = None
-        return (
-            f"Error: fill_form timed out after {FILL_FORM_TIMEOUT_SECONDS}s. "
-            "Call get_page_map to refresh."
-        )
+        return f"Error: fill_form timed out after {FILL_FORM_TIMEOUT_SECONDS}s. Call get_page_map to refresh."
     except Exception as e:
         if _is_browser_dead_error(e):
             logger.error("fill_form: request=%s browser_dead", request_id)
@@ -1626,10 +1594,7 @@ async def wait_for(
         return "Error: Text must not be empty."
 
     if len(target_text) > WAIT_FOR_MAX_TEXT_LENGTH:
-        return (
-            f"Error: Text too long ({len(target_text)} chars, "
-            f"max {WAIT_FOR_MAX_TEXT_LENGTH})."
-        )
+        return f"Error: Text too long ({len(target_text)} chars, max {WAIT_FOR_MAX_TEXT_LENGTH})."
 
     if timeout < 0:
         timeout = 0

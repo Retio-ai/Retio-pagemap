@@ -188,9 +188,7 @@ class TestWaitForTextAppear:
     async def test_appear_timeout(self):
         mock_session = _make_mock_session()
         mock_session.page.evaluate = AsyncMock(return_value=False)
-        mock_session.page.wait_for_function = AsyncMock(
-            side_effect=PlaywrightError("Timeout 10000ms exceeded")
-        )
+        mock_session.page.wait_for_function = AsyncMock(side_effect=PlaywrightError("Timeout 10000ms exceeded"))
 
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await wait_for(text="Order confirmed", timeout=10)
@@ -244,9 +242,7 @@ class TestWaitForTextGone:
     async def test_gone_timeout(self):
         mock_session = _make_mock_session()
         mock_session.page.evaluate = AsyncMock(return_value=False)
-        mock_session.page.wait_for_function = AsyncMock(
-            side_effect=PlaywrightError("Timeout 10000ms exceeded")
-        )
+        mock_session.page.wait_for_function = AsyncMock(side_effect=PlaywrightError("Timeout 10000ms exceeded"))
 
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await wait_for(text_gone="Loading...", timeout=10)
@@ -275,6 +271,7 @@ class TestWaitForPageMap:
     @pytest.mark.asyncio
     async def test_appear_found_invalidates(self):
         import pagemap.server as srv
+
         srv._last_page_map = _make_page_map()
         mock_session = _make_mock_session()
         mock_session.page.evaluate = AsyncMock(return_value=False)
@@ -288,6 +285,7 @@ class TestWaitForPageMap:
     @pytest.mark.asyncio
     async def test_gone_found_invalidates(self):
         import pagemap.server as srv
+
         srv._last_page_map = _make_page_map()
         mock_session = _make_mock_session()
         mock_session.page.evaluate = AsyncMock(return_value=False)
@@ -301,13 +299,12 @@ class TestWaitForPageMap:
     @pytest.mark.asyncio
     async def test_timeout_preserves_page_map(self):
         import pagemap.server as srv
+
         page_map = _make_page_map()
         srv._last_page_map = page_map
         mock_session = _make_mock_session()
         mock_session.page.evaluate = AsyncMock(return_value=False)
-        mock_session.page.wait_for_function = AsyncMock(
-            side_effect=PlaywrightError("Timeout 10000ms exceeded")
-        )
+        mock_session.page.wait_for_function = AsyncMock(side_effect=PlaywrightError("Timeout 10000ms exceeded"))
 
         with patch("pagemap.server._get_session", return_value=mock_session):
             await wait_for(text="Never appears", timeout=10)
@@ -317,6 +314,7 @@ class TestWaitForPageMap:
     @pytest.mark.asyncio
     async def test_already_visible_preserves_page_map(self):
         import pagemap.server as srv
+
         page_map = _make_page_map()
         srv._last_page_map = page_map
         mock_session = _make_mock_session()
@@ -330,6 +328,7 @@ class TestWaitForPageMap:
     @pytest.mark.asyncio
     async def test_already_gone_preserves_page_map(self):
         import pagemap.server as srv
+
         page_map = _make_page_map()
         srv._last_page_map = page_map
         mock_session = _make_mock_session()
@@ -350,6 +349,7 @@ class TestWaitForErrors:
     @pytest.mark.asyncio
     async def test_browser_dead(self):
         import pagemap.server as srv
+
         srv._last_page_map = _make_page_map()
         mock_session = _make_mock_session()
         mock_session.page.evaluate = AsyncMock(side_effect=PlaywrightError("Target closed"))
@@ -363,6 +363,7 @@ class TestWaitForErrors:
     @pytest.mark.asyncio
     async def test_overall_timeout(self):
         import pagemap.server as srv
+
         srv._last_page_map = _make_page_map()
         mock_session = _make_mock_session()
 
@@ -384,9 +385,7 @@ class TestWaitForErrors:
     async def test_non_timeout_playwright_error(self):
         mock_session = _make_mock_session()
         mock_session.page.evaluate = AsyncMock(return_value=False)
-        mock_session.page.wait_for_function = AsyncMock(
-            side_effect=PlaywrightError("Frame detached")
-        )
+        mock_session.page.wait_for_function = AsyncMock(side_effect=PlaywrightError("Frame detached"))
 
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await wait_for(text="hello")
@@ -396,9 +395,7 @@ class TestWaitForErrors:
     @pytest.mark.asyncio
     async def test_evaluate_failure(self):
         mock_session = _make_mock_session()
-        mock_session.page.evaluate = AsyncMock(
-            side_effect=PlaywrightError("Execution context destroyed")
-        )
+        mock_session.page.evaluate = AsyncMock(side_effect=PlaywrightError("Execution context destroyed"))
 
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await wait_for(text="hello")
@@ -484,9 +481,7 @@ class TestWaitForDialogs:
 
         mock_session = _make_mock_session()
         mock_session.page.evaluate = AsyncMock(return_value=False)
-        mock_session.page.wait_for_function = AsyncMock(
-            side_effect=PlaywrightError("Timeout 5000ms exceeded")
-        )
+        mock_session.page.wait_for_function = AsyncMock(side_effect=PlaywrightError("Timeout 5000ms exceeded"))
         mock_session.drain_dialogs = MagicMock(
             return_value=[DialogInfo(dialog_type="confirm", message="Leave?", dismissed=True)]
         )
@@ -524,6 +519,7 @@ class TestWaitForNoPageMapRequired:
     @pytest.mark.asyncio
     async def test_works_without_page_map(self):
         import pagemap.server as srv
+
         srv._last_page_map = None
         mock_session = _make_mock_session()
         mock_session.page.evaluate = AsyncMock(return_value=True)
