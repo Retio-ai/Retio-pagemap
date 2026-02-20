@@ -14,6 +14,7 @@ from pagemap.dom_change_detector import (
     DomFingerprint,
     capture_dom_fingerprint,
     detect_dom_changes,
+    fingerprints_structurally_equal,
 )
 
 
@@ -24,6 +25,7 @@ def _fp(
     has_dialog: bool = False,
     body_child_count: int = 5,
     title: str = "Test Page",
+    content_hash: int = 12345,
 ) -> DomFingerprint:
     """Helper to build a DomFingerprint with defaults."""
     return DomFingerprint(
@@ -32,6 +34,7 @@ def _fp(
         has_dialog=has_dialog,
         body_child_count=body_child_count,
         title=title,
+        content_hash=content_hash,
     )
 
 
@@ -269,3 +272,103 @@ class TestCaptureDomFingerprint:
         assert fp.has_dialog is False
         assert fp.body_child_count == 0
         assert fp.title == ""
+        assert fp.content_hash == 0
+
+    @pytest.mark.asyncio
+    async def test_content_hash_captured(self):
+        """contentHash from JS → content_hash field."""
+        page = AsyncMock()
+        page.evaluate = AsyncMock(
+            return_value={
+                "interactiveCounts": {"button": 2},
+                "totalInteractives": 2,
+                "hasDialog": False,
+                "bodyChildCount": 3,
+                "title": "Test",
+                "contentHash": -987654,
+            }
+        )
+        fp = await capture_dom_fingerprint(page)
+        assert fp is not None
+        assert fp.content_hash == -987654
+
+
+# =========================================================================
+# content_hash change detection
+# =========================================================================
+
+
+class TestContentHashDetection:
+    """Tests for content_changed severity when only text changes."""
+
+    def test_content_changed_severity(self):
+        """Same structure, different content_hash → content_changed."""
+        before = _fp(content_hash=111)
+        after = _fp(content_hash=222)
+        v = detect_dom_changes(before, after)
+        assert v.severity == "content_changed"
+        assert v.changed
+        assert any("text" in r for r in v.reasons)
+
+    def test_same_content_hash_no_change(self):
+        """Same structure, same content_hash → none."""
+        before = _fp(content_hash=111)
+        after = _fp(content_hash=111)
+        v = detect_dom_changes(before, after)
+        assert v.severity == "none"
+        assert not v.changed
+
+    def test_content_hash_zero_before_ignored(self):
+        """content_hash=0 (legacy/missing) → not treated as content change."""
+        before = _fp(content_hash=0)
+        after = _fp(content_hash=999)
+        v = detect_dom_changes(before, after)
+        assert v.severity == "none"  # zero = unknown, no change detected
+
+    def test_major_takes_precedence_over_content_changed(self):
+        """Major structural change + content change → major (not content_changed)."""
+        before = _fp(total_interactives=10, content_hash=111)
+        after = _fp(total_interactives=20, content_hash=222)
+        v = detect_dom_changes(before, after)
+        assert v.severity == "major"
+
+    def test_minor_takes_precedence_over_content_changed(self):
+        """Minor structural change + content change → minor (not content_changed)."""
+        before = _fp(total_interactives=100, content_hash=111)
+        after = _fp(total_interactives=101, content_hash=222)
+        v = detect_dom_changes(before, after)
+        assert v.severity == "minor"
+
+
+# =========================================================================
+# fingerprints_structurally_equal
+# =========================================================================
+
+
+class TestFingerprintsStructurallyEqual:
+    """Tests for structural equality check (ignoring content_hash)."""
+
+    def test_identical_structurally_equal(self):
+        a = _fp(content_hash=111)
+        b = _fp(content_hash=222)
+        assert fingerprints_structurally_equal(a, b) is True
+
+    def test_different_title_not_equal(self):
+        a = _fp(title="A")
+        b = _fp(title="B")
+        assert fingerprints_structurally_equal(a, b) is False
+
+    def test_different_interactive_count_not_equal(self):
+        a = _fp(total_interactives=10)
+        b = _fp(total_interactives=20)
+        assert fingerprints_structurally_equal(a, b) is False
+
+    def test_none_inputs_not_equal(self):
+        assert fingerprints_structurally_equal(None, _fp()) is False
+        assert fingerprints_structurally_equal(_fp(), None) is False
+        assert fingerprints_structurally_equal(None, None) is False
+
+    def test_dialog_difference_not_equal(self):
+        a = _fp(has_dialog=False)
+        b = _fp(has_dialog=True)
+        assert fingerprints_structurally_equal(a, b) is False

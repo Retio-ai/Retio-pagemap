@@ -1,3 +1,6 @@
+# Copyright (C) 2025-2026 Retio AI
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Content sanitization for prompt injection defense.
 
 PageMap output enters the user's LLM context directly. Malicious web content

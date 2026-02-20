@@ -1,3 +1,6 @@
+# Copyright (C) 2025-2026 Retio AI
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Structured metadata extraction from pre-parsed HtmlChunks.
 
 Cascade priority: JSON-LD > itemprop > OG meta > h1 fallback.
@@ -315,11 +318,34 @@ def extract_metadata(
     meta_chunks: list[HtmlChunk],
     heading_chunks: list[HtmlChunk],
     schema_name: str,
+    source_hint: str | None = None,
 ) -> dict[str, Any]:
     """Extract structured metadata from pre-parsed HtmlChunks.
 
     Priority: JSON-LD > itemprop > OG meta > h1 fallback.
+
+    If source_hint is provided (e.g. "json_ld"), tries the hinted source first
+    and skips the remaining cascade if it yields sufficient results.
     """
+    # Optimistic path: if hint says json_ld and schema is Product, try it first
+    if source_hint == "json_ld" and schema_name == "Product":
+        result = _parse_json_ld_product(meta_chunks)
+        if result:
+            # JSON-LD sufficient — skip itemprop/OG cascade
+            # Still do h1 fallback and ItemList extraction
+            name_key = "headline" if schema_name == "NewsArticle" else "name"
+            if name_key not in result:
+                h1 = _parse_h1(heading_chunks)
+                if h1:
+                    result[name_key] = h1
+
+            itemlist_items = _parse_json_ld_itemlist(meta_chunks)
+            if itemlist_items:
+                result["items"] = itemlist_items
+
+            return result
+        # Hint failed — fall through to full cascade
+
     sources = [
         _parse_json_ld_product(meta_chunks) if schema_name == "Product" else {},
         _parse_itemprop(heading_chunks, schema_name),

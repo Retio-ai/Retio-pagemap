@@ -1,3 +1,6 @@
+# Copyright (C) 2025-2026 Retio AI
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Shared normalization functions for evaluation and pruning.
 
 Extracted from evaluate.py to avoid circular imports.

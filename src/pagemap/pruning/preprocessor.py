@@ -1,3 +1,6 @@
+# Copyright (C) 2025-2026 Retio AI
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """HTMLRAG Pass 1 cleaning + lxml DOM parsing + Atomic chunk decomposition.
 
 Pipeline:
@@ -79,6 +82,8 @@ _CONTAINER_TAGS = {"article", "section", "main", "aside", "nav", "header", "foot
 
 # RSC payload pattern
 _RSC_PATTERN = re.compile(r"self\.__next_f\.push\(\s*\[.*?\]\s*\)", re.DOTALL)
+
+_MAX_DECOMPOSE_DEPTH = 100
 
 
 def _extract_json_ld(html: str) -> list[HtmlChunk]:
@@ -263,8 +268,19 @@ def _is_in_main(el: lxml.html.HtmlElement) -> bool:
 def _decompose_element(
     el: lxml.html.HtmlElement,
     tree: etree._ElementTree,
+    *,
+    depth: int = 0,
+    max_depth: int = _MAX_DECOMPOSE_DEPTH,
 ) -> list[HtmlChunk]:
     """Recursively decompose a DOM element into atomic chunks."""
+    if depth > max_depth:
+        logger.warning(
+            "Max decomposition depth %d exceeded at <%s>, skipping subtree",
+            max_depth,
+            el.tag if isinstance(el.tag, str) else "unknown",
+        )
+        return []
+
     if not isinstance(el.tag, str):
         return []
 
@@ -337,7 +353,7 @@ def _decompose_element(
             chunks = []
             for child in el:
                 if isinstance(child, lxml.html.HtmlElement):
-                    chunks.extend(_decompose_element(child, tree))
+                    chunks.extend(_decompose_element(child, tree, depth=depth + 1, max_depth=max_depth))
             return chunks
         else:
             # Leaf div with only inline content
@@ -363,7 +379,7 @@ def _decompose_element(
             chunks = []
             for child in el:
                 if isinstance(child, lxml.html.HtmlElement):
-                    chunks.extend(_decompose_element(child, tree))
+                    chunks.extend(_decompose_element(child, tree, depth=depth + 1, max_depth=max_depth))
             return chunks
         elif text:
             return [

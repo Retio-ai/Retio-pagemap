@@ -143,9 +143,9 @@ def _reset_state():
     """Reset global state before each test."""
     import pagemap.server as srv
 
-    srv._last_page_map = None
+    srv._state.cache.invalidate_all()
     yield
-    srv._last_page_map = None
+    srv._state.cache.invalidate_all()
 
 
 # ── TestFillFormConstants ──────────────────────────────────────────
@@ -271,7 +271,7 @@ class TestFillFormInputValidation:
         fields = [FormField(ref=1, action="type", value=None)]
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         result = await fill_form(fields=fields)
         assert "requires a 'value'" in result
 
@@ -280,7 +280,7 @@ class TestFillFormInputValidation:
         fields = [FormField(ref=3, action="select", value=None)]
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         result = await fill_form(fields=fields)
         assert "requires a 'value'" in result
 
@@ -306,7 +306,7 @@ class TestFillFormInputValidation:
     async def test_ref_not_found(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         fields = [FormField(ref=999, action="click")]
         result = await fill_form(fields=fields)
         assert "ref [999] not found" in result
@@ -315,7 +315,7 @@ class TestFillFormInputValidation:
     async def test_affordance_mismatch(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         # Try to type on a button (affordance=click)
         fields = [FormField(ref=4, action="type", value="text")]
         result = await fill_form(fields=fields)
@@ -333,7 +333,7 @@ class TestFillFormBasic:
     async def test_single_type(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
 
         with (
@@ -353,7 +353,7 @@ class TestFillFormBasic:
     async def test_single_select(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
 
         with (
@@ -373,7 +373,7 @@ class TestFillFormBasic:
     async def test_single_click(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
 
         with (
@@ -393,7 +393,7 @@ class TestFillFormBasic:
     async def test_mixed_batch(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
 
         with (
@@ -420,7 +420,7 @@ class TestFillFormBasic:
     async def test_click_without_value(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
 
         with (
@@ -439,7 +439,7 @@ class TestFillFormBasic:
     async def test_response_format_header(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
 
         with (
@@ -460,7 +460,7 @@ class TestFillFormBasic:
         """CSS selector fallback should be noted in result."""
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
         page = mock_session.page
 
@@ -500,7 +500,7 @@ class TestFillFormNavigation:
         """Navigation after 2nd field → stop, report partial."""
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
 
         call_count = 0
@@ -529,13 +529,13 @@ class TestFillFormNavigation:
 
         assert "navigated" in result.lower()
         assert "dashboard" in result
-        assert srv._last_page_map is None
+        assert srv._state.cache.active is None
 
     @pytest.mark.asyncio
     async def test_ssrf_navigation_blocked(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
         mock_session.get_page_url = AsyncMock(return_value="http://169.254.169.254/metadata")
 
@@ -547,14 +547,14 @@ class TestFillFormNavigation:
 
         assert "blocked" in result.lower()
         mock_session.page.goto.assert_called_once_with("about:blank")
-        assert srv._last_page_map is None
+        assert srv._state.cache.active is None
 
     @pytest.mark.asyncio
     async def test_last_field_navigation(self):
         """Navigation after last field → full completion + nav warning."""
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
 
         call_count = 0
@@ -583,7 +583,7 @@ class TestFillFormNavigation:
         """Partial report shows which fields completed before stop."""
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
 
         # Navigate after first field
@@ -615,7 +615,7 @@ class TestFillFormPopup:
     async def test_popup_detected_switches(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
 
         popup_page = MagicMock()
@@ -634,13 +634,13 @@ class TestFillFormPopup:
             result = await fill_form(fields=[FormField(ref=4, action="click")])
 
         assert "popup" in result.lower() or "New tab" in result
-        assert srv._last_page_map is None
+        assert srv._state.cache.active is None
 
     @pytest.mark.asyncio
     async def test_popup_ssrf_blocked(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
 
         popup_page = MagicMock()
@@ -670,7 +670,7 @@ class TestFillFormDomChange:
     async def test_major_dom_change(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
 
         pre = _fp(has_dialog=False)
@@ -684,14 +684,14 @@ class TestFillFormDomChange:
 
         assert "Page content changed" in result
         assert "get_page_map" in result
-        assert srv._last_page_map is None
+        assert srv._state.cache.active is None
 
     @pytest.mark.asyncio
     async def test_minor_dom_change(self):
         import pagemap.server as srv
 
         page_map = _make_page_map()
-        srv._last_page_map = page_map
+        srv._state.cache.store(page_map, None)
         mock_session = _make_mock_session()
 
         pre = _fp(total_interactives=100)
@@ -705,14 +705,14 @@ class TestFillFormDomChange:
 
         assert "Page content updated" in result
         # Minor change should preserve page map
-        assert srv._last_page_map is page_map
+        assert srv._state.cache.active is page_map
 
     @pytest.mark.asyncio
     async def test_no_dom_change(self):
         import pagemap.server as srv
 
         page_map = _make_page_map()
-        srv._last_page_map = page_map
+        srv._state.cache.store(page_map, None)
         mock_session = _make_mock_session()
 
         fp = _fp()
@@ -729,7 +729,7 @@ class TestFillFormDomChange:
 
         assert "Page content changed" not in result
         assert "Page content updated" not in result
-        assert srv._last_page_map is page_map
+        assert srv._state.cache.active is page_map
 
 
 # ── TestFillFormErrors ──────────────────────────────────────────────
@@ -742,7 +742,7 @@ class TestFillFormErrors:
     async def test_locator_error_stops(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
         locator = mock_session.page.get_by_role.return_value
         locator.count = AsyncMock(return_value=0)
@@ -770,7 +770,7 @@ class TestFillFormErrors:
     async def test_playwright_error_stops(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
         locator = mock_session.page.get_by_role.return_value
         locator.first.fill = AsyncMock(side_effect=PlaywrightError("Element is disabled"))
@@ -793,7 +793,7 @@ class TestFillFormErrors:
     async def test_browser_dead(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
         locator = mock_session.page.get_by_role.return_value
         locator.first.fill = AsyncMock(side_effect=PlaywrightError("Target closed"))
@@ -802,13 +802,13 @@ class TestFillFormErrors:
             result = await fill_form(fields=[FormField(ref=1, action="type", value="test")])
 
         assert "Browser connection lost" in result
-        assert srv._last_page_map is None
+        assert srv._state.cache.active is None
 
     @pytest.mark.asyncio
     async def test_timeout(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
 
         async def _hang(*args, **kwargs):
@@ -825,14 +825,14 @@ class TestFillFormErrors:
             result = await fill_form(fields=[FormField(ref=1, action="type", value="test")])
 
         assert "timed out" in result
-        assert srv._last_page_map is None
+        assert srv._state.cache.active is None
 
     @pytest.mark.asyncio
     async def test_partial_result_on_error(self):
         """First field succeeds, second fails → partial report."""
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
         locator = mock_session.page.get_by_role.return_value
 
@@ -873,7 +873,7 @@ class TestFillFormDialogs:
         import pagemap.server as srv
         from pagemap.browser_session import DialogInfo
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
         mock_session.drain_dialogs = MagicMock(
             return_value=[DialogInfo(dialog_type="alert", message="Saved!", dismissed=False)]

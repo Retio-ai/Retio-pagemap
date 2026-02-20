@@ -18,10 +18,24 @@ import pytest
 from mcp.server.fastmcp import Image as McpImage
 from playwright.async_api import Error as PlaywrightError
 
+from pagemap import PageMap
 from pagemap.server import (
     SCREENSHOT_TIMEOUT_SECONDS,
     take_screenshot,
 )
+
+
+def _make_page_map(url: str = "https://example.com") -> PageMap:
+    return PageMap(
+        url=url,
+        title="Test",
+        page_type="unknown",
+        interactables=[],
+        pruned_context="",
+        pruned_tokens=0,
+        generation_ms=0,
+    )
+
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
@@ -46,9 +60,9 @@ def _reset_state():
     """Reset global state before each test."""
     import pagemap.server as srv
 
-    srv._last_page_map = None
+    srv._state.cache.invalidate_all()
     yield
-    srv._last_page_map = None
+    srv._state.cache.invalidate_all()
 
 
 # ── TestScreenshotBasic ──────────────────────────────────────────────
@@ -115,7 +129,7 @@ class TestScreenshotNoPageMapRequired:
     async def test_works_with_no_page_map(self):
         import pagemap.server as srv
 
-        srv._last_page_map = None
+        srv._state.cache.invalidate_all()
         mock_session = _make_mock_session()
 
         with patch("pagemap.server._get_session", return_value=mock_session):
@@ -129,14 +143,14 @@ class TestScreenshotNoPageMapRequired:
         """Screenshot should not touch _last_page_map."""
         import pagemap.server as srv
 
-        sentinel = object()
-        srv._last_page_map = sentinel
+        sentinel = _make_page_map()
+        srv._state.cache.store(sentinel, None)
         mock_session = _make_mock_session()
 
         with patch("pagemap.server._get_session", return_value=mock_session):
             await take_screenshot()
 
-        assert srv._last_page_map is sentinel
+        assert srv._state.cache.active is sentinel
 
 
 # ── TestScreenshotFullPage ──────────────────────────────────────────
@@ -174,8 +188,8 @@ class TestScreenshotBrowserDead:
     async def test_target_closed_returns_error(self):
         import pagemap.server as srv
 
-        sentinel = object()
-        srv._last_page_map = sentinel
+        sentinel = _make_page_map()
+        srv._state.cache.store(sentinel, None)
         mock_session = _make_mock_session()
         mock_session.page.screenshot = AsyncMock(side_effect=PlaywrightError("Target closed"))
 
@@ -184,7 +198,7 @@ class TestScreenshotBrowserDead:
 
         assert isinstance(result, str)
         assert "Browser connection lost" in result
-        assert srv._last_page_map is None
+        assert srv._state.cache.active is None
 
     @pytest.mark.asyncio
     async def test_browser_disconnected_returns_error(self):

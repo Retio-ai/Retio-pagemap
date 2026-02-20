@@ -11,6 +11,7 @@ Tests:
 
 from __future__ import annotations
 
+import json
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import pytest
@@ -84,9 +85,9 @@ def _make_dialog(dtype: str = "alert", message: str = "Hello") -> AsyncMock:
 def _reset_state():
     import pagemap.server as srv
 
-    srv._last_page_map = None
+    srv._state.cache.invalidate_all()
     yield
-    srv._last_page_map = None
+    srv._state.cache.invalidate_all()
 
 
 # ── TestDialogHandlerBehavior ─────────────────────────────────────────
@@ -268,7 +269,7 @@ class TestDialogDuringExecuteAction:
     async def test_click_with_alert_shows_warning(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
         mock_session.drain_dialogs = MagicMock(
             return_value=[
@@ -279,27 +280,31 @@ class TestDialogDuringExecuteAction:
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=1, action="click")
 
-        assert "Clicked [1]" in result
-        assert "JS dialog(s) appeared" in result
-        assert 'JS alert() accepted: "Welcome!"' in result
+        data = json.loads(result)
+        assert "Clicked [1]" in data["description"]
+        assert len(data["dialogs"]) == 1
+        assert data["dialogs"][0]["type"] == "alert"
+        assert data["dialogs"][0]["message"] == "Welcome!"
+        assert data["dialogs"][0]["action"] == "accepted"
 
     @pytest.mark.asyncio
     async def test_no_dialog_no_warning(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
 
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=1, action="click")
 
-        assert "JS dialog" not in result
+        data = json.loads(result)
+        assert "dialogs" not in data
 
     @pytest.mark.asyncio
     async def test_multiple_dialogs_all_reported(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
         mock_session.drain_dialogs = MagicMock(
             return_value=[
@@ -311,15 +316,21 @@ class TestDialogDuringExecuteAction:
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=1, action="click")
 
-        assert 'JS alert() accepted: "Hi"' in result
-        assert 'JS confirm() dismissed: "Delete?"' in result
+        data = json.loads(result)
+        assert len(data["dialogs"]) == 2
+        assert data["dialogs"][0]["type"] == "alert"
+        assert data["dialogs"][0]["message"] == "Hi"
+        assert data["dialogs"][0]["action"] == "accepted"
+        assert data["dialogs"][1]["type"] == "confirm"
+        assert data["dialogs"][1]["message"] == "Delete?"
+        assert data["dialogs"][1]["action"] == "dismissed"
 
     @pytest.mark.asyncio
     async def test_dialog_with_navigation(self):
-        """Dialog + URL change → both reported."""
+        """Dialog + URL change → both reported in JSON."""
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session(current_url="https://example.com/page2")
         mock_session.drain_dialogs = MagicMock(
             return_value=[
@@ -330,9 +341,10 @@ class TestDialogDuringExecuteAction:
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=1, action="click")
 
-        assert "Page navigated" in result
-        assert "JS dialog(s) appeared" in result
-        assert "beforeunload" in result
+        data = json.loads(result)
+        assert data["change"] == "navigation"
+        assert len(data["dialogs"]) == 1
+        assert data["dialogs"][0]["type"] == "beforeunload"
 
 
 # ── TestFormatDialogWarnings ──────────────────────────────────────────

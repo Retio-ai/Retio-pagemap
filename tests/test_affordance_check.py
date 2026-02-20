@@ -7,6 +7,7 @@ letting Playwright error out.
 
 from __future__ import annotations
 
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -69,9 +70,9 @@ def _reset_state():
     """Reset global state before each test."""
     import pagemap.server as srv
 
-    srv._last_page_map = None
+    srv._state.cache.invalidate_all()
     yield
-    srv._last_page_map = None
+    srv._state.cache.invalidate_all()
 
 
 # ── TestAffordanceMismatchBlocked ────────────────────────────────────
@@ -84,107 +85,107 @@ class TestAffordanceMismatchBlocked:
     async def test_type_on_button_blocked(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         result = await execute_action(ref=1, action="type", value="hello")
 
-        assert "Error" in result
-        assert "Cannot type" in result
-        assert "[1]" in result
-        assert "affordance=click" in result
+        data = json.loads(result)
+        assert "Cannot type" in data["error"]
+        assert "[1]" in data["error"]
+        assert "affordance=click" in data["error"]
 
     @pytest.mark.asyncio
     async def test_type_on_link_blocked(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         result = await execute_action(ref=2, action="type", value="hello")
 
-        assert "Error" in result
-        assert "Cannot type" in result
-        assert "[2]" in result
+        data = json.loads(result)
+        assert "Cannot type" in data["error"]
+        assert "[2]" in data["error"]
 
     @pytest.mark.asyncio
     async def test_type_on_checkbox_blocked(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         result = await execute_action(ref=7, action="type", value="hello")
 
-        assert "Error" in result
-        assert "Cannot type" in result
-        assert "[7]" in result
-        assert "affordance=click" in result
+        data = json.loads(result)
+        assert "Cannot type" in data["error"]
+        assert "[7]" in data["error"]
+        assert "affordance=click" in data["error"]
 
     @pytest.mark.asyncio
     async def test_type_on_combobox_blocked(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         result = await execute_action(ref=5, action="type", value="hello")
 
-        assert "Error" in result
-        assert "Cannot type" in result
-        assert "[5]" in result
-        assert "affordance=select" in result
+        data = json.loads(result)
+        assert "Cannot type" in data["error"]
+        assert "[5]" in data["error"]
+        assert "affordance=select" in data["error"]
 
     @pytest.mark.asyncio
     async def test_type_on_listbox_blocked(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         result = await execute_action(ref=6, action="type", value="hello")
 
-        assert "Error" in result
-        assert "Cannot type" in result
-        assert "[6]" in result
-        assert "affordance=select" in result
+        data = json.loads(result)
+        assert "Cannot type" in data["error"]
+        assert "[6]" in data["error"]
+        assert "affordance=select" in data["error"]
 
     @pytest.mark.asyncio
     async def test_select_on_button_blocked(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         result = await execute_action(ref=1, action="select", value="opt1")
 
-        assert "Error" in result
-        assert "Cannot select" in result
-        assert "[1]" in result
-        assert "affordance=click" in result
+        data = json.loads(result)
+        assert "Cannot select" in data["error"]
+        assert "[1]" in data["error"]
+        assert "affordance=click" in data["error"]
 
     @pytest.mark.asyncio
     async def test_select_on_link_blocked(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         result = await execute_action(ref=2, action="select", value="opt1")
 
-        assert "Error" in result
-        assert "Cannot select" in result
-        assert "[2]" in result
+        data = json.loads(result)
+        assert "Cannot select" in data["error"]
+        assert "[2]" in data["error"]
 
     @pytest.mark.asyncio
     async def test_select_on_textbox_blocked(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         result = await execute_action(ref=3, action="select", value="opt1")
 
-        assert "Error" in result
-        assert "Cannot select" in result
-        assert "[3]" in result
-        assert "affordance=type" in result
+        data = json.loads(result)
+        assert "Cannot select" in data["error"]
+        assert "[3]" in data["error"]
+        assert "affordance=type" in data["error"]
 
     @pytest.mark.asyncio
     async def test_select_on_searchbox_blocked(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         result = await execute_action(ref=4, action="select", value="opt1")
 
-        assert "Error" in result
-        assert "Cannot select" in result
-        assert "[4]" in result
-        assert "affordance=type" in result
+        data = json.loads(result)
+        assert "Cannot select" in data["error"]
+        assert "[4]" in data["error"]
+        assert "affordance=type" in data["error"]
 
 
 # ── TestAffordanceCompatibleAllowed ──────────────────────────────────
@@ -197,108 +198,116 @@ class TestAffordanceCompatibleAllowed:
     async def test_click_on_button_allowed(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
 
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=1, action="click")
 
-        assert "Clicked [1]" in result
-        assert "Error" not in result
+        data = json.loads(result)
+        assert "Clicked [1]" in data["description"]
+        assert "error" not in data
 
     @pytest.mark.asyncio
     async def test_click_on_textbox_allowed(self):
         """click is universal — works on type-affordance elements too."""
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
 
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=3, action="click")
 
-        assert "Clicked [3]" in result
-        assert "Error" not in result
+        data = json.loads(result)
+        assert "Clicked [3]" in data["description"]
+        assert "error" not in data
 
     @pytest.mark.asyncio
     async def test_click_on_combobox_allowed(self):
         """click is universal — works on select-affordance elements too."""
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
 
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=5, action="click")
 
-        assert "Clicked [5]" in result
-        assert "Error" not in result
+        data = json.loads(result)
+        assert "Clicked [5]" in data["description"]
+        assert "error" not in data
 
     @pytest.mark.asyncio
     async def test_type_on_textbox_allowed(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
 
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=3, action="type", value="hello")
 
-        assert "Typed into [3]" in result
-        assert "Error" not in result
+        data = json.loads(result)
+        assert "Typed into [3]" in data["description"]
+        assert "error" not in data
 
     @pytest.mark.asyncio
     async def test_type_on_searchbox_allowed(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
 
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=4, action="type", value="hello")
 
-        assert "Typed into [4]" in result
-        assert "Error" not in result
+        data = json.loads(result)
+        assert "Typed into [4]" in data["description"]
+        assert "error" not in data
 
     @pytest.mark.asyncio
     async def test_select_on_combobox_allowed(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
 
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=5, action="select", value="opt1")
 
-        assert "Selected option in [5]" in result
-        assert "Error" not in result
+        data = json.loads(result)
+        assert "Selected option in [5]" in data["description"]
+        assert "error" not in data
 
     @pytest.mark.asyncio
     async def test_select_on_listbox_allowed(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
 
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=6, action="select", value="opt1")
 
-        assert "Selected option in [6]" in result
-        assert "Error" not in result
+        data = json.loads(result)
+        assert "Selected option in [6]" in data["description"]
+        assert "error" not in data
 
     @pytest.mark.asyncio
     async def test_press_key_skips_affordance_check(self):
         """press_key is a global keyboard action — no affordance check."""
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
 
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=1, action="press_key", value="Enter")
 
-        assert "Pressed key" in result
-        assert "Error" not in result
+        data = json.loads(result)
+        assert "Pressed key" in data["description"]
+        assert "error" not in data
 
 
 # ── TestAffordanceErrorMessageFormat ─────────────────────────────────
@@ -308,52 +317,58 @@ class TestAffordanceErrorMessageFormat:
     """Verify error message structure contains all required information."""
 
     @pytest.mark.asyncio
-    async def test_error_starts_with_error_prefix(self):
+    async def test_error_is_json_with_error_key(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         result = await execute_action(ref=1, action="type", value="hello")
-        assert result.startswith("Error:")
+        data = json.loads(result)
+        assert "error" in data
 
     @pytest.mark.asyncio
     async def test_error_contains_ref_number(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         result = await execute_action(ref=1, action="type", value="hello")
-        assert "[1]" in result
+        data = json.loads(result)
+        assert "[1]" in data["error"]
 
     @pytest.mark.asyncio
     async def test_error_contains_element_role(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         result = await execute_action(ref=1, action="type", value="hello")
-        assert "button" in result
+        data = json.loads(result)
+        assert "button" in data["error"]
 
     @pytest.mark.asyncio
     async def test_error_contains_element_name(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         result = await execute_action(ref=1, action="type", value="hello")
-        assert "Submit" in result
+        data = json.loads(result)
+        assert "Submit" in data["error"]
 
     @pytest.mark.asyncio
     async def test_error_contains_affordance(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         result = await execute_action(ref=1, action="type", value="hello")
-        assert "affordance=click" in result
+        data = json.loads(result)
+        assert "affordance=click" in data["error"]
 
     @pytest.mark.asyncio
     async def test_error_contains_suggestion(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         result = await execute_action(ref=1, action="type", value="hello")
-        assert 'action="click"' in result
+        data = json.loads(result)
+        assert 'action="click"' in data["error"]
 
 
 # ── TestAffordanceConstants ──────────────────────────────────────────
@@ -383,10 +398,11 @@ class TestAffordanceConstants:
         """Affordance mismatch returns before reaching Playwright dispatch."""
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
 
         with patch("pagemap.server._get_session") as get_sess:
             result = await execute_action(ref=1, action="type", value="hello")
 
-        assert "Error" in result
+        data = json.loads(result)
+        assert "error" in data
         get_sess.assert_not_called()

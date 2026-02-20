@@ -8,6 +8,7 @@ Tests:
 
 from __future__ import annotations
 
+import json
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import pytest
@@ -78,9 +79,9 @@ def _make_mock_new_page(url: str = "https://newsite.com", closed: bool = False) 
 def _reset_state():
     import pagemap.server as srv
 
-    srv._last_page_map = None
+    srv._state.cache.invalidate_all()
     yield
-    srv._last_page_map = None
+    srv._state.cache.invalidate_all()
 
 
 # ── TestBrowserSessionPopupTracking ──────────────────────────────────
@@ -265,7 +266,7 @@ class TestPopupInExecuteAction:
     async def test_click_popup_switches_and_reports(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
         new_page = _make_mock_new_page("https://newsite.com")
         mock_session.consume_new_page = MagicMock(return_value=new_page)
@@ -276,18 +277,19 @@ class TestPopupInExecuteAction:
         ):
             result = await execute_action(ref=1, action="click")
 
-        assert "New tab opened: https://newsite.com" in result
-        assert "Switched to new tab" in result
-        assert "get_page_map" in result
+        data = json.loads(result)
+        assert data["change"] == "new_tab"
+        assert data["refs_expired"] is True
+        assert any("New tab opened" in d for d in data.get("change_details", []))
         mock_session.switch_page.assert_awaited_once_with(new_page)
-        assert srv._last_page_map is None
+        assert srv._state.cache.active is None
 
     @pytest.mark.asyncio
     async def test_popup_ssrf_blocked_closes_and_warns(self):
         import pagemap.server as srv
 
         page_map = _make_page_map()
-        srv._last_page_map = page_map
+        srv._state.cache.store(page_map, None)
         mock_session = _make_mock_session()
         new_page = _make_mock_new_page("http://169.254.169.254/metadata")
         mock_session.consume_new_page = MagicMock(return_value=new_page)
@@ -301,8 +303,9 @@ class TestPopupInExecuteAction:
         ):
             result = await execute_action(ref=1, action="click")
 
-        assert "Popup to blocked URL was closed" in result
-        assert "blocked" in result
+        data = json.loads(result)
+        assert any("blocked" in d for d in data.get("change_details", []))
+        assert data["change"] == "none"
         new_page.close.assert_awaited_once()
         mock_session.switch_page.assert_not_awaited()
 
@@ -311,7 +314,7 @@ class TestPopupInExecuteAction:
         """Popup that closed before we check → skip popup logic."""
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
         new_page = _make_mock_new_page("https://flash.com", closed=True)
         mock_session.consume_new_page = MagicMock(return_value=new_page)
@@ -319,8 +322,9 @@ class TestPopupInExecuteAction:
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=1, action="click")
 
-        assert "New tab opened" not in result
-        assert "Popup to blocked URL" not in result
+        data = json.loads(result)
+        assert data["change"] != "new_tab"
+        assert "change_details" not in data or not any("New tab" in d for d in data.get("change_details", []))
         mock_session.switch_page.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -328,7 +332,7 @@ class TestPopupInExecuteAction:
         """Popup that times out on load_state still switches."""
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
         new_page = _make_mock_new_page("https://slow.com")
         new_page.wait_for_load_state = AsyncMock(side_effect=TimeoutError("slow"))
@@ -340,7 +344,8 @@ class TestPopupInExecuteAction:
         ):
             result = await execute_action(ref=1, action="click")
 
-        assert "New tab opened" in result
+        data = json.loads(result)
+        assert data["change"] == "new_tab"
         mock_session.switch_page.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -349,21 +354,22 @@ class TestPopupInExecuteAction:
         import pagemap.server as srv
 
         page_map = _make_page_map()
-        srv._last_page_map = page_map
+        srv._state.cache.store(page_map, None)
         mock_session = _make_mock_session()
 
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=1, action="click")
 
-        assert "Clicked [1]" in result
-        assert "New tab opened" not in result
+        data = json.loads(result)
+        assert "Clicked [1]" in data["description"]
+        assert data["change"] != "new_tab"
         mock_session.switch_page.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_popup_invalidates_page_map(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
         new_page = _make_mock_new_page("https://newsite.com")
         mock_session.consume_new_page = MagicMock(return_value=new_page)
@@ -374,15 +380,15 @@ class TestPopupInExecuteAction:
         ):
             await execute_action(ref=1, action="click")
 
-        assert srv._last_page_map is None
+        assert srv._state.cache.active is None
 
     @pytest.mark.asyncio
     async def test_popup_with_dialog(self):
-        """Popup + dialog → both reported."""
+        """Popup + dialog → both reported in JSON."""
         import pagemap.server as srv
         from pagemap.browser_session import DialogInfo
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
         new_page = _make_mock_new_page("https://newsite.com")
         mock_session.consume_new_page = MagicMock(return_value=new_page)
@@ -398,6 +404,7 @@ class TestPopupInExecuteAction:
         ):
             result = await execute_action(ref=1, action="click")
 
-        assert "New tab opened" in result
-        assert "JS dialog(s) appeared" in result
-        assert "Popup alert!" in result
+        data = json.loads(result)
+        assert data["change"] == "new_tab"
+        assert len(data["dialogs"]) == 1
+        assert data["dialogs"][0]["message"] == "Popup alert!"

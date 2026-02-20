@@ -6,6 +6,7 @@ to refresh the page map, preventing stale ref usage.
 
 from __future__ import annotations
 
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -82,9 +83,9 @@ def _reset_state():
     """Reset global state before each test."""
     import pagemap.server as srv
 
-    srv._last_page_map = None
+    srv._state.cache.invalidate_all()
     yield
-    srv._last_page_map = None
+    srv._state.cache.invalidate_all()
 
 
 class TestStaleRefDetection:
@@ -92,22 +93,23 @@ class TestStaleRefDetection:
 
     @pytest.mark.asyncio
     async def test_click_url_changed_warns_and_clears(self):
-        """click that causes navigation → warning + _last_page_map = None."""
+        """click that causes navigation → JSON change=navigation + _last_page_map = None."""
         import pagemap.server as srv
 
         page_map = _make_page_map("https://example.com")
-        srv._last_page_map = page_map
+        srv._state.cache.store(page_map, None)
         new_url = "https://example.com/page2"
         mock_session = _make_mock_session(current_url=new_url)
 
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=1, action="click")
 
-        assert "Clicked [1]" in result
-        assert new_url in result
-        assert "Page navigated" in result
-        assert "get_page_map" in result
-        assert srv._last_page_map is None
+        data = json.loads(result)
+        assert "Clicked [1]" in data["description"]
+        assert data["current_url"] == new_url
+        assert data["change"] == "navigation"
+        assert data["refs_expired"] is True
+        assert srv._state.cache.active is None
 
     @pytest.mark.asyncio
     async def test_click_url_same_no_warning(self):
@@ -115,75 +117,80 @@ class TestStaleRefDetection:
         import pagemap.server as srv
 
         page_map = _make_page_map("https://example.com")
-        srv._last_page_map = page_map
+        srv._state.cache.store(page_map, None)
         mock_session = _make_mock_session(current_url="https://example.com")
 
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=1, action="click")
 
-        assert "Clicked [1]" in result
-        assert "Page navigated" not in result
-        assert srv._last_page_map is page_map
+        data = json.loads(result)
+        assert "Clicked [1]" in data["description"]
+        assert data["change"] != "navigation"
+        assert srv._state.cache.active is page_map
 
     @pytest.mark.asyncio
     async def test_type_url_changed_warns(self):
-        """type action that triggers navigation → warning."""
+        """type action that triggers navigation → JSON change=navigation."""
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map("https://example.com")
+        srv._state.cache.store(_make_page_map("https://example.com"), None)
         mock_session = _make_mock_session(current_url="https://example.com/search?q=test")
 
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=2, action="type", value="test query")
 
-        assert "Typed into [2]" in result
-        assert "Page navigated" in result
-        assert srv._last_page_map is None
+        data = json.loads(result)
+        assert "Typed into [2]" in data["description"]
+        assert data["change"] == "navigation"
+        assert srv._state.cache.active is None
 
     @pytest.mark.asyncio
     async def test_select_url_changed_warns(self):
-        """select action that triggers navigation → warning."""
+        """select action that triggers navigation → JSON change=navigation."""
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map("https://example.com")
+        srv._state.cache.store(_make_page_map("https://example.com"), None)
         mock_session = _make_mock_session(current_url="https://example.com/sorted")
 
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=3, action="select", value="price")
 
-        assert "Selected option in [3]" in result
-        assert "Page navigated" in result
-        assert srv._last_page_map is None
+        data = json.loads(result)
+        assert "Selected option in [3]" in data["description"]
+        assert data["change"] == "navigation"
+        assert srv._state.cache.active is None
 
     @pytest.mark.asyncio
     async def test_press_key_url_changed_warns(self):
-        """press_key (Enter) that triggers navigation → warning."""
+        """press_key (Enter) that triggers navigation → JSON change=navigation."""
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map("https://example.com")
+        srv._state.cache.store(_make_page_map("https://example.com"), None)
         mock_session = _make_mock_session(current_url="https://example.com/submitted")
 
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=1, action="press_key", value="Enter")
 
-        assert "Pressed key 'Enter'" in result
-        assert "Page navigated" in result
-        assert srv._last_page_map is None
+        data = json.loads(result)
+        assert "Pressed key 'Enter'" in data["description"]
+        assert data["change"] == "navigation"
+        assert srv._state.cache.active is None
 
     @pytest.mark.asyncio
     async def test_press_key_url_same_no_warning(self):
         """press_key without navigation → no warning."""
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map("https://example.com")
+        srv._state.cache.store(_make_page_map("https://example.com"), None)
         mock_session = _make_mock_session(current_url="https://example.com")
 
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=1, action="press_key", value="Tab")
 
-        assert "Pressed key 'Tab'" in result
-        assert "Page navigated" not in result
-        assert srv._last_page_map is not None
+        data = json.loads(result)
+        assert "Pressed key 'Tab'" in data["description"]
+        assert data["change"] != "navigation"
+        assert srv._state.cache.active is not None
 
 
 class TestNoActivePageMap:
@@ -191,34 +198,37 @@ class TestNoActivePageMap:
 
     @pytest.mark.asyncio
     async def test_no_page_map_returns_improved_error(self):
-        """execute_action with no page map → descriptive error."""
+        """execute_action with no page map → JSON error."""
         import pagemap.server as srv
 
-        srv._last_page_map = None
+        srv._state.cache.invalidate_all()
 
         result = await execute_action(ref=1, action="click")
 
-        assert "No active Page Map" in result
-        assert "get_page_map" in result
+        data = json.loads(result)
+        assert "No active Page Map" in data["error"]
+        assert "get_page_map" in data["error"]
 
     @pytest.mark.asyncio
     async def test_after_navigation_clears_then_error(self):
-        """After navigation clears page map, next call gets improved error."""
+        """After navigation clears page map, next call gets JSON error."""
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map("https://example.com")
+        srv._state.cache.store(_make_page_map("https://example.com"), None)
         mock_session = _make_mock_session(current_url="https://example.com/page2")
 
         with patch("pagemap.server._get_session", return_value=mock_session):
             # First call: navigation detected, clears page map
             result1 = await execute_action(ref=1, action="click")
-            assert "Page navigated" in result1
-            assert srv._last_page_map is None
+            data1 = json.loads(result1)
+            assert data1["change"] == "navigation"
+            assert srv._state.cache.active is None
 
-            # Second call: no page map → improved error
+            # Second call: no page map → JSON error
             result2 = await execute_action(ref=1, action="click")
-            assert "No active Page Map" in result2
-            assert "may have navigated" in result2
+            data2 = json.loads(result2)
+            assert "No active Page Map" in data2["error"]
+            assert "may have navigated" in data2["error"]
 
 
 # =========================================================================
@@ -247,10 +257,10 @@ class TestDomChangeDetection:
 
     @pytest.mark.asyncio
     async def test_click_dom_major_change_warns_and_clears(self):
-        """click causes dialog appearance → major warning, _last_page_map cleared."""
+        """click causes dialog appearance → JSON change=major, _last_page_map cleared."""
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map("https://example.com")
+        srv._state.cache.store(_make_page_map("https://example.com"), None)
         mock_session = _make_mock_session(current_url="https://example.com")
 
         pre = _fp(has_dialog=False)
@@ -265,18 +275,19 @@ class TestDomChangeDetection:
         ):
             result = await execute_action(ref=1, action="click")
 
-        assert "Page content changed" in result
-        assert "dialog appeared" in result
-        assert "get_page_map" in result
-        assert srv._last_page_map is None
+        data = json.loads(result)
+        assert data["change"] == "major"
+        assert data["refs_expired"] is True
+        assert any("dialog appeared" in d for d in data.get("change_details", []))
+        assert srv._state.cache.active is None
 
     @pytest.mark.asyncio
     async def test_click_dom_minor_change_warns_preserves(self):
-        """click causes small interactive change → minor warning, page map kept."""
+        """click causes small interactive change → JSON change=minor, page map kept."""
         import pagemap.server as srv
 
         page_map = _make_page_map("https://example.com")
-        srv._last_page_map = page_map
+        srv._state.cache.store(page_map, None)
         mock_session = _make_mock_session(current_url="https://example.com")
 
         pre = _fp(total_interactives=100)
@@ -291,17 +302,18 @@ class TestDomChangeDetection:
         ):
             result = await execute_action(ref=1, action="click")
 
-        assert "Page content updated" in result
-        assert "Consider calling" in result
-        assert srv._last_page_map is page_map
+        data = json.loads(result)
+        assert data["change"] == "minor"
+        assert data["refs_expired"] is False
+        assert srv._state.cache.active is page_map
 
     @pytest.mark.asyncio
     async def test_click_dom_no_change_no_warning(self):
-        """click with identical DOM → no warning."""
+        """click with identical DOM → JSON change=none."""
         import pagemap.server as srv
 
         page_map = _make_page_map("https://example.com")
-        srv._last_page_map = page_map
+        srv._state.cache.store(page_map, None)
         mock_session = _make_mock_session(current_url="https://example.com")
 
         fp = _fp()
@@ -315,16 +327,17 @@ class TestDomChangeDetection:
         ):
             result = await execute_action(ref=1, action="click")
 
-        assert "Page content changed" not in result
-        assert "Page content updated" not in result
-        assert srv._last_page_map is page_map
+        data = json.loads(result)
+        assert data["change"] == "none"
+        assert data["refs_expired"] is False
+        assert srv._state.cache.active is page_map
 
     @pytest.mark.asyncio
     async def test_press_key_dom_major_change_warns(self):
-        """press_key (Escape) causes DOM change → major warning."""
+        """press_key (Escape) causes DOM change → JSON change=major."""
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map("https://example.com")
+        srv._state.cache.store(_make_page_map("https://example.com"), None)
         mock_session = _make_mock_session(current_url="https://example.com")
 
         pre = _fp(title="Page - Modal")
@@ -339,16 +352,18 @@ class TestDomChangeDetection:
         ):
             result = await execute_action(ref=1, action="press_key", value="Escape")
 
-        assert "Page content changed" in result
-        assert "title changed" in result
-        assert srv._last_page_map is None
+        data = json.loads(result)
+        assert data["change"] == "major"
+        assert data["refs_expired"] is True
+        assert any("title changed" in d for d in data.get("change_details", []))
+        assert srv._state.cache.active is None
 
     @pytest.mark.asyncio
     async def test_type_dom_major_change_warns(self):
-        """type action causes large DOM change → major warning."""
+        """type action causes large DOM change → JSON change=major."""
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map("https://example.com")
+        srv._state.cache.store(_make_page_map("https://example.com"), None)
         mock_session = _make_mock_session(current_url="https://example.com")
 
         pre = _fp(total_interactives=10)
@@ -363,15 +378,16 @@ class TestDomChangeDetection:
         ):
             result = await execute_action(ref=2, action="type", value="search term")
 
-        assert "Page content changed" in result
-        assert srv._last_page_map is None
+        data = json.loads(result)
+        assert data["change"] == "major"
+        assert srv._state.cache.active is None
 
     @pytest.mark.asyncio
     async def test_url_change_takes_precedence(self):
-        """URL change → navigation warning (DOM check not run)."""
+        """URL change → JSON change=navigation (DOM check not run)."""
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map("https://example.com")
+        srv._state.cache.store(_make_page_map("https://example.com"), None)
         mock_session = _make_mock_session(current_url="https://example.com/page2")
 
         with (
@@ -384,7 +400,8 @@ class TestDomChangeDetection:
             mock_capture.return_value = _fp()
             result = await execute_action(ref=1, action="click")
 
-        assert "Page navigated" in result
+        data = json.loads(result)
+        assert data["change"] == "navigation"
         # capture called for pre only; post is in else branch (not reached)
         assert mock_capture.call_count == 1
 
@@ -394,7 +411,7 @@ class TestDomChangeDetection:
         import pagemap.server as srv
 
         page_map = _make_page_map("https://example.com")
-        srv._last_page_map = page_map
+        srv._state.cache.store(page_map, None)
         mock_session = _make_mock_session(current_url="https://example.com")
 
         with (
@@ -406,16 +423,16 @@ class TestDomChangeDetection:
         ):
             result = await execute_action(ref=1, action="click")
 
-        assert "Page content changed" not in result
-        assert "Page content updated" not in result
-        assert srv._last_page_map is page_map
+        data = json.loads(result)
+        assert data["change"] == "none"
+        assert srv._state.cache.active is page_map
 
     @pytest.mark.asyncio
     async def test_pre_fingerprint_none_skips_post_capture(self):
         """pre=None → post capture not called."""
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map("https://example.com")
+        srv._state.cache.store(_make_page_map("https://example.com"), None)
         mock_session = _make_mock_session(current_url="https://example.com")
 
         with (
@@ -432,10 +449,10 @@ class TestDomChangeDetection:
 
     @pytest.mark.asyncio
     async def test_dom_change_clears_then_second_call_errors(self):
-        """DOM change clears page map → next call gets 'No active Page Map'."""
+        """DOM change clears page map → next call gets JSON error."""
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map("https://example.com")
+        srv._state.cache.store(_make_page_map("https://example.com"), None)
         mock_session = _make_mock_session(current_url="https://example.com")
 
         pre = _fp(has_dialog=False)
@@ -449,18 +466,20 @@ class TestDomChangeDetection:
             ),
         ):
             result1 = await execute_action(ref=1, action="click")
-            assert "Page content changed" in result1
-            assert srv._last_page_map is None
+            data1 = json.loads(result1)
+            assert data1["change"] == "major"
+            assert srv._state.cache.active is None
 
             result2 = await execute_action(ref=1, action="click")
-            assert "No active Page Map" in result2
+            data2 = json.loads(result2)
+            assert "No active Page Map" in data2["error"]
 
     @pytest.mark.asyncio
     async def test_mock_call_count_verification(self):
         """Verify capture is called exactly twice (pre + post) on same-URL action."""
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map("https://example.com")
+        srv._state.cache.store(_make_page_map("https://example.com"), None)
         mock_session = _make_mock_session(current_url="https://example.com")
 
         fp = _fp()

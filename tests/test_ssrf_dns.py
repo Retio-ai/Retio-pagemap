@@ -6,6 +6,7 @@ and execute_action SSRF checks.
 
 from __future__ import annotations
 
+import json
 import socket
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -49,6 +50,7 @@ def _make_mock_session(current_url: str = "https://example.com") -> MagicMock:
     """Create a mock BrowserSession."""
     session = MagicMock()
     session.get_page_url = AsyncMock(return_value=current_url)
+    session.navigate = AsyncMock()
 
     locator = AsyncMock()
     locator.first = AsyncMock()
@@ -86,9 +88,9 @@ def _reset_state():
     """Reset global state before each test."""
     import pagemap.server as srv
 
-    srv._last_page_map = None
+    srv._state.cache.invalidate_all()
     yield
-    srv._last_page_map = None
+    srv._state.cache.invalidate_all()
 
 
 # ── TestResolveDns ───────────────────────────────────────────────────
@@ -435,40 +437,42 @@ class TestExecuteActionSsrfCheck:
         """Click that navigates to private IP → blocked, about:blank, page_map cleared."""
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map("https://example.com")
+        srv._state.cache.store(_make_page_map("https://example.com"), None)
         mock_session = _make_mock_session(current_url="http://127.0.0.1:8080/admin")
 
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=1, action="click")
 
-        assert "Error" in result
-        assert "blocked" in result.lower()
+        data = json.loads(result)
+        assert "error" in data
+        assert "blocked" in data["error"].lower()
         # Should navigate to about:blank
         mock_session.page.goto.assert_called_once_with("about:blank")
         # Page map should be cleared
-        assert srv._last_page_map is None
+        assert srv._state.cache.active is None
 
     @pytest.mark.asyncio
     async def test_click_navigates_to_metadata_blocked(self):
         """Click navigating to cloud metadata → blocked."""
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map("https://example.com")
+        srv._state.cache.store(_make_page_map("https://example.com"), None)
         mock_session = _make_mock_session(current_url="http://169.254.169.254/latest/meta-data/")
 
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=1, action="click")
 
-        assert "Error" in result
-        assert "blocked" in result.lower()
-        assert srv._last_page_map is None
+        data = json.loads(result)
+        assert "error" in data
+        assert "blocked" in data["error"].lower()
+        assert srv._state.cache.active is None
 
     @pytest.mark.asyncio
     async def test_click_navigates_to_dns_rebinding_blocked(self):
         """Click navigating to domain that resolves to private IP → blocked."""
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map("https://example.com")
+        srv._state.cache.store(_make_page_map("https://example.com"), None)
         mock_session = _make_mock_session(current_url="http://evil.internal.com/steal")
 
         with (
@@ -480,17 +484,18 @@ class TestExecuteActionSsrfCheck:
         ):
             result = await execute_action(ref=1, action="click")
 
-        assert "Error" in result
-        assert "blocked" in result.lower() or "rebinding" in result.lower()
+        data = json.loads(result)
+        assert "error" in data
+        assert "blocked" in data["error"].lower() or "rebinding" in data["error"].lower()
         mock_session.page.goto.assert_called_once_with("about:blank")
-        assert srv._last_page_map is None
+        assert srv._state.cache.active is None
 
     @pytest.mark.asyncio
     async def test_click_navigates_to_safe_url_passes(self):
         """Click navigating to safe public URL → normal stale ref behavior."""
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map("https://example.com")
+        srv._state.cache.store(_make_page_map("https://example.com"), None)
         mock_session = _make_mock_session(current_url="https://example.com/page2")
 
         with (
@@ -502,8 +507,9 @@ class TestExecuteActionSsrfCheck:
         ):
             result = await execute_action(ref=1, action="click")
 
-        assert "Clicked [1]" in result
-        assert "Page navigated" in result
+        data = json.loads(result)
+        assert "Clicked [1]" in data["description"]
+        assert data["change"] == "navigation"
         # about:blank NOT called
         mock_session.page.goto.assert_not_called()
 
@@ -512,7 +518,7 @@ class TestExecuteActionSsrfCheck:
         """Click without navigation → no SSRF check at all."""
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map("https://example.com")
+        srv._state.cache.store(_make_page_map("https://example.com"), None)
         mock_session = _make_mock_session(current_url="https://example.com")
 
         with (
@@ -521,8 +527,9 @@ class TestExecuteActionSsrfCheck:
         ):
             result = await execute_action(ref=1, action="click")
 
-        assert "Clicked [1]" in result
-        assert "Page navigated" not in result
+        data = json.loads(result)
+        assert "Clicked [1]" in data["description"]
+        assert data["change"] != "navigation"
         mock_dns_check.assert_not_called()
 
     @pytest.mark.asyncio
@@ -530,31 +537,33 @@ class TestExecuteActionSsrfCheck:
         """If about:blank navigation fails, error is still returned."""
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map("https://example.com")
+        srv._state.cache.store(_make_page_map("https://example.com"), None)
         mock_session = _make_mock_session(current_url="http://127.0.0.1/")
         mock_session.page.goto = AsyncMock(side_effect=Exception("browser crashed"))
 
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=1, action="click")
 
-        assert "Error" in result
-        assert "blocked" in result.lower()
-        assert srv._last_page_map is None
+        data = json.loads(result)
+        assert "error" in data
+        assert "blocked" in data["error"].lower()
+        assert srv._state.cache.active is None
 
     @pytest.mark.asyncio
     async def test_press_key_navigates_to_private_blocked(self):
         """press_key (Enter) that navigates to private IP → blocked."""
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map("https://example.com")
+        srv._state.cache.store(_make_page_map("https://example.com"), None)
         mock_session = _make_mock_session(current_url="http://192.168.1.1/router")
 
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=1, action="press_key", value="Enter")
 
-        assert "Error" in result
-        assert "blocked" in result.lower()
-        assert srv._last_page_map is None
+        data = json.loads(result)
+        assert "error" in data
+        assert "blocked" in data["error"].lower()
+        assert srv._state.cache.active is None
 
 
 # ── TestSsrfRouteGuard ──────────────────────────────────────────────
@@ -759,7 +768,7 @@ class TestRouteGuardInstallation:
         """_get_session installs route guard on new session."""
         import pagemap.server as srv
 
-        srv._session = None
+        srv._state.session = None
 
         mock_session = MagicMock()
         mock_session.start = AsyncMock()
@@ -775,4 +784,4 @@ class TestRouteGuardInstallation:
         assert session is mock_session
 
         # Cleanup
-        srv._session = None
+        srv._state.session = None

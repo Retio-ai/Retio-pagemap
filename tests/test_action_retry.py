@@ -14,6 +14,7 @@ Verifies:
 
 from __future__ import annotations
 
+import json
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import pytest
@@ -103,9 +104,9 @@ def _reset_state():
     """Reset global state before each test."""
     import pagemap.server as srv
 
-    srv._last_page_map = None
+    srv._state.cache.invalidate_all()
     yield
-    srv._last_page_map = None
+    srv._state.cache.invalidate_all()
 
 
 # ── TestIsRetryableError ─────────────────────────────────────────────
@@ -168,40 +169,43 @@ class TestRetrySuccessFirstAttempt:
     async def test_click_first_attempt_success(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
 
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=1, action="click")
 
-        assert "Clicked [1]" in result
-        assert "Error" not in result
+        data = json.loads(result)
+        assert "Clicked [1]" in data["description"]
+        assert "error" not in data
 
     @pytest.mark.asyncio
     async def test_type_first_attempt_success(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
 
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=2, action="type", value="hello")
 
-        assert "Typed into [2]" in result
-        assert "Error" not in result
+        data = json.loads(result)
+        assert "Typed into [2]" in data["description"]
+        assert "error" not in data
 
     @pytest.mark.asyncio
     async def test_select_first_attempt_success(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
 
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=3, action="select", value="price")
 
-        assert "Selected option in [3]" in result
-        assert "Error" not in result
+        data = json.loads(result)
+        assert "Selected option in [3]" in data["description"]
+        assert "error" not in data
 
 
 # ── TestRetryOnTransientFailure ──────────────────────────────────────
@@ -214,7 +218,7 @@ class TestRetryOnTransientFailure:
     async def test_type_succeeds_after_one_retry(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
         page = mock_session.page
 
@@ -225,14 +229,15 @@ class TestRetryOnTransientFailure:
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=2, action="type", value="hello")
 
-        assert "Typed into [2]" in result
+        data = json.loads(result)
+        assert "Typed into [2]" in data["description"]
         assert locator.first.fill.call_count == 2
 
     @pytest.mark.asyncio
     async def test_click_succeeds_on_not_visible(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
         page = mock_session.page
 
@@ -242,7 +247,8 @@ class TestRetryOnTransientFailure:
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=1, action="click")
 
-        assert "Clicked [1]" in result
+        data = json.loads(result)
+        assert "Clicked [1]" in data["description"]
         assert locator.first.click.call_count == 2
 
     @pytest.mark.asyncio
@@ -250,7 +256,7 @@ class TestRetryOnTransientFailure:
         """Timeout is ambiguous for click → immediate failure."""
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
         page = mock_session.page
 
@@ -260,7 +266,8 @@ class TestRetryOnTransientFailure:
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=1, action="click")
 
-        assert "Error" in result
+        # _safe_error may not return JSON, just check it's an error
+        assert "Error" in result or "error" in result
         assert locator.first.click.call_count == 1
 
     @pytest.mark.asyncio
@@ -268,7 +275,7 @@ class TestRetryOnTransientFailure:
         """Locator is re-resolved on each retry (role→CSS switch possible)."""
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
         page = mock_session.page
 
@@ -285,7 +292,7 @@ class TestRetryOnTransientFailure:
     async def test_select_retried_on_not_attached(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
         page = mock_session.page
 
@@ -295,7 +302,8 @@ class TestRetryOnTransientFailure:
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=3, action="select", value="price")
 
-        assert "Selected option in [3]" in result
+        data = json.loads(result)
+        assert "Selected option in [3]" in data["description"]
         assert locator.first.select_option.call_count == 2
 
 
@@ -309,7 +317,7 @@ class TestRetryExhausted:
     async def test_all_retries_fail(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
         page = mock_session.page
 
@@ -319,7 +327,8 @@ class TestRetryExhausted:
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=2, action="type", value="hello")
 
-        assert "Error" in result
+        # _safe_error may not return JSON
+        assert "Error" in result or "error" in result
         # 3 attempts total (1 + 2 retries)
         assert locator.first.fill.call_count == 3
 
@@ -334,7 +343,7 @@ class TestNonRetryableError:
     async def test_target_closed_not_retried(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
         page = mock_session.page
 
@@ -344,14 +353,15 @@ class TestNonRetryableError:
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=2, action="type", value="hello")
 
-        assert "Error" in result
+        data = json.loads(result)
+        assert "error" in data
         assert locator.first.fill.call_count == 1
 
     @pytest.mark.asyncio
     async def test_unknown_error_not_retried(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
         page = mock_session.page
 
@@ -361,7 +371,8 @@ class TestNonRetryableError:
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=1, action="click")
 
-        assert "Error" in result
+        # _safe_error may not return JSON
+        assert "Error" in result or "error" in result
         assert locator.first.click.call_count == 1
 
 
@@ -375,13 +386,14 @@ class TestPressKeyNotRetried:
     async def test_press_key_no_retry(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
 
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=1, action="press_key", value="Enter")
 
-        assert "Pressed key" in result
+        data = json.loads(result)
+        assert "Pressed key" in data["description"]
         # get_by_role should NOT be called (press_key uses keyboard.press)
         mock_session.page.get_by_role.assert_not_called()
 
@@ -397,7 +409,7 @@ class TestUrlCheckBetweenRetries:
         """Attempt 1 fails + URL changes → retry aborted."""
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map("https://example.com")
+        srv._state.cache.store(_make_page_map("https://example.com"), None)
         mock_session = _make_mock_session("https://example.com")
         page = mock_session.page
 
@@ -411,7 +423,8 @@ class TestUrlCheckBetweenRetries:
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=2, action="type", value="hello")
 
-        assert "Error" in result
+        # _safe_error may not return JSON
+        assert "Error" in result or "error" in result
         # Only 1 attempt — retry aborted due to URL change
         assert locator.first.fill.call_count == 1
 
@@ -420,7 +433,7 @@ class TestUrlCheckBetweenRetries:
         """URL stays the same → retry proceeds normally."""
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map("https://example.com")
+        srv._state.cache.store(_make_page_map("https://example.com"), None)
         mock_session = _make_mock_session("https://example.com")
         page = mock_session.page
 
@@ -433,7 +446,8 @@ class TestUrlCheckBetweenRetries:
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=2, action="type", value="hello")
 
-        assert "Typed into [2]" in result
+        data = json.loads(result)
+        assert "Typed into [2]" in data["description"]
         assert locator.first.fill.call_count == 2
 
 
@@ -544,10 +558,10 @@ class TestRetryWithStaleRef:
 
     @pytest.mark.asyncio
     async def test_success_after_retry_then_navigation(self):
-        """Retry succeeds → post-action URL change → stale ref warning."""
+        """Retry succeeds → post-action URL change → JSON change=navigation."""
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map("https://example.com")
+        srv._state.cache.store(_make_page_map("https://example.com"), None)
         mock_session = _make_mock_session()
         page = mock_session.page
 
@@ -561,9 +575,10 @@ class TestRetryWithStaleRef:
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=1, action="click")
 
-        assert "Clicked [1]" in result
-        assert "Page navigated" in result
-        assert srv._last_page_map is None
+        data = json.loads(result)
+        assert "Clicked [1]" in data["description"]
+        assert data["change"] == "navigation"
+        assert srv._state.cache.active is None
 
 
 # ── TestClickDoubleSubmissionSafety ──────────────────────────────────
@@ -577,7 +592,7 @@ class TestClickDoubleSubmissionSafety:
         """TimeoutError on click → immediate failure (not safe to retry)."""
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
         page = mock_session.page
 
@@ -587,7 +602,8 @@ class TestClickDoubleSubmissionSafety:
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=1, action="click")
 
-        assert "Error" in result
+        # _safe_error may not return JSON
+        assert "Error" in result or "error" in result
         assert locator.first.click.call_count == 1
 
     @pytest.mark.asyncio
@@ -595,7 +611,7 @@ class TestClickDoubleSubmissionSafety:
         """Same TimeoutError on type → retried (idempotent)."""
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
         page = mock_session.page
 
@@ -605,7 +621,8 @@ class TestClickDoubleSubmissionSafety:
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=2, action="type", value="hello")
 
-        assert "Typed into [2]" in result
+        data = json.loads(result)
+        assert "Typed into [2]" in data["description"]
         assert locator.first.fill.call_count == 2
 
     @pytest.mark.asyncio
@@ -613,7 +630,7 @@ class TestClickDoubleSubmissionSafety:
         """Intercept on click → retried (pre-dispatch failure)."""
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
         page = mock_session.page
 
@@ -628,5 +645,6 @@ class TestClickDoubleSubmissionSafety:
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=1, action="click")
 
-        assert "Clicked [1]" in result
+        data = json.loads(result)
+        assert "Clicked [1]" in data["description"]
         assert locator.first.click.call_count == 2

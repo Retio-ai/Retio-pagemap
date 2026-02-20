@@ -91,9 +91,9 @@ def _reset_state():
     """Reset global state before each test."""
     import pagemap.server as srv
 
-    srv._last_page_map = None
+    srv._state.cache.invalidate_all()
     yield
-    srv._last_page_map = None
+    srv._state.cache.invalidate_all()
 
 
 # ── TestScrollConstants ──────────────────────────────────────────────
@@ -277,13 +277,13 @@ class TestScrollInvalidation:
     async def test_scroll_clears_page_map(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
 
         with patch("pagemap.server._get_session", return_value=mock_session):
             await scroll_page(direction="down", amount="page")
 
-        assert srv._last_page_map is None
+        assert srv._state.cache.active is None
 
     @pytest.mark.asyncio
     async def test_scroll_suggests_get_page_map(self):
@@ -374,7 +374,7 @@ class TestScrollErrors:
     async def test_browser_dead(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
         mock_session.get_scroll_position = AsyncMock(side_effect=PlaywrightError("Target closed"))
 
@@ -382,13 +382,13 @@ class TestScrollErrors:
             result = await scroll_page()
 
         assert "Browser connection lost" in result
-        assert srv._last_page_map is None
+        assert srv._state.cache.active is None
 
     @pytest.mark.asyncio
     async def test_timeout(self):
         import pagemap.server as srv
 
-        srv._last_page_map = object()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
 
         async def _hang(*args, **kwargs):
@@ -403,7 +403,7 @@ class TestScrollErrors:
             result = await scroll_page()
 
         assert "timed out" in result
-        assert srv._last_page_map is None
+        assert srv._state.cache.active is None
 
     @pytest.mark.asyncio
     async def test_dialog_warnings(self):

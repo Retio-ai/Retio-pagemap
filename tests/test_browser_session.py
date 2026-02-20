@@ -45,6 +45,14 @@ class TestBrowserConfig:
         cfg = BrowserConfig()
         assert cfg.wait_until == "networkidle"
 
+    def test_default_settle_quiet_ms(self):
+        cfg = BrowserConfig()
+        assert cfg.settle_quiet_ms == 200
+
+    def test_default_settle_max_ms(self):
+        cfg = BrowserConfig()
+        assert cfg.settle_max_ms == 3000
+
     def test_custom_override(self):
         cfg = BrowserConfig(headless=True, timeout_ms=60000)
         assert cfg.headless is True
@@ -605,10 +613,11 @@ class TestGoBackMethod:
     @pytest.mark.asyncio
     async def test_go_back_returns_url_on_success(self):
         session = BrowserSession.__new__(BrowserSession)
+        session.config = BrowserConfig()
         mock_page = AsyncMock()
         mock_page.go_back = AsyncMock(return_value=MagicMock())  # non-None = success
-        mock_page.wait_for_timeout = AsyncMock()
         mock_page.url = "https://example.com/prev"
+        mock_page.evaluate = AsyncMock(return_value={"waited_ms": 200, "mutations": 0, "reason": "quiet"})
         session._page = mock_page
 
         result = await session.go_back()
@@ -618,21 +627,22 @@ class TestGoBackMethod:
     @pytest.mark.asyncio
     async def test_go_back_returns_none_on_no_history(self):
         session = BrowserSession.__new__(BrowserSession)
+        session.config = BrowserConfig()
         mock_page = AsyncMock()
         mock_page.go_back = AsyncMock(return_value=None)
         session._page = mock_page
 
         result = await session.go_back()
         assert result is None
-        mock_page.wait_for_timeout.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_go_back_custom_params(self):
         session = BrowserSession.__new__(BrowserSession)
+        session.config = BrowserConfig()
         mock_page = AsyncMock()
         mock_page.go_back = AsyncMock(return_value=MagicMock())
-        mock_page.wait_for_timeout = AsyncMock()
         mock_page.url = "https://example.com"
+        mock_page.evaluate = AsyncMock(return_value={"waited_ms": 200, "mutations": 0, "reason": "quiet"})
         session._page = mock_page
 
         await session.go_back(wait_until="domcontentloaded", timeout_ms=10000)
@@ -663,38 +673,43 @@ class TestScrollMethods:
     @pytest.mark.asyncio
     async def test_scroll_calls_evaluate_with_params(self):
         session = BrowserSession.__new__(BrowserSession)
+        session.config = BrowserConfig()
         mock_page = AsyncMock()
         pos_result = {"scrollX": 0, "scrollY": 500}
         mock_page.evaluate = AsyncMock(return_value=pos_result)
-        mock_page.wait_for_timeout = AsyncMock()
         session._page = mock_page
 
         await session.scroll(delta_x=0, delta_y=800)
 
-        # First call: scrollBy, second call: position query
-        assert mock_page.evaluate.call_count == 2
+        # First call: scrollBy, second: DOM settle, third: position query
+        assert mock_page.evaluate.call_count == 3
         first_call = mock_page.evaluate.call_args_list[0]
         assert first_call[0][0] == "([dx, dy]) => window.scrollBy(dx, dy)"
         assert first_call[0][1] == [0, 800]
 
     @pytest.mark.asyncio
-    async def test_scroll_settle_time(self):
+    async def test_scroll_uses_dom_settle(self):
+        """Verify scroll uses wait_for_dom_settle instead of fixed timeout."""
         session = BrowserSession.__new__(BrowserSession)
+        session.config = BrowserConfig()
         mock_page = AsyncMock()
         mock_page.evaluate = AsyncMock(return_value={})
-        mock_page.wait_for_timeout = AsyncMock()
         session._page = mock_page
 
         await session.scroll(delta_y=100)
-        mock_page.wait_for_timeout.assert_called_once_with(500)
+        # Should NOT call wait_for_timeout
+        mock_page.wait_for_timeout.assert_not_called()
+        # DOM settle JS should have been called (second evaluate call)
+        settle_call = mock_page.evaluate.call_args_list[1]
+        assert settle_call[0][1] == [200, 1500]  # quiet_ms=200, max_ms=1500
 
     @pytest.mark.asyncio
     async def test_scroll_parameterized_not_fstring(self):
         """Verify scroll uses parameterized evaluate (security: no f-string injection)."""
         session = BrowserSession.__new__(BrowserSession)
+        session.config = BrowserConfig()
         mock_page = AsyncMock()
         mock_page.evaluate = AsyncMock(return_value={})
-        mock_page.wait_for_timeout = AsyncMock()
         session._page = mock_page
 
         # Even with suspicious values, they're passed as parameters, not interpolated

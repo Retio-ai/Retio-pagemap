@@ -1,3 +1,6 @@
+# Copyright (C) 2025-2026 Retio AI
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """AOM (Accessibility Object Model) based pre-filtering.
 
 HTML5 semantic tags → implicit ARIA role mapping is prioritized over
@@ -48,6 +51,15 @@ _NOISE_PATTERNS = [
     re.compile(r"\bsnackbar\b", re.IGNORECASE),
 ]
 
+# Positive content class/ID patterns (content containers worth keeping)
+_CONTENT_PATTERNS = [
+    re.compile(r"\barticle\b", re.IGNORECASE),
+    re.compile(r"\bcontent\b", re.IGNORECASE),
+    re.compile(r"\bentry\b", re.IGNORECASE),
+    re.compile(r"\bpost\b", re.IGNORECASE),
+    re.compile(r"\bstory\b", re.IGNORECASE),
+]
+
 
 @dataclass
 class AomFilterStats:
@@ -56,6 +68,7 @@ class AomFilterStats:
     total_nodes: int = 0
     removed_nodes: int = 0
     removal_reasons: dict[str, int] = field(default_factory=dict)
+    removed_xpaths: set[str] = field(default_factory=set)  # for future xpath-level matching
 
     def record(self, reason: str) -> None:
         self.removed_nodes += 1
@@ -79,6 +92,48 @@ def _count_noise_matches(el: lxml.html.HtmlElement) -> int:
     if not text.strip():
         return 0
     return sum(1 for p in _NOISE_PATTERNS if p.search(text))
+
+
+_LINK_DENSITY_TAGS = frozenset(
+    {
+        "div",
+        "li",
+        "td",
+        "th",
+        "p",
+        "blockquote",
+    }
+)  # Note: section/aside omitted — already handled by semantic tag early return
+
+
+def _count_content_matches(el: lxml.html.HtmlElement) -> int:
+    """Count how many content patterns match in class/id attributes."""
+    cls = el.get("class", "")
+    eid = el.get("id", "")
+    text = f"{cls} {eid}"
+    if not text.strip():
+        return 0
+    return sum(1 for p in _CONTENT_PATTERNS if p.search(text))
+
+
+_FILTER_CONTROL_TAGS = frozenset({"input", "select", "textarea"})
+
+
+def _has_interactive_descendants(el: lxml.html.HtmlElement) -> bool:
+    """Check if element contains visible form controls (input/select/textarea).
+
+    Filter sidebars contain interactive controls; related-products sections
+    contain mostly links and product cards.
+    """
+    for desc in el.iter():
+        if not isinstance(desc.tag, str):
+            continue
+        tag = desc.tag.lower()
+        if tag in _FILTER_CONTROL_TAGS:
+            if tag == "input" and desc.get("type", "").lower() == "hidden":
+                continue
+            return True
+    return False
 
 
 def _compute_weight(
@@ -105,6 +160,8 @@ def _compute_weight(
             # Schema-conditional exception: gov.kr contact_info in footer
             if role == "contentinfo" and schema_name == "GovernmentPage":
                 return 0.6, "footer-gov-exception"
+            if role == "complementary" and _has_interactive_descendants(el):
+                return 0.7, "complementary-filter-sidebar"
             return 0.0 if role in ("navigation", "banner", "contentinfo") else 0.3, f"role={role}"
         if role in ("main", "article"):
             return 1.0, f"role={role}"
@@ -131,6 +188,11 @@ def _compute_weight(
                 return 0.8, "semantic-section-labeled"
             return 0.6, "semantic-section-unlabeled"
 
+        if tag == "aside":
+            if _has_interactive_descendants(el):
+                return 0.7, "aside-filter-sidebar"
+            return default_weight, f"semantic-{tag}"
+
         return default_weight, f"semantic-{tag}"
 
     # 3. aria-hidden="true"
@@ -145,10 +207,30 @@ def _compute_weight(
         if re.search(r"visibility\s*:\s*hidden", style, re.IGNORECASE):
             return 0.0, "visibility-hidden"
 
-    # 5. Class/ID noise patterns
+    # 5. Class/ID noise patterns + content patterns
     noise_count = _count_noise_matches(el)
+    content_count = _count_content_matches(el)
+
     if noise_count >= 2:
+        if content_count > 0:
+            return 0.7, f"content-override-noise({content_count}vs{noise_count})"
         return 0.2, f"noise-pattern({noise_count})"
+
+    if content_count > 0:
+        return 1.0, f"content-pattern({content_count})"
+
+    # 6. Link density penalty (block-level containers only)
+    if tag in _LINK_DENSITY_TAGS:
+        total_text = (el.text_content() or "").strip()
+        total_len = len(total_text)
+        if total_len > 50:
+            link_text_len = sum(len((a.text_content() or "").strip()) for a in el.iter("a"))
+            if link_text_len > 0:
+                density = link_text_len / total_len
+                if density > 0.8:
+                    return 0.2, f"link-density-high({density:.2f})"
+                if density > 0.5:
+                    return 0.4, f"link-density({density:.2f})"
 
     # Default: keep
     return 1.0, "default"
@@ -183,7 +265,6 @@ def aom_filter(
             to_remove.append((el, reason))
 
     # Remove collected elements (parent-first to avoid double removal)
-    removed_xpaths: set[str] = set()
     for el, reason in to_remove:
         # Skip if already removed as descendant of a previously removed element
         parent = el.getparent()
@@ -197,7 +278,7 @@ def aom_filter(
 
         # Check if any ancestor was already removed
         already_removed = False
-        for removed_xpath in removed_xpaths:
+        for removed_xpath in stats.removed_xpaths:
             if xpath.startswith(removed_xpath + "/"):
                 already_removed = True
                 break
@@ -205,7 +286,7 @@ def aom_filter(
             continue
 
         parent.remove(el)
-        removed_xpaths.add(xpath)
+        stats.removed_xpaths.add(xpath)
         stats.record(reason)
 
     logger.debug(
@@ -215,3 +296,27 @@ def aom_filter(
         stats.removal_reasons,
     )
     return stats
+
+
+# Mapping of removed landmark reasons (weight < 0.5) to Interactable.region names.
+# Noise-class and link-density removals are intentionally excluded (no region mapping).
+_REASON_TO_REGION: dict[str, str] = {
+    "semantic-nav": "navigation",
+    "role=navigation": "navigation",
+    "semantic-header": "header",
+    "role=banner": "header",
+    "semantic-footer": "footer",
+    "role=contentinfo": "footer",
+    "semantic-aside": "complementary",
+    "role=complementary": "complementary",
+}
+
+
+def derive_pruned_regions(stats: AomFilterStats) -> set[str]:
+    """Map AOM removal reasons to interactable region names."""
+    regions: set[str] = set()
+    for reason in stats.removal_reasons:
+        region = _REASON_TO_REGION.get(reason)
+        if region:
+            regions.add(region)
+    return regions

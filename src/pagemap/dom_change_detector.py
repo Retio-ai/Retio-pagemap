@@ -1,3 +1,6 @@
+# Copyright (C) 2025-2026 Retio AI
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """DOM change detection via pre/post structural fingerprinting.
 
 Leaf module with no internal pagemap dependencies.
@@ -29,6 +32,7 @@ class DomFingerprint:
     has_dialog: bool
     body_child_count: int
     title: str
+    content_hash: int = 0  # hash of visible text first 2KB
 
 
 @dataclass
@@ -37,7 +41,7 @@ class DomChangeVerdict:
 
     changed: bool
     reasons: list[str] = field(default_factory=list)
-    severity: str = "none"  # "none" | "minor" | "major"
+    severity: str = "none"  # "none" | "minor" | "major" | "content_changed"
 
 
 # ---------------------------------------------------------------------------
@@ -58,6 +62,14 @@ _DOM_FINGERPRINT_JS = """(() => {
     const key = el.getAttribute('role') || el.tagName.toLowerCase();
     counts[key] = (counts[key] || 0) + 1;
   }
+  const contentHash = (() => {
+    const text = (document.body && document.body.innerText || '').substring(0, 2000);
+    let h = 0;
+    for (let i = 0; i < text.length; i++) {
+      h = ((h << 5) - h + text.charCodeAt(i)) | 0;
+    }
+    return h;
+  })();
   return {
     interactiveCounts: counts,
     totalInteractives: els.length,
@@ -65,7 +77,8 @@ _DOM_FINGERPRINT_JS = """(() => {
       '[role=dialog],[role=alertdialog],dialog[open],[aria-modal="true"]'
     ),
     bodyChildCount: document.body ? document.body.children.length : 0,
-    title: document.title || ''
+    title: document.title || '',
+    contentHash: contentHash
   };
 })()"""
 
@@ -89,6 +102,7 @@ async def capture_dom_fingerprint(page: Page) -> DomFingerprint | None:
         has_dialog=bool(raw.get("hasDialog", False)),
         body_child_count=raw.get("bodyChildCount", 0),
         title=raw.get("title", ""),
+        content_hash=raw.get("contentHash", 0),
     )
 
 
@@ -145,4 +159,31 @@ def detect_dom_changes(
         return DomChangeVerdict(changed=True, reasons=reasons, severity="major")
     if minor_reasons:
         return DomChangeVerdict(changed=True, reasons=minor_reasons, severity="minor")
+
+    # --- Content-only change (structure identical, text changed) ---
+    if before.content_hash != after.content_hash and before.content_hash != 0:
+        return DomChangeVerdict(
+            changed=True,
+            reasons=["visible text changed"],
+            severity="content_changed",
+        )
+
     return DomChangeVerdict(changed=False, severity="none")
+
+
+def fingerprints_structurally_equal(
+    a: DomFingerprint | None,
+    b: DomFingerprint | None,
+) -> bool:
+    """Check if two fingerprints have the same DOM structure (ignoring content_hash).
+
+    Used by cache to decide between Tier A/B (content refresh) vs Tier C (full rebuild).
+    """
+    if a is None or b is None:
+        return False
+    return (
+        a.interactive_counts == b.interactive_counts
+        and a.total_interactives == b.total_interactives
+        and a.has_dialog == b.has_dialog
+        and a.title == b.title
+    )

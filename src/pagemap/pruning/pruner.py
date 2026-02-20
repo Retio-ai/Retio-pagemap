@@ -1,3 +1,6 @@
+# Copyright (C) 2025-2026 Retio AI
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Rule-based pruning with 5-domain schema heuristics.
 
 No BasePruner ABC — concrete RuleBasedPruner directly (Phase 0, no premature abstraction).
@@ -17,15 +20,18 @@ import re
 from dataclasses import dataclass, field
 
 from pagemap.i18n import (
+    AVAILABILITY_TERMS,
     BRAND_TERMS,
     CONTACT_TERMS,
     DEPARTMENT_TERMS,
+    DISCOUNT_TERMS,
     FEATURE_TERMS,
     PRICE_TERMS,
     PRICING_TERMS,
     RATING_TERMS,
     REPORTER_TERMS,
     REVIEW_COUNT_TERMS,
+    SHIPPING_TERMS,
 )
 from pagemap.pruning import ChunkType, HtmlChunk
 
@@ -61,11 +67,29 @@ _BRAND_RE = re.compile(_terms_pattern(BRAND_TERMS), re.IGNORECASE)
 # DEPARTMENT_RE: special handling for Korean "원" to avoid false positives
 # with prices like "189,000원". Lookbehind/lookahead excludes digit context.
 _DEPARTMENT_RE = re.compile(
-    r"(?:" + "|".join(re.escape(t) for t in DEPARTMENT_TERMS if t != "원") + r"|(?<![,\d])원(?![,\d]))",
+    r"(?:" + "|".join(re.escape(t) for t in DEPARTMENT_TERMS if t != "원") + r"|(?<!\d )(?<![,\d])원(?![,\d]))",
     re.IGNORECASE,
 )
 _FEATURE_RE = re.compile(_terms_pattern(FEATURE_TERMS), re.IGNORECASE)
 _PRICING_RE = re.compile(_terms_pattern(PRICING_TERMS), re.IGNORECASE)
+
+_AVAILABILITY_RE = re.compile(_terms_pattern(AVAILABILITY_TERMS), re.IGNORECASE)
+_SHIPPING_RE = re.compile(_terms_pattern(SHIPPING_TERMS), re.IGNORECASE)
+_SCARCITY_RE = re.compile(r"(?:only|just|남은|残り|seulement|nur)\s*\d+", re.IGNORECASE)
+_DISCOUNT_RE = re.compile(
+    r"\d+\s*%\s*(?:" + "|".join(re.escape(t) for t in DISCOUNT_TERMS) + r")",
+    re.IGNORECASE,
+)
+
+
+def _is_high_value_short_text(text: str) -> bool:
+    """Check if short text contains high-value e-commerce signals."""
+    return bool(
+        _AVAILABILITY_RE.search(text)
+        or _SHIPPING_RE.search(text)
+        or _SCARCITY_RE.search(text)
+        or _DISCOUNT_RE.search(text)
+    )
 
 
 def _has_itemprop(chunk: HtmlChunk, prop: str) -> bool:
@@ -137,9 +161,12 @@ def _match_news_article(chunk: HtmlChunk) -> list[tuple[str, str]]:
     text = chunk.text
     tag = chunk.tag
 
-    # headline
-    if tag in ("h1", "h2") or _has_itemprop(chunk, "headline") or _has_og(chunk, "og:title"):
-        matches.append(("headline", "heading/itemprop/og:title"))
+    # headline (h1 only) / section_heading (h2)
+    if tag == "h1" or _has_itemprop(chunk, "headline") or _has_og(chunk, "og:title"):
+        if tag != "h2":  # h2 with itemprop="headline" → section_heading only
+            matches.append(("headline", "h1/itemprop/og:title"))
+    if tag == "h2":
+        matches.append(("section_heading", "h2-section"))
 
     # date
     if tag == "time" or chunk.attrs.get("datetime"):
@@ -258,6 +285,27 @@ _SCHEMA_MATCHERS = {
 
 
 # ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _xpath_common_depth(xpath1: str, xpath2: str) -> int:
+    """Count shared leading path segments between two xpaths."""
+    parts1 = xpath1.strip("/").split("/")
+    parts2 = xpath2.strip("/").split("/")
+    common = 0
+    for a, b in zip(parts1, parts2, strict=False):
+        if a == b:
+            common += 1
+        else:
+            break
+    return common
+
+
+_PRICE_SAME_CONTAINER_DEPTH = 3  # /html/body/divX 이상 공유 필요
+
+
+# ---------------------------------------------------------------------------
 # Pruner
 # ---------------------------------------------------------------------------
 
@@ -281,6 +329,8 @@ def prune_chunks(
     Returns list of (chunk, decision) pairs for all chunks.
     """
     matcher = _SCHEMA_MATCHERS.get(schema_name)
+    if schema_name and matcher is None:
+        logger.warning("Unknown schema_name=%r, falling back to generic rules", schema_name)
     results: list[tuple[HtmlChunk, PruneDecision]] = []
 
     # For Coupang: track first product price block to detect recommendation repeats
@@ -310,25 +360,28 @@ def prune_chunks(
                 matched_fields = [f for f, _ in field_matches]
                 match_reason = "; ".join(f"{f}:{r}" for f, r in field_matches)
 
-        if matched_fields:
+        if matched_fields and (chunk.text or chunk.attrs.get("content")):
             # Rule 6: Coupang recommendation filtering
             if schema_name == "Product" and "price" in matched_fields:
                 price_count += 1
                 if first_price_xpath is None:
                     first_price_xpath = chunk.xpath
                 elif price_count > 3 and not chunk.in_main:
-                    # Likely recommendation section outside main
-                    results.append(
-                        (
-                            chunk,
-                            PruneDecision(
-                                keep=False,
-                                reason="coupang-recommendation-filter",
-                                matched_fields=matched_fields,
-                            ),
+                    shared = _xpath_common_depth(first_price_xpath, chunk.xpath)
+                    if shared < _PRICE_SAME_CONTAINER_DEPTH:
+                        # Different container → likely recommendation section
+                        results.append(
+                            (
+                                chunk,
+                                PruneDecision(
+                                    keep=False,
+                                    reason="coupang-recommendation-filter",
+                                    matched_fields=matched_fields,
+                                ),
+                            )
                         )
-                    )
-                    continue
+                        continue
+                    # Same container → fall through to keep
 
             results.append(
                 (
@@ -356,24 +409,52 @@ def prune_chunks(
                     )
                 )
                 continue
-            if chunk.chunk_type == ChunkType.TEXT_BLOCK and len(chunk.text) > 50:
+            if chunk.chunk_type == ChunkType.TEXT_BLOCK and (
+                len(chunk.text) > 50 or _is_high_value_short_text(chunk.text)
+            ):
+                reason = "in-main-text" if len(chunk.text) > 50 else "in-main-high-value-short"
                 results.append(
                     (
                         chunk,
                         PruneDecision(
                             keep=True,
-                            reason="in-main-text",
+                            reason=reason,
                         ),
                     )
                 )
                 continue
-            if chunk.chunk_type in (ChunkType.TABLE, ChunkType.LIST) and len(chunk.text) > 50:
+            if chunk.chunk_type in (ChunkType.TABLE, ChunkType.LIST) and (
+                len(chunk.text) > 50 or _is_high_value_short_text(chunk.text)
+            ):
+                reason = "in-main-structured" if len(chunk.text) > 50 else "in-main-high-value-short"
                 results.append(
                     (
                         chunk,
                         PruneDecision(
                             keep=True,
-                            reason="in-main-structured",
+                            reason=reason,
+                        ),
+                    )
+                )
+                continue
+            if chunk.chunk_type == ChunkType.FORM:
+                results.append(
+                    (
+                        chunk,
+                        PruneDecision(
+                            keep=True,
+                            reason="in-main-form",
+                        ),
+                    )
+                )
+                continue
+            if chunk.chunk_type == ChunkType.MEDIA and len(chunk.text) > 10:
+                results.append(
+                    (
+                        chunk,
+                        PruneDecision(
+                            keep=True,
+                            reason="in-main-media",
                         ),
                     )
                 )
@@ -410,6 +491,28 @@ def prune_chunks(
                         PruneDecision(
                             keep=True,
                             reason="keep-text-no-main",
+                        ),
+                    )
+                )
+                continue
+            if chunk.chunk_type == ChunkType.FORM and len(chunk.text) > 20:
+                results.append(
+                    (
+                        chunk,
+                        PruneDecision(
+                            keep=True,
+                            reason="keep-form-no-main",
+                        ),
+                    )
+                )
+                continue
+            if chunk.chunk_type == ChunkType.MEDIA and len(chunk.text) > 20:
+                results.append(
+                    (
+                        chunk,
+                        PruneDecision(
+                            keep=True,
+                            reason="keep-media-no-main",
                         ),
                     )
                 )

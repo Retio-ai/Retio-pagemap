@@ -1,3 +1,6 @@
+# Copyright (C) 2025-2026 Retio AI
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Chunk re-merge and HTMLRAG Pass 2 compression.
 
 Combines selected chunks back into a single HTML string and applies
@@ -12,6 +15,36 @@ import re
 from pagemap.pruning import HtmlChunk
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# XPath document-order sort key
+# ---------------------------------------------------------------------------
+
+_XPATH_INDEX_RE = re.compile(r"([^[]+?)(?:\[(\d+)\])?$")
+
+
+def _xpath_sort_key(xpath: str) -> tuple[tuple[str, int], ...]:
+    """Convert XPath string to a numerically-sortable tuple key.
+
+    Lexicographic string sorting breaks for sibling indices >= 10:
+    '/body/div[10]' < '/body/div[2]' lexically (wrong).
+    This parses bracket indices as integers for correct ordering.
+
+    Example::
+
+        '/html/body/div[10]/p[2]' → (('html',0), ('body',0), ('div',10), ('p',2))
+    """
+    parts: list[tuple[str, int]] = []
+    for step in xpath.split("/"):
+        if not step:
+            continue
+        m = _XPATH_INDEX_RE.match(step)
+        if m:
+            parts.append((m.group(1), int(m.group(2)) if m.group(2) else 0))
+        else:
+            parts.append((step, 0))
+    return tuple(parts)
+
 
 # Attributes to preserve during compression
 _KEEP_ATTRS = {
@@ -63,7 +96,7 @@ def remerge_chunks(chunks: list[HtmlChunk]) -> str:
         return ""
 
     # Sort by xpath to approximate document order
-    sorted_chunks = sorted(chunks, key=lambda c: c.xpath)
+    sorted_chunks = sorted(chunks, key=lambda c: _xpath_sort_key(c.xpath))
 
     parts = [c.html for c in sorted_chunks]
     inner = "\n".join(parts)

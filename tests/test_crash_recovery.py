@@ -11,7 +11,21 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from pagemap import PageMap
 from pagemap.browser_session import BrowserSession
+
+
+def _make_page_map(url: str = "https://example.com") -> PageMap:
+    return PageMap(
+        url=url,
+        title="Test",
+        page_type="unknown",
+        interactables=[],
+        pruned_context="",
+        pruned_tokens=0,
+        generation_ms=0,
+    )
+
 
 # ── is_alive() ────────────────────────────────────────────────────
 
@@ -135,18 +149,19 @@ class TestGetSessionRecovery:
         mock_session = AsyncMock(spec=BrowserSession)
         mock_session.is_alive = AsyncMock(return_value=True)
 
-        srv._session = mock_session
-        srv._last_page_map = "some_map"
+        srv._state.session = mock_session
+        page_map = _make_page_map()
+        srv._state.cache.store(page_map, None)
 
         result = await srv._get_session()
 
         assert result is mock_session
         mock_session.start.assert_not_called()
-        assert srv._last_page_map == "some_map"
+        assert srv._state.cache.active is page_map
 
         # cleanup
-        srv._session = None
-        srv._last_page_map = None
+        srv._state.session = None
+        srv._state.cache.invalidate_all()
 
     @pytest.mark.asyncio
     async def test_dead_session_is_replaced(self):
@@ -156,8 +171,8 @@ class TestGetSessionRecovery:
         dead_session.is_alive = AsyncMock(return_value=False)
         dead_session.stop = AsyncMock()
 
-        srv._session = dead_session
-        srv._last_page_map = "stale_map"
+        srv._state.session = dead_session
+        srv._state.cache.store(_make_page_map(), None)
 
         new_session = AsyncMock(spec=BrowserSession)
         new_session.start = AsyncMock()
@@ -167,12 +182,12 @@ class TestGetSessionRecovery:
 
         assert result is new_session
         dead_session.stop.assert_awaited_once()
-        assert srv._last_page_map is None
+        assert srv._state.cache.active is None
         new_session.start.assert_awaited_once()
 
         # cleanup
-        srv._session = None
-        srv._last_page_map = None
+        srv._state.session = None
+        srv._state.cache.invalidate_all()
 
     @pytest.mark.asyncio
     async def test_stop_failure_during_recovery_is_suppressed(self):
@@ -182,8 +197,8 @@ class TestGetSessionRecovery:
         dead_session.is_alive = AsyncMock(return_value=False)
         dead_session.stop = AsyncMock(side_effect=Exception("stop failed"))
 
-        srv._session = dead_session
-        srv._last_page_map = "stale_map"
+        srv._state.session = dead_session
+        srv._state.cache.store(_make_page_map(), None)
 
         new_session = AsyncMock(spec=BrowserSession)
         new_session.start = AsyncMock()
@@ -192,11 +207,11 @@ class TestGetSessionRecovery:
             result = await srv._get_session()
 
         assert result is new_session
-        assert srv._last_page_map is None
+        assert srv._state.cache.active is None
 
         # cleanup
-        srv._session = None
-        srv._last_page_map = None
+        srv._state.session = None
+        srv._state.cache.invalidate_all()
 
     @pytest.mark.asyncio
     async def test_recovery_start_failure_propagates(self):
@@ -206,8 +221,8 @@ class TestGetSessionRecovery:
         dead_session.is_alive = AsyncMock(return_value=False)
         dead_session.stop = AsyncMock()
 
-        srv._session = dead_session
-        srv._last_page_map = "stale_map"
+        srv._state.session = dead_session
+        srv._state.cache.store(_make_page_map(), None)
 
         new_session = AsyncMock(spec=BrowserSession)
         new_session.start = AsyncMock(side_effect=RuntimeError("launch failed"))
@@ -219,5 +234,5 @@ class TestGetSessionRecovery:
             await srv._get_session()
 
         # cleanup
-        srv._session = None
-        srv._last_page_map = None
+        srv._state.session = None
+        srv._state.cache.invalidate_all()

@@ -73,9 +73,9 @@ def _reset_state():
     """Reset global state before each test."""
     import pagemap.server as srv
 
-    srv._last_page_map = None
+    srv._state.cache.invalidate_all()
     yield
-    srv._last_page_map = None
+    srv._state.cache.invalidate_all()
 
 
 # ── TestWaitForConstants ──────────────────────────────────────────
@@ -272,7 +272,7 @@ class TestWaitForPageMap:
     async def test_appear_found_invalidates(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
         mock_session.page.evaluate = AsyncMock(return_value=False)
         mock_session.page.wait_for_function = AsyncMock()
@@ -280,13 +280,13 @@ class TestWaitForPageMap:
         with patch("pagemap.server._get_session", return_value=mock_session):
             await wait_for(text="Done")
 
-        assert srv._last_page_map is None
+        assert srv._state.cache.active is None
 
     @pytest.mark.asyncio
     async def test_gone_found_invalidates(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
         mock_session.page.evaluate = AsyncMock(return_value=False)
         mock_session.page.wait_for_function = AsyncMock()
@@ -294,14 +294,14 @@ class TestWaitForPageMap:
         with patch("pagemap.server._get_session", return_value=mock_session):
             await wait_for(text_gone="Loading...")
 
-        assert srv._last_page_map is None
+        assert srv._state.cache.active is None
 
     @pytest.mark.asyncio
     async def test_timeout_preserves_page_map(self):
         import pagemap.server as srv
 
         page_map = _make_page_map()
-        srv._last_page_map = page_map
+        srv._state.cache.store(page_map, None)
         mock_session = _make_mock_session()
         mock_session.page.evaluate = AsyncMock(return_value=False)
         mock_session.page.wait_for_function = AsyncMock(side_effect=PlaywrightError("Timeout 10000ms exceeded"))
@@ -309,35 +309,35 @@ class TestWaitForPageMap:
         with patch("pagemap.server._get_session", return_value=mock_session):
             await wait_for(text="Never appears", timeout=10)
 
-        assert srv._last_page_map is page_map
+        assert srv._state.cache.active is page_map
 
     @pytest.mark.asyncio
     async def test_already_visible_preserves_page_map(self):
         import pagemap.server as srv
 
         page_map = _make_page_map()
-        srv._last_page_map = page_map
+        srv._state.cache.store(page_map, None)
         mock_session = _make_mock_session()
         mock_session.page.evaluate = AsyncMock(return_value=True)
 
         with patch("pagemap.server._get_session", return_value=mock_session):
             await wait_for(text="Already here")
 
-        assert srv._last_page_map is page_map
+        assert srv._state.cache.active is page_map
 
     @pytest.mark.asyncio
     async def test_already_gone_preserves_page_map(self):
         import pagemap.server as srv
 
         page_map = _make_page_map()
-        srv._last_page_map = page_map
+        srv._state.cache.store(page_map, None)
         mock_session = _make_mock_session()
         mock_session.page.evaluate = AsyncMock(return_value=True)
 
         with patch("pagemap.server._get_session", return_value=mock_session):
             await wait_for(text_gone="Already gone")
 
-        assert srv._last_page_map is page_map
+        assert srv._state.cache.active is page_map
 
 
 # ── TestWaitForErrors ──────────────────────────────────────────────
@@ -350,7 +350,7 @@ class TestWaitForErrors:
     async def test_browser_dead(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
         mock_session.page.evaluate = AsyncMock(side_effect=PlaywrightError("Target closed"))
 
@@ -358,13 +358,13 @@ class TestWaitForErrors:
             result = await wait_for(text="hello")
 
         assert "Browser connection lost" in result
-        assert srv._last_page_map is None
+        assert srv._state.cache.active is None
 
     @pytest.mark.asyncio
     async def test_overall_timeout(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
 
         async def _hang(*args, **kwargs):
@@ -379,7 +379,7 @@ class TestWaitForErrors:
             result = await wait_for(text="hello")
 
         assert "overall timeout" in result.lower() or "timed out" in result.lower()
-        assert srv._last_page_map is None
+        assert srv._state.cache.active is None
 
     @pytest.mark.asyncio
     async def test_non_timeout_playwright_error(self):
@@ -520,7 +520,7 @@ class TestWaitForNoPageMapRequired:
     async def test_works_without_page_map(self):
         import pagemap.server as srv
 
-        srv._last_page_map = None
+        srv._state.cache.invalidate_all()
         mock_session = _make_mock_session()
         mock_session.page.evaluate = AsyncMock(return_value=True)
 

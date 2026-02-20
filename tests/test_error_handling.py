@@ -12,6 +12,7 @@ Verifies:
 from __future__ import annotations
 
 import asyncio
+import json
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import pytest
@@ -101,9 +102,9 @@ def _reset_state():
     """Reset global state before each test."""
     import pagemap.server as srv
 
-    srv._last_page_map = None
+    srv._state.cache.invalidate_all()
     yield
-    srv._last_page_map = None
+    srv._state.cache.invalidate_all()
 
 
 # ── TestBrowserDeadClassifier ────────────────────────────────────────
@@ -152,7 +153,7 @@ class TestTargetClosedDuringAction:
     async def test_click_target_closed(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
         locator = mock_session.page.get_by_role.return_value
         locator.first.click = AsyncMock(side_effect=PlaywrightError("Target closed"))
@@ -160,15 +161,16 @@ class TestTargetClosedDuringAction:
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=1, action="click")
 
-        assert "Browser connection lost" in result
-        assert "get_page_map" in result
-        assert srv._last_page_map is None
+        data = json.loads(result)
+        assert "Browser connection lost" in data["error"]
+        assert data["refs_expired"] is True
+        assert srv._state.cache.active is None
 
     @pytest.mark.asyncio
     async def test_type_target_closed(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
         locator = mock_session.page.get_by_role.return_value
         locator.first.fill = AsyncMock(side_effect=PlaywrightError("Target closed"))
@@ -176,14 +178,15 @@ class TestTargetClosedDuringAction:
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=2, action="type", value="hello")
 
-        assert "Browser connection lost" in result
-        assert srv._last_page_map is None
+        data = json.loads(result)
+        assert "Browser connection lost" in data["error"]
+        assert srv._state.cache.active is None
 
     @pytest.mark.asyncio
     async def test_select_target_closed(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
         locator = mock_session.page.get_by_role.return_value
         locator.first.select_option = AsyncMock(side_effect=PlaywrightError("Target closed"))
@@ -191,29 +194,31 @@ class TestTargetClosedDuringAction:
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=3, action="select", value="price")
 
-        assert "Browser connection lost" in result
-        assert srv._last_page_map is None
+        data = json.loads(result)
+        assert "Browser connection lost" in data["error"]
+        assert srv._state.cache.active is None
 
     @pytest.mark.asyncio
     async def test_press_key_target_closed(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
         mock_session.page.keyboard.press = AsyncMock(side_effect=PlaywrightError("Target closed"))
 
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=1, action="press_key", value="Enter")
 
-        assert "Browser connection lost" in result
-        assert srv._last_page_map is None
+        data = json.loads(result)
+        assert "Browser connection lost" in data["error"]
+        assert srv._state.cache.active is None
 
     @pytest.mark.asyncio
     async def test_target_page_context_closed(self):
         """Full Playwright error message variant."""
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
         locator = mock_session.page.get_by_role.return_value
         locator.first.click = AsyncMock(side_effect=PlaywrightError("Target page, context or browser has been closed"))
@@ -221,8 +226,9 @@ class TestTargetClosedDuringAction:
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=1, action="click")
 
-        assert "Browser connection lost" in result
-        assert srv._last_page_map is None
+        data = json.loads(result)
+        assert "Browser connection lost" in data["error"]
+        assert srv._state.cache.active is None
 
 
 # ── TestBrowserDisconnected ──────────────────────────────────────────
@@ -235,7 +241,7 @@ class TestBrowserDisconnected:
     async def test_browser_disconnected_error(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
         locator = mock_session.page.get_by_role.return_value
         locator.first.click = AsyncMock(side_effect=PlaywrightError("Browser disconnected"))
@@ -243,14 +249,15 @@ class TestBrowserDisconnected:
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=1, action="click")
 
-        assert "Browser connection lost" in result
-        assert srv._last_page_map is None
+        data = json.loads(result)
+        assert "Browser connection lost" in data["error"]
+        assert srv._state.cache.active is None
 
     @pytest.mark.asyncio
     async def test_connection_closed_error(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
         locator = mock_session.page.get_by_role.return_value
         locator.first.fill = AsyncMock(side_effect=Exception("Connection closed while reading"))
@@ -258,8 +265,9 @@ class TestBrowserDisconnected:
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=2, action="type", value="hello")
 
-        assert "Browser connection lost" in result
-        assert srv._last_page_map is None
+        data = json.loads(result)
+        assert "Browser connection lost" in data["error"]
+        assert srv._state.cache.active is None
 
 
 # ── TestOverallTimeout ───────────────────────────────────────────────
@@ -273,7 +281,7 @@ class TestOverallTimeout:
         """Action hangs forever → overall timeout fires."""
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
         locator = mock_session.page.get_by_role.return_value
 
@@ -288,15 +296,16 @@ class TestOverallTimeout:
         ):
             result = await execute_action(ref=1, action="click")
 
-        assert "timed out" in result
-        assert "get_page_map" in result
-        assert srv._last_page_map is None
+        data = json.loads(result)
+        assert "timed out" in data["error"]
+        assert data["refs_expired"] is True
+        assert srv._state.cache.active is None
 
     @pytest.mark.asyncio
     async def test_timeout_on_slow_type(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
         locator = mock_session.page.get_by_role.return_value
 
@@ -311,15 +320,16 @@ class TestOverallTimeout:
         ):
             result = await execute_action(ref=2, action="type", value="hello")
 
-        assert "timed out" in result
-        assert srv._last_page_map is None
+        data = json.loads(result)
+        assert "timed out" in data["error"]
+        assert srv._state.cache.active is None
 
     @pytest.mark.asyncio
     async def test_timeout_includes_seconds_in_message(self):
         """Message includes the actual timeout value."""
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
 
         async def _hang(*args, **kwargs):
@@ -333,8 +343,9 @@ class TestOverallTimeout:
         ):
             result = await execute_action(ref=1, action="press_key", value="Enter")
 
-        assert "timed out" in result
-        assert "0.1s" in result
+        data = json.loads(result)
+        assert "timed out" in data["error"]
+        assert "0.1s" in data["error"]
 
 
 # ── TestTimeoutDuringLocator ─────────────────────────────────────────
@@ -348,7 +359,7 @@ class TestTimeoutDuringLocator:
         """Playwright timeout in locator.count() → retried via retry helper."""
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
         page = mock_session.page
 
@@ -359,7 +370,8 @@ class TestTimeoutDuringLocator:
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=2, action="type", value="hello")
 
-        assert "Typed into [2]" in result
+        data = json.loads(result)
+        assert "Typed into [2]" in data["description"]
         assert locator.first.fill.call_count == 2
 
     @pytest.mark.asyncio
@@ -367,7 +379,7 @@ class TestTimeoutDuringLocator:
         """role locator count() raises → fallback to CSS selector."""
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
         page = mock_session.page
 
@@ -385,8 +397,9 @@ class TestTimeoutDuringLocator:
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=2, action="type", value="hello")
 
-        assert "Typed into [2]" in result
-        assert "CSS selector" in result
+        data = json.loads(result)
+        assert "Typed into [2]" in data["description"]
+        assert "CSS selector" in data["description"]
 
 
 # ── TestSessionRecoveryAfterDeath ────────────────────────────────────
@@ -400,7 +413,7 @@ class TestSessionRecoveryAfterDeath:
         """TargetClosed sets _last_page_map=None, subsequent check confirms."""
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
         locator = mock_session.page.get_by_role.return_value
         locator.first.click = AsyncMock(side_effect=PlaywrightError("Target closed"))
@@ -409,18 +422,19 @@ class TestSessionRecoveryAfterDeath:
             await execute_action(ref=1, action="click")
 
         # _last_page_map was invalidated
-        assert srv._last_page_map is None
+        assert srv._state.cache.active is None
 
         # Subsequent execute_action without get_page_map → "No active Page Map"
         result = await execute_action(ref=1, action="click")
-        assert "No active Page Map" in result
+        data = json.loads(result)
+        assert "No active Page Map" in data["error"]
 
     @pytest.mark.asyncio
     async def test_execute_after_timeout_needs_refresh(self):
         """After timeout, next execute_action requires get_page_map refresh."""
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
 
         async def _hang(*args, **kwargs):
@@ -434,8 +448,9 @@ class TestSessionRecoveryAfterDeath:
         ):
             await execute_action(ref=1, action="press_key", value="Enter")
 
-        assert srv._last_page_map is None
+        assert srv._state.cache.active is None
 
         # Next call without refresh → error
         result = await execute_action(ref=1, action="click")
-        assert "No active Page Map" in result
+        data = json.loads(result)
+        assert "No active Page Map" in data["error"]

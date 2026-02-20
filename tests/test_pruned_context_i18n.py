@@ -53,6 +53,11 @@ class TestPricePatternMultilingual:
             "sale price",
             "original price",
             "list price",
+            "USD 29.99",
+            "EUR 49.99",
+            "CHF 45.00",
+            "USD29.99",
+            "EUR 1,299.00",
         ],
     )
     def test_matches(self, text):

@@ -1,3 +1,6 @@
+# Copyright (C) 2025-2026 Retio AI
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Pydantic extraction schemas for Phase -1 baseline.
 
 Each domain has a flat Pydantic model with Optional fields.

@@ -1,3 +1,6 @@
+# Copyright (C) 2025-2026 Retio AI
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """4-Tier interactive element detection from AX Tree + CDP.
 
 Tier 1: Standard ARIA roles (button, link, textbox, etc.) with explicit names

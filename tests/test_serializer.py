@@ -8,7 +8,13 @@ import json
 import re
 
 from pagemap import Interactable, PageMap
-from pagemap.serializer import estimate_prompt_tokens, to_agent_prompt, to_dict, to_json
+from pagemap.serializer import (
+    estimate_prompt_tokens,
+    to_agent_prompt,
+    to_agent_prompt_diff,
+    to_dict,
+    to_json,
+)
 
 
 def _make_page_map(**overrides) -> PageMap:
@@ -281,3 +287,207 @@ class TestTokenEstimation:
         tokens = estimate_prompt_tokens(pm)
         # Just header (URL + Type) should be very few tokens
         assert tokens < 50
+
+
+# ── Navigation Hints Output ────────────────────────────────────────
+
+
+class TestNavigationHintsOutput:
+    """Tests for navigation_hints in JSON and agent prompt output."""
+
+    def test_json_includes_navigation_hints_when_present(self):
+        hints = {"pagination": {"current_page": 1, "total_pages": 5, "has_next": True}}
+        pm = _make_page_map(navigation_hints=hints)
+        data = json.loads(to_json(pm))
+        assert data["navigation_hints"] == hints
+
+    def test_json_omits_navigation_hints_when_empty(self):
+        pm = _make_page_map(navigation_hints={})
+        data = json.loads(to_json(pm))
+        assert "navigation_hints" not in data
+
+    def test_prompt_navigation_section_with_pagination(self):
+        hints = {"pagination": {"current_page": 2, "total_pages": 10, "next_ref": 5}}
+        pm = _make_page_map(
+            interactables=[_make_interactable()],
+            navigation_hints=hints,
+        )
+        prompt = to_agent_prompt(pm)
+        assert "## Navigation" in prompt
+        assert "Page 2/10" in prompt
+        assert "Next: [5]" in prompt
+
+    def test_prompt_navigation_section_with_prev_ref(self):
+        hints = {"pagination": {"current_page": 3, "total_pages": 10, "prev_ref": 4}}
+        pm = _make_page_map(
+            interactables=[_make_interactable()],
+            navigation_hints=hints,
+        )
+        prompt = to_agent_prompt(pm)
+        assert "Prev: [4]" in prompt
+
+    def test_prompt_navigation_section_with_total_items(self):
+        hints = {"pagination": {"current_page": 1, "total_pages": 25, "total_items": "총 500건"}}
+        pm = _make_page_map(
+            interactables=[_make_interactable()],
+            navigation_hints=hints,
+        )
+        prompt = to_agent_prompt(pm)
+        assert "총 500건" in prompt
+
+    def test_prompt_navigation_section_with_filters(self):
+        hints = {"filters": {"filter_refs": [5, 6, 7]}}
+        pm = _make_page_map(
+            interactables=[_make_interactable()],
+            navigation_hints=hints,
+        )
+        prompt = to_agent_prompt(pm)
+        assert "## Navigation" in prompt
+        assert "Filters: [5], [6], [7]" in prompt
+
+    def test_prompt_no_navigation_section_when_empty(self):
+        pm = _make_page_map(navigation_hints={})
+        prompt = to_agent_prompt(pm)
+        assert "## Navigation" not in prompt
+
+    def test_prompt_navigation_with_load_more(self):
+        hints = {"pagination": {"load_more_ref": 12}}
+        pm = _make_page_map(
+            interactables=[_make_interactable()],
+            navigation_hints=hints,
+        )
+        prompt = to_agent_prompt(pm)
+        assert "Load more: [12]" in prompt
+
+
+# ── Cache Meta in Agent Prompt ────────────────────────────────────────
+
+
+class TestCacheMetaOutput:
+    """Tests for cache_meta parameter in to_agent_prompt."""
+
+    def test_cache_meta_shown_when_include_meta(self):
+        pm = _make_page_map(interactables=[_make_interactable()])
+        prompt = to_agent_prompt(pm, include_meta=True, cache_meta="hit | age=15s")
+        assert "## Meta" in prompt
+        assert "Cache: hit | age=15s" in prompt
+
+    def test_cache_meta_hidden_when_no_include_meta(self):
+        pm = _make_page_map(interactables=[_make_interactable()])
+        prompt = to_agent_prompt(pm, include_meta=False, cache_meta="hit | age=15s")
+        assert "Cache:" not in prompt
+
+    def test_empty_cache_meta_omitted(self):
+        pm = _make_page_map(interactables=[_make_interactable()])
+        prompt = to_agent_prompt(pm, include_meta=True, cache_meta="")
+        assert "## Meta" in prompt
+        assert "Cache:" not in prompt
+
+
+# ── Diff Output Format ────────────────────────────────────────────────
+
+
+class TestAgentPromptDiff:
+    """Tests for to_agent_prompt_diff() section-level diff output."""
+
+    def test_identical_page_maps_return_unchanged(self):
+        pm = _make_page_map(
+            interactables=[_make_interactable(ref=1), _make_interactable(ref=2, name="Next")],
+            pruned_context="Price: $99",
+        )
+        diff = to_agent_prompt_diff(pm, pm)
+        assert diff is not None
+        assert "unchanged" in diff.lower()
+        assert "Refs: 1-2 still valid" in diff
+
+    def test_actions_changed_shows_full_actions(self):
+        old = _make_page_map(
+            interactables=[_make_interactable(ref=1, name="Buy")],
+            pruned_context="Price: $99",
+        )
+        new = _make_page_map(
+            interactables=[
+                _make_interactable(ref=1, name="Buy"),
+                _make_interactable(ref=2, name="Cart"),
+            ],
+            pruned_context="Price: $99",
+        )
+        diff = to_agent_prompt_diff(old, new, savings_threshold=0.0)
+        assert diff is not None
+        assert "## Actions" in diff
+        assert "[2]" in diff
+        assert "## Info — unchanged" in diff
+
+    def test_info_changed_shows_full_info(self):
+        items = [_make_interactable(ref=i) for i in range(1, 10)]
+        old = _make_page_map(interactables=items, pruned_context="Price: $99 " * 20)
+        new = _make_page_map(interactables=items, pruned_context="Price: $149 " * 20)
+        diff = to_agent_prompt_diff(old, new, savings_threshold=0.0)
+        assert diff is not None
+        assert "## Info (updated)" in diff
+        assert "## Actions — unchanged" in diff
+
+    def test_all_changed_returns_none_below_threshold(self):
+        """If everything changed, savings < threshold → return None for full fallback."""
+        old = _make_page_map(
+            interactables=[_make_interactable(ref=1, name="A")],
+            pruned_context="Old content",
+            images=["https://img.com/1.jpg"],
+        )
+        new = _make_page_map(
+            interactables=[_make_interactable(ref=1, name="B")],
+            pruned_context="New content",
+            images=["https://img.com/2.jpg"],
+        )
+        diff = to_agent_prompt_diff(old, new, savings_threshold=0.99)
+        assert diff is None
+
+    def test_change_summary_in_header(self):
+        items = [_make_interactable(ref=i) for i in range(1, 10)]
+        old = _make_page_map(
+            interactables=items,
+            pruned_context="Price: $99 " * 20,
+        )
+        new = _make_page_map(
+            interactables=items,
+            pruned_context="Price: $149 " * 20,
+        )
+        diff = to_agent_prompt_diff(old, new, savings_threshold=0.0)
+        assert "Changes:" in diff
+        assert "Info: content updated" in diff
+
+    def test_meta_section_with_cache_info(self):
+        items = [_make_interactable(ref=i) for i in range(1, 20)]
+        old = _make_page_map(
+            interactables=items,
+            pruned_context="Long content " * 50,
+        )
+        new = _make_page_map(
+            interactables=items,
+            pruned_context="Long content " * 50,
+        )
+        diff = to_agent_prompt_diff(old, new, cache_age_s=15.0, include_meta=True)
+        assert "Cache: hit | age=15s" in diff
+
+    def test_refs_expired_when_actions_change(self):
+        old = _make_page_map(
+            interactables=[_make_interactable(ref=1, name="A")],
+            pruned_context="Content " * 30,
+        )
+        new = _make_page_map(
+            interactables=[_make_interactable(ref=1, name="B")],
+            pruned_context="Content " * 30,
+        )
+        diff = to_agent_prompt_diff(old, new, savings_threshold=0.0)
+        assert diff is not None
+        assert "refs expired" in diff.lower()
+
+    def test_navigation_changed_shows_updated(self):
+        items = [_make_interactable(ref=1)]
+        old_hints = {"pagination": {"current_page": 1, "total_pages": 10, "next_ref": 2}}
+        new_hints = {"pagination": {"current_page": 2, "total_pages": 10, "next_ref": 3}}
+        old = _make_page_map(interactables=items, navigation_hints=old_hints, pruned_context="x")
+        new = _make_page_map(interactables=items, navigation_hints=new_hints, pruned_context="x")
+        diff = to_agent_prompt_diff(old, new, savings_threshold=0.0)
+        assert diff is not None
+        assert "## Navigation (updated)" in diff

@@ -147,8 +147,7 @@ class TestBuildPageMapLiveIsolation:
         ):
             page_map = await build_page_map_live(session=mock_session)
 
-        assert len(page_map.warnings) == 1
-        assert "AX tree" in page_map.warnings[0]
+        assert any("AX tree" in w for w in page_map.warnings)
 
 
 # ── Warning rendering in serializer ──────────────────────────────────

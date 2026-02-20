@@ -1,3 +1,6 @@
+# Copyright (C) 2025-2026 Retio AI
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Internationalization: detection keywords + locale-specific rendering.
 
 2-Layer architecture:
@@ -298,6 +301,26 @@ NEXT_BUTTON_TERMS: tuple[str, ...] = (
     "Nächste Seite",
 )
 
+PREV_BUTTON_TERMS: tuple[str, ...] = (
+    # ko
+    "이전",
+    "이전 페이지",
+    # en
+    "Previous",
+    "previous",
+    "Prev",
+    "prev",
+    # ja
+    "前へ",
+    "前のページ",
+    # fr
+    "Précédent",
+    "Page précédente",
+    # de
+    "Zurück",
+    "Vorherige Seite",
+)
+
 LOAD_MORE_TERMS: tuple[str, ...] = (
     # ko
     "더보기",
@@ -362,6 +385,82 @@ OPTION_TERMS: tuple[str, ...] = (
     "Größe",
     "Farbe",
     "Option",
+)
+
+AVAILABILITY_TERMS: tuple[str, ...] = (
+    # ko
+    "재고",
+    "품절",
+    "매진",
+    "입고",
+    "예약",
+    # en
+    "in stock",
+    "out of stock",
+    "sold out",
+    "available",
+    "unavailable",
+    "limited",
+    "pre-order",
+    # ja
+    "在庫",
+    "品切れ",
+    "完売",
+    "予約",
+    # fr
+    "en stock",
+    "épuisé",
+    "disponible",
+    "indisponible",
+    # de
+    "auf lager",
+    "ausverkauft",
+    "verfügbar",
+    "nicht verfügbar",
+)
+
+DISCOUNT_TERMS: tuple[str, ...] = (
+    # ko
+    "할인",
+    "세일",
+    # en
+    "off",
+    "sale",
+    "discount",
+    # ja
+    "引き",
+    "割引",
+    # fr
+    "remise",
+    "réduction",
+    # de
+    "rabatt",
+    "Preisnachlass",
+)
+
+SHIPPING_TERMS: tuple[str, ...] = (
+    # ko
+    "무료배송",
+    "무료 배송",
+    "배송비",
+    "당일배송",
+    "내일 도착",
+    # en
+    "free shipping",
+    "free delivery",
+    "ships free",
+    "delivery",
+    # ja
+    "送料無料",
+    "送料",
+    "配送",
+    # fr
+    "livraison gratuite",
+    "livraison",
+    # de
+    "kostenloser versand",
+    "versandkostenfrei",
+    "lieferung",
 )
 
 # ---------------------------------------------------------------------------

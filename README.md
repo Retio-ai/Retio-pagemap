@@ -11,7 +11,7 @@ Compresses ~100K-token HTML into a 2-5K-token structured map while preserving ev
 [![CI](https://github.com/Retio-ai/Retio-pagemap/actions/workflows/ci.yml/badge.svg)](https://github.com/Retio-ai/Retio-pagemap/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/retio-pagemap)](https://pypi.org/project/retio-pagemap/)
 [![Python](https://img.shields.io/pypi/pyversions/retio-pagemap)](https://pypi.org/project/retio-pagemap/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 
 ---
 
@@ -248,7 +248,9 @@ Have a question or idea? Join the conversation in [GitHub Discussions](https://g
 
 ## License
 
-MIT
+AGPL-3.0-only — see [LICENSE](LICENSE) for the full text.
+
+For commercial licensing options, contact **retio1001@retio.ai**.
 
 ---
 

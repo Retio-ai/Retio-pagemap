@@ -1,3 +1,6 @@
+# Copyright (C) 2025-2026 Retio AI
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Playwright browser session management for Page Map.
 
 Manages Chromium lifecycle, CDP sessions, and anti-automation flags.
@@ -127,6 +130,8 @@ class BrowserConfig:
     user_agent: str = DEFAULT_USER_AGENT
     timeout_ms: int = 30000
     wait_until: str = "networkidle"
+    settle_quiet_ms: int = 200  # DOM mutation quiet period (ms)
+    settle_max_ms: int = 3000  # Maximum settle wait (ms)
 
 
 class BrowserSession:
@@ -399,8 +404,7 @@ class BrowserSession:
             wait_until=self.config.wait_until,
             timeout=self.config.timeout_ms,
         )
-        # Extra settle time for dynamic content
-        await self.page.wait_for_timeout(1500)
+        await self.wait_for_dom_settle()
 
     async def load_html(self, html: str, base_url: str = "about:blank") -> None:
         """Load raw HTML content directly (offline mode)."""
@@ -412,21 +416,55 @@ class BrowserSession:
             self._cdp_session = await self.context.new_cdp_session(self.page)
         return self._cdp_session
 
+    async def wait_for_dom_settle(
+        self,
+        quiet_ms: int | None = None,
+        max_ms: int | None = None,
+    ) -> dict | None:
+        """Wait for DOM mutations to settle using MutationObserver.
+
+        Returns:
+            Metrics dict {"waited_ms": int, "mutations": int, "reason": "quiet"|"timeout"}
+            or None if page.evaluate failed (crash, navigation, etc.).
+        """
+        q = quiet_ms if quiet_ms is not None else self.config.settle_quiet_ms
+        m = max_ms if max_ms is not None else self.config.settle_max_ms
+        try:
+            result = await self.page.evaluate(_DOM_SETTLE_JS, [q, m])
+            logger.debug(
+                "DOM settle: %dms, %d mutations, reason=%s",
+                result.get("waited_ms", 0),
+                result.get("mutations", 0),
+                result.get("reason", "unknown"),
+            )
+            return result
+        except Exception:
+            logger.debug("DOM settle failed, continuing", exc_info=True)
+            return None
+
     async def get_ax_tree(self, interesting_only: bool = False) -> dict | None:
         """Get the accessibility tree snapshot via CDP.
 
-        Returns a tree dict matching the old Playwright accessibility.snapshot() format:
-        {"role": "...", "name": "...", "children": [...], ...}
+        Reuses the cached CDP session (get_cdp_session). On stale-session
+        errors, reconnects once and retries.
         """
-        cdp = await self.context.new_cdp_session(self.page)
-        try:
-            result = await cdp.send("Accessibility.getFullAXTree")
-            nodes = result.get("nodes", [])
-            if not nodes:
-                return None
-            return _cdp_ax_nodes_to_tree(nodes)
-        finally:
-            await cdp.detach()
+        for attempt in range(2):
+            cdp = await self.get_cdp_session()
+            try:
+                result = await cdp.send("Accessibility.getFullAXTree")
+                nodes = result.get("nodes", [])
+                if not nodes:
+                    return None
+                return _cdp_ax_nodes_to_tree(nodes)
+            except Exception:
+                if attempt == 0:
+                    logger.warning("CDP session stale in get_ax_tree, reconnecting")
+                    with suppress(Exception):
+                        await cdp.detach()
+                    self._cdp_session = None
+                    continue
+                raise
+        return None  # unreachable; satisfies type checker
 
     async def get_page_html(self) -> str:
         """Get the current page's full HTML."""
@@ -444,7 +482,7 @@ class BrowserSession:
         """Click an element by XPath."""
         locator = self.page.locator(f"xpath={xpath}")
         await locator.click(timeout=5000)
-        await self.page.wait_for_timeout(500)
+        await self.wait_for_dom_settle(max_ms=2000)
 
     async def type_text(self, xpath: str, text: str) -> None:
         """Type text into an element by XPath."""
@@ -473,7 +511,7 @@ class BrowserSession:
         if response is None:
             # No previous page in history
             return None
-        await self.page.wait_for_timeout(1000)  # settle for dynamic content
+        await self.wait_for_dom_settle(max_ms=2000)
         return self.page.url
 
     async def get_scroll_position(self) -> dict:
@@ -487,7 +525,7 @@ class BrowserSession:
         Returns scroll position after scrolling.
         """
         await self.page.evaluate("([dx, dy]) => window.scrollBy(dx, dy)", [delta_x, delta_y])
-        await self.page.wait_for_timeout(500)  # lazy-load settle
+        await self.wait_for_dom_settle(max_ms=1500)
         return await self.page.evaluate(_SCROLL_POSITION_JS)
 
 
@@ -500,6 +538,43 @@ _SCROLL_POSITION_JS = """() => ({
     scrollHeight: document.documentElement.scrollHeight,
     clientWidth: document.documentElement.clientWidth,
     clientHeight: document.documentElement.clientHeight,
+})"""
+
+_DOM_SETTLE_JS = """([quietMs, maxMs]) => new Promise(resolve => {
+  let mutations = 0;
+  let quietTimer = null;
+  let maxTimer = null;
+  const start = performance.now();
+
+  const finish = (reason) => {
+    observer.disconnect();
+    if (quietTimer) clearTimeout(quietTimer);
+    if (maxTimer) clearTimeout(maxTimer);
+    resolve({
+      waited_ms: Math.round(performance.now() - start),
+      mutations: mutations,
+      reason: reason
+    });
+  };
+
+  const resetQuiet = () => {
+    if (quietTimer) clearTimeout(quietTimer);
+    quietTimer = setTimeout(() => finish('quiet'), quietMs);
+  };
+
+  const observer = new MutationObserver((records) => {
+    mutations += records.length;
+    resetQuiet();
+  });
+
+  observer.observe(document.documentElement, {
+    childList: true,
+    subtree: true,
+    characterData: true
+  });
+
+  resetQuiet();
+  maxTimer = setTimeout(() => finish('timeout'), maxMs);
 })"""
 
 

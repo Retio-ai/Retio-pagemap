@@ -1,3 +1,6 @@
+# Copyright (C) 2025-2026 Retio AI
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Page Map: structured intermediate representation for AI agent web tasks.
 
 Converts web pages from ~100K tokens to 2-5K token structured maps containing:
@@ -47,6 +50,8 @@ class PageMap:
     images: list[str] = field(default_factory=list)  # product image URLs
     metadata: dict = field(default_factory=dict)  # structured extraction result
     warnings: list[str] = field(default_factory=list)  # degraded mode notices
+    navigation_hints: dict = field(default_factory=dict)  # pagination/filter metadata
+    pruned_regions: set[str] = field(default_factory=set)  # regions removed by AOM filter
 
     @property
     def total_interactables(self) -> int:

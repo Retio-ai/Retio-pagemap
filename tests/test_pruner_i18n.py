@@ -230,6 +230,18 @@ class TestDepartmentRE:
         """'원' preceded by digits/commas (price) must NOT match."""
         assert not _DEPARTMENT_RE.search(text)
 
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "189,000 원",
+            "13900 원",
+            "3,990 원",
+        ],
+    )
+    def test_price_won_with_space_does_not_match(self, text):
+        """'원' preceded by digit+space (spaced price) must NOT match."""
+        assert not _DEPARTMENT_RE.search(text)
+
 
 # ---------------------------------------------------------------------------
 # FEATURE_RE

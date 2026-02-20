@@ -10,6 +10,7 @@ Verifies:
 
 from __future__ import annotations
 
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -150,9 +151,9 @@ def _reset_state():
     """Reset global state before each test."""
     import pagemap.server as srv
 
-    srv._last_page_map = None
+    srv._state.cache.invalidate_all()
     yield
-    srv._last_page_map = None
+    srv._state.cache.invalidate_all()
 
 
 # ── TestResolveLocatorUnit ───────────────────────────────────────────
@@ -323,43 +324,46 @@ class TestFallbackHappyPath:
     async def test_click_role_success(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map_with_selectors()
+        srv._state.cache.store(_make_page_map_with_selectors(), None)
         mock_session = _make_mock_session()
 
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=1, action="click")
 
-        assert "Clicked [1]" in result
-        assert "Error" not in result
-        assert "CSS selector" not in result
+        data = json.loads(result)
+        assert "Clicked [1]" in data["description"]
+        assert "error" not in data
+        assert "CSS selector" not in data["description"]
         mock_session.page.locator.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_type_role_success(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map_with_selectors()
+        srv._state.cache.store(_make_page_map_with_selectors(), None)
         mock_session = _make_mock_session()
 
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=2, action="type", value="hello")
 
-        assert "Typed into [2]" in result
-        assert "CSS selector" not in result
+        data = json.loads(result)
+        assert "Typed into [2]" in data["description"]
+        assert "CSS selector" not in data["description"]
         mock_session.page.locator.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_select_role_success(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map_with_selectors()
+        srv._state.cache.store(_make_page_map_with_selectors(), None)
         mock_session = _make_mock_session()
 
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=3, action="select", value="price")
 
-        assert "Selected option in [3]" in result
-        assert "CSS selector" not in result
+        data = json.loads(result)
+        assert "Selected option in [3]" in data["description"]
+        assert "CSS selector" not in data["description"]
         mock_session.page.locator.assert_not_called()
 
 
@@ -373,42 +377,45 @@ class TestFallbackToCSS:
     async def test_click_falls_back_to_css(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map_with_selectors()
+        srv._state.cache.store(_make_page_map_with_selectors(), None)
         mock_session = _make_mock_session(role_count=0)
 
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=1, action="click")
 
-        assert "Clicked [1]" in result
-        assert "(resolved via CSS selector)" in result
+        data = json.loads(result)
+        assert "Clicked [1]" in data["description"]
+        assert "CSS selector" in data["description"]
         mock_session.page.locator.assert_called_once_with("#submit-btn")
 
     @pytest.mark.asyncio
     async def test_type_falls_back_to_css(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map_with_selectors()
+        srv._state.cache.store(_make_page_map_with_selectors(), None)
         mock_session = _make_mock_session(role_count=0)
 
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=2, action="type", value="query")
 
-        assert "Typed into [2]" in result
-        assert "(resolved via CSS selector)" in result
+        data = json.loads(result)
+        assert "Typed into [2]" in data["description"]
+        assert "CSS selector" in data["description"]
         mock_session.page.locator.assert_called_once_with("input.search-box")
 
     @pytest.mark.asyncio
     async def test_select_falls_back_to_css(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map_with_selectors()
+        srv._state.cache.store(_make_page_map_with_selectors(), None)
         mock_session = _make_mock_session(role_count=0)
 
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=3, action="select", value="price")
 
-        assert "Selected option in [3]" in result
-        assert "(resolved via CSS selector)" in result
+        data = json.loads(result)
+        assert "Selected option in [3]" in data["description"]
+        assert "CSS selector" in data["description"]
         mock_session.page.locator.assert_called_once_with("select.sort-dropdown")
 
 
@@ -423,14 +430,15 @@ class TestDuplicateResolution:
         """Two 'Delete' buttons → ref 4 uses its specific CSS selector."""
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map_with_selectors()
+        srv._state.cache.store(_make_page_map_with_selectors(), None)
         mock_session = _make_mock_session(role_count=2)
 
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=4, action="click")
 
-        assert "Clicked [4]" in result
-        assert "(resolved via CSS selector)" in result
+        data = json.loads(result)
+        assert "Clicked [4]" in data["description"]
+        assert "CSS selector" in data["description"]
         mock_session.page.locator.assert_called_once_with("#item-1 > button.delete")
 
     @pytest.mark.asyncio
@@ -438,14 +446,15 @@ class TestDuplicateResolution:
         """Two 'Delete' buttons → ref 5 uses its specific CSS selector."""
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map_with_selectors()
+        srv._state.cache.store(_make_page_map_with_selectors(), None)
         mock_session = _make_mock_session(role_count=2)
 
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=5, action="click")
 
-        assert "Clicked [5]" in result
-        assert "(resolved via CSS selector)" in result
+        data = json.loads(result)
+        assert "Clicked [5]" in data["description"]
+        assert "CSS selector" in data["description"]
         mock_session.page.locator.assert_called_once_with("#item-2 > button.delete")
 
     @pytest.mark.asyncio
@@ -453,26 +462,28 @@ class TestDuplicateResolution:
         """Fallback to CSS → result includes note."""
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map_with_selectors()
+        srv._state.cache.store(_make_page_map_with_selectors(), None)
         mock_session = _make_mock_session(role_count=0)
 
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=1, action="click")
 
-        assert "(resolved via CSS selector)" in result
+        data = json.loads(result)
+        assert "CSS selector" in data["description"]
 
     @pytest.mark.asyncio
     async def test_no_css_note_on_role_match(self):
         """Direct role match → no CSS note in result."""
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map_with_selectors()
+        srv._state.cache.store(_make_page_map_with_selectors(), None)
         mock_session = _make_mock_session(role_count=1)
 
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=1, action="click")
 
-        assert "(resolved via CSS selector)" not in result
+        data = json.loads(result)
+        assert "CSS selector" not in data["description"]
 
 
 # ── TestAllFail ──────────────────────────────────────────────────────
@@ -485,32 +496,34 @@ class TestAllFail:
     async def test_both_fail_returns_error(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map_no_selectors()
+        srv._state.cache.store(_make_page_map_no_selectors(), None)
         mock_session = _make_mock_session(role_count=0)
 
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=1, action="click")
 
-        assert "Error" in result
+        data = json.loads(result)
+        assert "error" in data
 
     @pytest.mark.asyncio
     async def test_error_suggests_refresh(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map_no_selectors()
+        srv._state.cache.store(_make_page_map_no_selectors(), None)
         mock_session = _make_mock_session(role_count=0)
 
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=1, action="click")
 
-        assert "get_page_map" in result
+        data = json.loads(result)
+        assert "get_page_map" in data["error"]
 
     @pytest.mark.asyncio
     async def test_no_selector_skips_css_fallback(self):
         """When selector is empty, page.locator is never called."""
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map_no_selectors()
+        srv._state.cache.store(_make_page_map_no_selectors(), None)
         mock_session = _make_mock_session(role_count=0)
 
         with patch("pagemap.server._get_session", return_value=mock_session):
@@ -541,27 +554,29 @@ class TestBackwardCompat:
         """PageMap from pre-Phase-2 code works normally."""
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map_no_selectors()
+        srv._state.cache.store(_make_page_map_no_selectors(), None)
         mock_session = _make_mock_session(role_count=1)
 
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=1, action="click")
 
-        assert "Clicked [1]" in result
-        assert "Error" not in result
+        data = json.loads(result)
+        assert "Clicked [1]" in data["description"]
+        assert "error" not in data
 
     @pytest.mark.asyncio
     async def test_press_key_unaffected(self):
         """press_key action ignores selector field entirely."""
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map_with_selectors()
+        srv._state.cache.store(_make_page_map_with_selectors(), None)
         mock_session = _make_mock_session()
 
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=1, action="press_key", value="Enter")
 
-        assert "Pressed key" in result
+        data = json.loads(result)
+        assert "Pressed key" in data["description"]
         mock_session.page.locator.assert_not_called()
         mock_session.page.get_by_role.assert_not_called()
 

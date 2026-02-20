@@ -1,3 +1,6 @@
+# Copyright (C) 2025-2026 Retio AI
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Pruned context builder: aggressive HTML compression for PageMap.
 
 Wraps the pruning2 pipeline and applies additional compression to meet
@@ -23,6 +26,7 @@ from pagemap.i18n import (
     LOAD_MORE_TERMS,
     NEXT_BUTTON_TERMS,
     OPTION_TERMS,
+    PREV_BUTTON_TERMS,
     PRICE_LABEL_TERMS,
     SEARCH_RESULT_TERMS,
     LocaleConfig,
@@ -47,6 +51,7 @@ PRICE_PATTERN = re.compile(
     r"|£\s*[\d,]+(?:\.\d{2})?"
     r"|€\s*[\d,]+(?:\.\d{2})?"
     r"|\$\d+(?:\.\d{2})?"
+    r"|USD\s*[\d,.]+|EUR\s*[\d,.]+|CHF\s*[\d,.]+"
     r"|\d{2,3}(?:,\d{3})+)" + r"|" + "|".join(re.escape(t) for t in PRICE_LABEL_TERMS),
 )
 RATING_PATTERN = re.compile(
@@ -72,6 +77,10 @@ _EXCLUDE_IMG_PATTERNS = re.compile(
     r"(icon|logo|banner|sprite|ad[_\-]|tracking|pixel|1x1|spacer|blank|svg\+xml|data:image/(?:gif|svg))",
     re.IGNORECASE,
 )
+
+# Security: allowed URL schemes for image extraction
+_ALLOWED_URL_PREFIXES = ("http://", "https://", "//")
+_MAX_URL_LENGTH = 2048
 
 
 def extract_product_images(raw_html: str, base_url: str = "") -> list[str]:
@@ -111,7 +120,14 @@ def extract_product_images(raw_html: str, base_url: str = "") -> list[str]:
 
         for url in urls:
             url = url.strip()
-            if not url or url.startswith("data:"):
+            if not url:
+                continue
+            # Allowlist: only http/https/protocol-relative absolute URLs allowed.
+            # Relative URLs (/path, path) pass through for urljoin resolution.
+            url_lower = url.lower()
+            if ":" in url_lower.split("/")[0] and not url_lower.startswith(_ALLOWED_URL_PREFIXES):
+                continue
+            if len(url) > _MAX_URL_LENGTH:
                 continue
 
             # Filter out non-product images
@@ -140,8 +156,6 @@ def _extract_text_lines(html: str) -> list[str]:
     """Extract visible text lines from HTML, preserving key structure."""
     # Remove script/style
     cleaned = re.sub(r"<(script|style|noscript)[^>]*>.*?</\1>", "", html, flags=re.DOTALL | re.IGNORECASE)
-    # Extract heading content
-    re.findall(r"<h[1-6][^>]*>(.*?)</h[1-6]>", cleaned, re.DOTALL | re.IGNORECASE)
     # Strip remaining tags
     text = re.sub(r"<[^>]+>", "\n", cleaned)
     text = re.sub(r"\n{3,}", "\n\n", text)
@@ -277,18 +291,36 @@ def _detect_cards_from_chunks(chunks: list[HtmlChunk]) -> list[dict[str, Any]]:
 def _detect_product_cards(
     chunks: list[HtmlChunk] | None,
     metadata: dict | None,
+    card_strategy_hint: str | None = None,
 ) -> list[dict[str, Any]]:
     """Main entry point: detect product cards with cascade priority.
 
     Priority: JSON-LD ItemList > chunk-based detection > empty list.
     Deduplicates by (name_lower, price_text).
-    """
-    # Try JSON-LD first (highest confidence)
-    cards = _detect_cards_from_metadata(metadata)
 
-    # Fallback to chunk-based detection
-    if not cards and chunks:
-        cards = _detect_cards_from_chunks(chunks)
+    If card_strategy_hint is provided, tries the hinted strategy first
+    and skips the fallback cascade on success.
+    """
+    cards: list[dict[str, Any]] = []
+
+    if card_strategy_hint == "json_ld_itemlist":
+        # Optimistic: try metadata-based only
+        cards = _detect_cards_from_metadata(metadata)
+        if cards:
+            # Skip chunk-based detection entirely
+            pass
+        else:
+            # Hint failed — fall through to full cascade
+            if chunks:
+                cards = _detect_cards_from_chunks(chunks)
+    else:
+        # Full cascade (no hint or unknown hint)
+        # Try JSON-LD first (highest confidence)
+        cards = _detect_cards_from_metadata(metadata)
+
+        # Fallback to chunk-based detection
+        if not cards and chunks:
+            cards = _detect_cards_from_chunks(chunks)
 
     # Deduplicate by (name.lower(), price)
     seen: set[tuple[str, str]] = set()
@@ -375,6 +407,18 @@ _HAS_NEXT_RE = re.compile(
     + r")",
     re.IGNORECASE,
 )
+# Build _HAS_PREV_RE from i18n tuples (mirrors _HAS_NEXT_RE)
+_prev_terms = PREV_BUTTON_TERMS
+_HAS_PREV_RE = re.compile(
+    r"(?:"
+    + "|".join(r">" + re.escape(t) + r"<" for t in _prev_terms)
+    + r"|aria-label=[\"'](?:"
+    + "|".join(re.escape(t) for t in _prev_terms)
+    + r")[\"']"
+    + r"|class=[\"'][^\"']*prev[^\"']*[\"']"
+    + r")",
+    re.IGNORECASE,
+)
 _CURRENT_PAGE_RE = re.compile(
     r"(?:"
     r"[Pp]age\s+(\d+)\s+(?:of|/)\s+(\d+)"
@@ -386,34 +430,62 @@ _CURRENT_PAGE_RE = re.compile(
 )
 
 
-def _extract_pagination_info(raw_html: str, lc: LocaleConfig | None = None) -> str:
+def _extract_pagination_info(
+    raw_html: str,
+    lc: LocaleConfig | None = None,
+    pagination_hint: str | None = None,
+) -> str:
     """Extract pagination summary from raw HTML.
 
     Returns a single-line summary like:
     "페이지네이션: ~25페이지 | 총 500건 | 다음 있음"
 
     Returns empty string if no pagination info found.
+
+    If pagination_hint is "none", returns empty immediately (known no-pagination domain).
+    If pagination_hint is a param name (e.g. "page"), uses targeted regex only.
     """
+    if pagination_hint == "none":
+        return ""
+
     if lc is None:
         lc = get_locale(None)
 
     parts: list[str] = []
 
-    # Max page from URL params
-    page_numbers = [int(m) for m in _PAGE_PARAM_RE.findall(raw_html)]
+    # Max page from URL params (targeted if hint provided)
+    if pagination_hint and pagination_hint != "none":
+        # Targeted regex for a single known parameter
+        _targeted_re = re.compile(
+            rf'(?:href|action)=["\'][^"\']*[?&]{re.escape(pagination_hint)}=(\d+)',
+            re.IGNORECASE,
+        )
+        try:
+            page_numbers = [int(m) for m in _targeted_re.findall(raw_html)]
+        except ValueError:
+            page_numbers = []
+    else:
+        # Full scan of all known pagination parameters
+        try:
+            page_numbers = [int(m) for m in _PAGE_PARAM_RE.findall(raw_html)]
+        except ValueError:
+            page_numbers = []
     max_page = max(page_numbers) if page_numbers else 0
 
     # Current page / total pages from text
     current_page_m = _CURRENT_PAGE_RE.search(raw_html)
     if current_page_m:
         groups = current_page_m.groups()
-        # Find the first non-None pair
-        for i in range(0, len(groups), 2):
-            if groups[i] is not None:
-                _current = int(groups[i])
-                total_pages = int(groups[i + 1])
-                max_page = max(max_page, total_pages)
-                break
+        try:
+            for i in range(0, len(groups), 2):
+                if groups[i] is not None:
+                    _current = int(groups[i])
+                    if i + 1 < len(groups) and groups[i + 1] is not None:
+                        total_pages = int(groups[i + 1])
+                        max_page = max(max_page, total_pages)
+                    break
+        except (ValueError, IndexError) as exc:
+            logger.warning("Failed to parse pagination numbers: %s", exc)
 
     if max_page > 1:
         parts.append(f"~{max_page}{lc.label_page_suffix}")
@@ -432,6 +504,61 @@ def _extract_pagination_info(raw_html: str, lc: LocaleConfig | None = None) -> s
         return ""
 
     return f"{lc.label_pagination}: " + " | ".join(parts)
+
+
+def extract_pagination_structured(raw_html: str, lc: LocaleConfig | None = None) -> dict:
+    """Extract structured pagination info from raw HTML.
+
+    Returns dict with detected keys only (empty dict if nothing found):
+        current_page (int), total_pages (int), total_items (str),
+        has_next (bool), has_prev (bool)
+    """
+    if lc is None:
+        lc = get_locale(None)
+
+    result: dict = {}
+
+    # Current page / total pages from text
+    current_page = 0
+    total_pages = 0
+    current_page_m = _CURRENT_PAGE_RE.search(raw_html)
+    if current_page_m:
+        groups = current_page_m.groups()
+        try:
+            for i in range(0, len(groups), 2):
+                if groups[i] is not None:
+                    current_page = int(groups[i])
+                    if i + 1 < len(groups) and groups[i + 1] is not None:
+                        total_pages = int(groups[i + 1])
+                    break
+        except (ValueError, IndexError) as exc:
+            logger.warning("Failed to parse pagination numbers: %s", exc)
+
+    # Max page from URL params
+    try:
+        page_numbers = [int(m) for m in _PAGE_PARAM_RE.findall(raw_html)]
+    except ValueError:
+        page_numbers = []
+    if page_numbers:
+        total_pages = max(total_pages, max(page_numbers))
+
+    if current_page > 0:
+        result["current_page"] = current_page
+    if total_pages > 1:
+        result["total_pages"] = total_pages
+
+    # Total result count
+    total_m = _TOTAL_COUNT_RE.search(raw_html)
+    if total_m:
+        result["total_items"] = total_m.group(0).strip()
+
+    # Has next / prev
+    if _HAS_NEXT_RE.search(raw_html):
+        result["has_next"] = True
+    if _HAS_PREV_RE.search(raw_html):
+        result["has_prev"] = True
+
+    return result
 
 
 def _compress_for_product(
@@ -571,6 +698,7 @@ def _compress_for_search_results(
     chunks: list[HtmlChunk] | None = None,
     metadata: dict | None = None,
     lc: LocaleConfig | None = None,
+    card_strategy_hint: str | None = None,
 ) -> str:
     """Compression for search result pages.
 
@@ -580,7 +708,7 @@ def _compress_for_search_results(
     if lc is None:
         lc = get_locale(None)
     # Try card detection first
-    cards = _detect_product_cards(chunks, metadata)
+    cards = _detect_product_cards(chunks, metadata, card_strategy_hint=card_strategy_hint)
     if cards:
         return _build_card_output(pruned_html, cards, max_tokens, lc=lc)
 
@@ -624,6 +752,7 @@ def _compress_for_listing(
     chunks: list[HtmlChunk] | None = None,
     metadata: dict | None = None,
     lc: LocaleConfig | None = None,
+    card_strategy_hint: str | None = None,
 ) -> str:
     """Compression for listing/ranking pages.
 
@@ -633,7 +762,7 @@ def _compress_for_listing(
     if lc is None:
         lc = get_locale(None)
     # Try card detection first
-    cards = _detect_product_cards(chunks, metadata)
+    cards = _detect_product_cards(chunks, metadata, card_strategy_hint=card_strategy_hint)
     if cards:
         return _build_card_output(pruned_html, cards, max_tokens, lc=lc)
 
@@ -742,6 +871,9 @@ def _truncate_to_tokens(text: str, max_tokens: int) -> str:
     return truncated
 
 
+_NO_TEMPLATE = object()  # sentinel: distinguishes "not passed" from "passed as None"
+
+
 def build_pruned_context(
     raw_html: str,
     page_type: str = "default",
@@ -750,6 +882,7 @@ def build_pruned_context(
     schema_name: str = "Product",
     max_tokens: int = DEFAULT_MAX_TOKENS,
     locale: str | None = None,
+    template: Any = _NO_TEMPLATE,
 ) -> tuple[str, int, dict]:
     """Build pruned context from raw HTML.
 
@@ -763,15 +896,33 @@ def build_pruned_context(
         schema_name: schema name for pruning2 heuristics
         max_tokens: maximum token budget
         locale: locale code (e.g. "ko", "ja", "fr"). None → default ("ko").
+        template: optional PageTemplate with structural hints for optimization
 
     Returns:
         (pruned_context_text, token_count, metadata_dict)
     """
+    import time as _time
+
     lc = get_locale(locale)
 
+    # Extract hints from template (if available)
+    _template_caching_active = template is not _NO_TEMPLATE
+    _source_hint: str | None = None
+    _card_hint: str | None = None
+    _pag_hint: str | None = None
+    if template is not None and template is not _NO_TEMPLATE:
+        _source_hint = template.data.metadata_source or None
+        _card_hint = template.data.card_strategy
+        _pag_hint = template.data.pagination_param
+        if not template.data.has_pagination:
+            _pag_hint = "none"
+
     # Step 1: Run pruning2 pipeline
+    t0 = _time.monotonic()
     metadata: dict = {}
     selected_chunks: list[HtmlChunk] = []
+    result = None
+    _pruning_exception: Exception | None = None
     try:
         result = prune_page(raw_html, site_id, page_id, schema_name)
         pruned_html = result.pruned_html
@@ -784,41 +935,87 @@ def build_pruned_context(
         )
 
         # Step 2: Structured metadata extraction
+        t1 = _time.monotonic()
         try:
             from pagemap.metadata import extract_metadata
 
-            metadata = extract_metadata(result.meta_chunks, result.heading_chunks, schema_name)
+            metadata = extract_metadata(
+                result.meta_chunks,
+                result.heading_chunks,
+                schema_name,
+                source_hint=_source_hint,
+            )
             if metadata:
                 logger.info("Structured metadata: %s", list(metadata.keys()))
         except Exception as e:
             logger.warning("Metadata extraction failed, using heuristic: %s", e)
+        t2 = _time.monotonic()
 
     except Exception as e:
         logger.warning("pruning2 failed, using raw HTML: %s", e)
+        _pruning_exception = e
         pruned_html = raw_html
+        t1 = t2 = _time.monotonic()
+
+    # Phase 4.4: Propagate pruning failures to agent warnings
+    if _pruning_exception is not None or (result is not None and result.errors):
+        metadata["_pruning_warnings"] = [
+            "Page content extraction encountered issues; displayed content may be incomplete"
+        ]
+
+    # Phase 4.1: Expose pruned regions for context coherence annotation
+    if result is not None:
+        from pagemap.pruning.aom_filter import derive_pruned_regions
+
+        metadata["_pruned_regions"] = derive_pruned_regions(result.aom_filter_stats)
+
+    # Expose PruningResult for template learning (popped by caller in page_map_builder)
+    if _template_caching_active and result is not None:
+        metadata["_pruning_result"] = result
 
     # Step 3: Apply page-type-specific aggressive compression
     if page_type == "product_detail":
         context = _compress_for_product(pruned_html, max_tokens, metadata=metadata, lc=lc)
     elif page_type == "search_results":
         context = _compress_for_search_results(
-            pruned_html, max_tokens, chunks=selected_chunks, metadata=metadata, lc=lc
+            pruned_html,
+            max_tokens,
+            chunks=selected_chunks,
+            metadata=metadata,
+            lc=lc,
+            card_strategy_hint=_card_hint,
         )
     elif page_type == "listing":
-        context = _compress_for_listing(pruned_html, max_tokens, chunks=selected_chunks, metadata=metadata, lc=lc)
+        context = _compress_for_listing(
+            pruned_html,
+            max_tokens,
+            chunks=selected_chunks,
+            metadata=metadata,
+            lc=lc,
+            card_strategy_hint=_card_hint,
+        )
     elif page_type in ("article", "news"):
         context = _compress_for_article(pruned_html, max_tokens, lc=lc)
     else:
         context = _compress_default(pruned_html, max_tokens)
+    t3 = _time.monotonic()
 
     # Append pagination info for listing/search pages
     if page_type in ("listing", "search_results"):
-        pagination = _extract_pagination_info(raw_html, lc=lc)
+        pagination = _extract_pagination_info(raw_html, lc=lc, pagination_hint=_pag_hint)
         if pagination:
             context = context.rstrip() + "\n" + pagination
 
     token_count = count_tokens(context)
-    logger.info("pruned_context: %d tokens (budget: %d)", token_count, max_tokens)
+    logger.info(
+        "pruned_context: %d tokens (budget: %d) prune=%.0fms meta=%.0fms compress=%.0fms template=%s",
+        token_count,
+        max_tokens,
+        (t1 - t0) * 1000,
+        (t2 - t1) * 1000,
+        (t3 - t2) * 1000,
+        "hit" if (template is not None and template is not _NO_TEMPLATE) else "miss",
+    )
     return context, token_count, metadata
 
 

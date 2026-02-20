@@ -13,6 +13,7 @@ Verifies:
 from __future__ import annotations
 
 import asyncio
+import json
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import pytest
@@ -119,9 +120,9 @@ def _reset_state():
     """Reset global state before each test."""
     import pagemap.server as srv
 
-    srv._last_page_map = None
+    srv._state.cache.invalidate_all()
     yield
-    srv._last_page_map = None
+    srv._state.cache.invalidate_all()
 
 
 # ── TestHoverConstants ──────────────────────────────────────────────
@@ -172,46 +173,49 @@ class TestHoverBasic:
     async def test_hover_button_success(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
 
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=1, action="hover")
 
-        assert "Hovered over [1] button: Menu" in result
+        data = json.loads(result)
+        assert "Hovered over [1] button: Menu" in data["description"]
         mock_session.page.get_by_role.return_value.first.hover.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_hover_link_success(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
 
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=2, action="hover")
 
-        assert "Hovered over [2] link: Products" in result
+        data = json.loads(result)
+        assert "Hovered over [2] link: Products" in data["description"]
 
     @pytest.mark.asyncio
     async def test_hover_on_type_affordance(self):
         """hover should work on any affordance including type."""
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
 
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=3, action="hover")
 
-        assert "Hovered over [3] textbox: Search" in result
+        data = json.loads(result)
+        assert "Hovered over [3] textbox: Search" in data["description"]
 
     @pytest.mark.asyncio
     async def test_hover_settle_time_500ms(self):
         """hover uses 500ms settle time for CSS transitions."""
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
 
         with patch("pagemap.server._get_session", return_value=mock_session):
@@ -224,28 +228,31 @@ class TestHoverBasic:
         """hover does not require a value parameter."""
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
 
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=1, action="hover", value=None)
 
-        assert "Hovered over [1]" in result
+        data = json.loads(result)
+        assert "Hovered over [1]" in data["description"]
 
     @pytest.mark.asyncio
     async def test_hover_no_page_map(self):
         """hover without page map returns error."""
         result = await execute_action(ref=1, action="hover")
-        assert "No active Page Map" in result
+        data = json.loads(result)
+        assert "No active Page Map" in data["error"]
 
     @pytest.mark.asyncio
     async def test_hover_invalid_ref(self):
         """hover on non-existent ref returns error."""
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         result = await execute_action(ref=999, action="hover")
-        assert "ref [999] not found" in result
+        data = json.loads(result)
+        assert "ref [999] not found" in data["error"]
 
 
 # ── TestHoverDomDetection ──────────────────────────────────────────
@@ -259,7 +266,7 @@ class TestHoverDomDetection:
         """hover that opens dropdown → major DOM change → refs expired."""
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
 
         pre = _fp(has_dialog=False)
@@ -271,10 +278,11 @@ class TestHoverDomDetection:
         ):
             result = await execute_action(ref=1, action="hover")
 
-        assert "Hovered over [1]" in result
-        assert "Page content changed" in result
-        assert "get_page_map" in result
-        assert srv._last_page_map is None
+        data = json.loads(result)
+        assert "Hovered over [1]" in data["description"]
+        assert data["change"] == "major"
+        assert data["refs_expired"] is True
+        assert srv._state.cache.active is None
 
     @pytest.mark.asyncio
     async def test_hover_minor_dom_change_preserves_page_map(self):
@@ -282,7 +290,7 @@ class TestHoverDomDetection:
         import pagemap.server as srv
 
         page_map = _make_page_map()
-        srv._last_page_map = page_map
+        srv._state.cache.store(page_map, None)
         mock_session = _make_mock_session()
 
         pre = _fp(total_interactives=100)
@@ -294,9 +302,11 @@ class TestHoverDomDetection:
         ):
             result = await execute_action(ref=1, action="hover")
 
-        assert "Hovered over [1]" in result
-        assert "Page content updated" in result
-        assert srv._last_page_map is page_map
+        data = json.loads(result)
+        assert "Hovered over [1]" in data["description"]
+        assert data["change"] == "minor"
+        assert data["refs_expired"] is False
+        assert srv._state.cache.active is page_map
 
     @pytest.mark.asyncio
     async def test_hover_no_dom_change(self):
@@ -304,7 +314,7 @@ class TestHoverDomDetection:
         import pagemap.server as srv
 
         page_map = _make_page_map()
-        srv._last_page_map = page_map
+        srv._state.cache.store(page_map, None)
         mock_session = _make_mock_session()
 
         fp = _fp()
@@ -315,10 +325,11 @@ class TestHoverDomDetection:
         ):
             result = await execute_action(ref=1, action="hover")
 
-        assert "Hovered over [1]" in result
-        assert "Page content changed" not in result
-        assert "Page content updated" not in result
-        assert srv._last_page_map is page_map
+        data = json.loads(result)
+        assert "Hovered over [1]" in data["description"]
+        assert data["change"] == "none"
+        assert data["refs_expired"] is False
+        assert srv._state.cache.active is page_map
 
 
 # ── TestHoverRetry ──────────────────────────────────────────────────
@@ -332,7 +343,7 @@ class TestHoverRetry:
         """'not visible' error on first attempt → retry succeeds."""
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
         locator = mock_session.page.get_by_role.return_value
         locator.first.hover = AsyncMock(side_effect=[PlaywrightError("Element is not visible"), None])
@@ -340,7 +351,8 @@ class TestHoverRetry:
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=1, action="hover")
 
-        assert "Hovered over [1]" in result
+        data = json.loads(result)
+        assert "Hovered over [1]" in data["description"]
         assert locator.first.hover.call_count == 2
 
     @pytest.mark.asyncio
@@ -348,7 +360,7 @@ class TestHoverRetry:
         """'intercept' error on first attempt → retry succeeds."""
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
         locator = mock_session.page.get_by_role.return_value
         locator.first.hover = AsyncMock(
@@ -358,7 +370,8 @@ class TestHoverRetry:
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=1, action="hover")
 
-        assert "Hovered over [1]" in result
+        data = json.loads(result)
+        assert "Hovered over [1]" in data["description"]
         assert locator.first.hover.call_count == 2
 
 
@@ -373,7 +386,7 @@ class TestHoverCssFallback:
         """Multiple role matches → fallback to CSS selector."""
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
         page = mock_session.page
 
@@ -391,8 +404,9 @@ class TestHoverCssFallback:
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=1, action="hover")
 
-        assert "Hovered over [1]" in result
-        assert "CSS selector" in result
+        data = json.loads(result)
+        assert "Hovered over [1]" in data["description"]
+        assert "CSS selector" in data["description"]
 
 
 # ── TestHoverBrowserDead ──────────────────────────────────────────
@@ -405,7 +419,7 @@ class TestHoverBrowserDead:
     async def test_hover_target_closed(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
         locator = mock_session.page.get_by_role.return_value
         locator.first.hover = AsyncMock(side_effect=PlaywrightError("Target closed"))
@@ -413,14 +427,15 @@ class TestHoverBrowserDead:
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=1, action="hover")
 
-        assert "Browser connection lost" in result
-        assert srv._last_page_map is None
+        data = json.loads(result)
+        assert "Browser connection lost" in data["error"]
+        assert srv._state.cache.active is None
 
     @pytest.mark.asyncio
     async def test_hover_browser_disconnected(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
         locator = mock_session.page.get_by_role.return_value
         locator.first.hover = AsyncMock(side_effect=PlaywrightError("Browser disconnected"))
@@ -428,8 +443,9 @@ class TestHoverBrowserDead:
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=1, action="hover")
 
-        assert "Browser connection lost" in result
-        assert srv._last_page_map is None
+        data = json.loads(result)
+        assert "Browser connection lost" in data["error"]
+        assert srv._state.cache.active is None
 
 
 # ── TestHoverTimeout ──────────────────────────────────────────────
@@ -442,7 +458,7 @@ class TestHoverTimeout:
     async def test_hover_overall_timeout(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
         locator = mock_session.page.get_by_role.return_value
 
@@ -457,8 +473,9 @@ class TestHoverTimeout:
         ):
             result = await execute_action(ref=1, action="hover")
 
-        assert "timed out" in result
-        assert srv._last_page_map is None
+        data = json.loads(result)
+        assert "timed out" in data["error"]
+        assert srv._state.cache.active is None
 
 
 # ── TestHoverDialogWarning ──────────────────────────────────────────
@@ -472,7 +489,7 @@ class TestHoverDialogWarning:
         import pagemap.server as srv
         from pagemap.browser_session import DialogInfo
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
         mock_session.drain_dialogs = MagicMock(
             return_value=[DialogInfo(dialog_type="alert", message="Welcome!", dismissed=False)]
@@ -481,6 +498,7 @@ class TestHoverDialogWarning:
         with patch("pagemap.server._get_session", return_value=mock_session):
             result = await execute_action(ref=1, action="hover")
 
-        assert "Hovered over [1]" in result
-        assert "JS dialog" in result
-        assert "Welcome!" in result
+        data = json.loads(result)
+        assert "Hovered over [1]" in data["description"]
+        assert len(data["dialogs"]) == 1
+        assert data["dialogs"][0]["message"] == "Welcome!"

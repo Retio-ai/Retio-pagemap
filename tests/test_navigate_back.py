@@ -66,9 +66,9 @@ def _reset_state():
     """Reset global state before each test."""
     import pagemap.server as srv
 
-    srv._last_page_map = None
+    srv._state.cache.invalidate_all()
     yield
-    srv._last_page_map = None
+    srv._state.cache.invalidate_all()
 
 
 # ── TestNavigateBackBasic ──────────────────────────────────────────
@@ -94,7 +94,7 @@ class TestNavigateBackBasic:
     async def test_invalidates_page_map(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
 
         with (
@@ -103,7 +103,7 @@ class TestNavigateBackBasic:
         ):
             await navigate_back()
 
-        assert srv._last_page_map is None
+        assert srv._state.cache.active is None
 
     @pytest.mark.asyncio
     async def test_suggests_get_page_map(self):
@@ -142,13 +142,13 @@ class TestNavigateBackNoHistory:
         import pagemap.server as srv
 
         page_map = _make_page_map()
-        srv._last_page_map = page_map
+        srv._state.cache.store(page_map, None)
         mock_session = _make_mock_session(go_back_url=None)
 
         with patch("pagemap.server._get_session", return_value=mock_session):
             await navigate_back()
 
-        assert srv._last_page_map is page_map
+        assert srv._state.cache.active is page_map
 
 
 # ── TestNavigateBackSsrf ──────────────────────────────────────────
@@ -161,7 +161,7 @@ class TestNavigateBackSsrf:
     async def test_blocked_url_resets_to_blank(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session(go_back_url="http://169.254.169.254/metadata")
 
         with patch("pagemap.server._get_session", return_value=mock_session):
@@ -169,7 +169,7 @@ class TestNavigateBackSsrf:
 
         assert "blocked" in result.lower()
         mock_session.page.goto.assert_called_once_with("about:blank")
-        assert srv._last_page_map is None
+        assert srv._state.cache.active is None
 
     @pytest.mark.asyncio
     async def test_private_ip_blocked(self):
@@ -213,7 +213,7 @@ class TestNavigateBackBrowserDead:
     async def test_target_closed(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
         mock_session.go_back = AsyncMock(side_effect=PlaywrightError("Target closed"))
 
@@ -221,7 +221,7 @@ class TestNavigateBackBrowserDead:
             result = await navigate_back()
 
         assert "Browser connection lost" in result
-        assert srv._last_page_map is None
+        assert srv._state.cache.active is None
 
     @pytest.mark.asyncio
     async def test_browser_disconnected(self):
@@ -244,7 +244,7 @@ class TestNavigateBackTimeout:
     async def test_timeout_returns_error(self):
         import pagemap.server as srv
 
-        srv._last_page_map = _make_page_map()
+        srv._state.cache.store(_make_page_map(), None)
         mock_session = _make_mock_session()
 
         async def _hang(*args, **kwargs):
@@ -259,7 +259,7 @@ class TestNavigateBackTimeout:
             result = await navigate_back()
 
         assert "timed out" in result
-        assert srv._last_page_map is None
+        assert srv._state.cache.active is None
 
 
 # ── TestNavigateBackDialogWarnings ──────────────────────────────────
@@ -313,7 +313,7 @@ class TestNavigateBackPageMapNone:
     async def test_works_with_no_existing_page_map(self):
         import pagemap.server as srv
 
-        srv._last_page_map = None
+        srv._state.cache.invalidate_all()
         mock_session = _make_mock_session()
 
         with (
