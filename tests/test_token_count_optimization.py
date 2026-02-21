@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from pagemap.preprocessing.preprocess import count_tokens, count_tokens_approx
 
 
@@ -90,14 +92,16 @@ class TestCollectReExport:
     """collect.py re-export of _count_tokens_approx."""
 
     def test_import_works(self):
-        from pagemap.collect import _count_tokens_approx
+        collect = pytest.importorskip("pagemap.collect", reason="collect module excluded from release")
+        _count_tokens_approx = collect._count_tokens_approx
 
         assert callable(_count_tokens_approx)
         result = _count_tokens_approx("Hello world")
         assert result > 0
 
     def test_matches_canonical(self):
-        from pagemap.collect import _count_tokens_approx
+        collect = pytest.importorskip("pagemap.collect", reason="collect module excluded from release")
+        _count_tokens_approx = collect._count_tokens_approx
 
         text = "Test string for comparison" * 50
         assert _count_tokens_approx(text) == count_tokens_approx(text)

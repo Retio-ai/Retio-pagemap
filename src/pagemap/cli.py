@@ -854,8 +854,7 @@ def main() -> None:
             "--conditions",
             type=str,
             default=None,
-            help="Conditions to run: comma-separated list or 'all'. "
-            f"Options: {', '.join(ALL_CONDITIONS)}",
+            help=f"Conditions to run: comma-separated list or 'all'. Options: {', '.join(ALL_CONDITIONS)}",
         )
 
         commands["convert"] = cmd_convert

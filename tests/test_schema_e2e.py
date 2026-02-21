@@ -302,23 +302,33 @@ class TestWikiArticleE2E:
         [
             pytest.param(
                 _make_chunk("Article Title", ChunkType.HEADING, tag="h1"),
-                ["title"], [], id="h1-title",
+                ["title"],
+                [],
+                id="h1-title",
             ),
             pytest.param(
                 _make_chunk("A" * 101),
-                ["summary", "sections"], [], id="long-text-summary-sections",
+                ["summary", "sections"],
+                [],
+                id="long-text-summary-sections",
             ),
             pytest.param(
                 _make_chunk("Section Title", ChunkType.HEADING, tag="h2"),
-                ["sections"], [], id="h2-sections",
+                ["sections"],
+                [],
+                id="h2-sections",
             ),
             pytest.param(
                 _make_chunk("A" * 80),
-                ["sections"], ["summary"], id="80char-sections-not-summary",
+                ["sections"],
+                ["summary"],
+                id="80char-sections-not-summary",
             ),
             pytest.param(
                 _make_chunk("Short text"),
-                [], ["summary", "sections"], id="short-no-match",
+                [],
+                ["summary", "sections"],
+                id="short-no-match",
             ),
         ],
     )
