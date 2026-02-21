@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import pytest
 
+pytest.importorskip("pagemap.check_urls", reason="check_urls requires collect module (excluded from release)")
+
 from pagemap.check_urls import (
     HealthStatus,
     _classify,

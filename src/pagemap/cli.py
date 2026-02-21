@@ -530,8 +530,11 @@ def _run_static_benchmark(args: argparse.Namespace, data_dir: Path) -> None:
         save_results_json,
     )
     from .benchmark.runner import (
-        ALL_CONDITIONS, BASE_CONDITIONS, COMPETITOR_CONDITIONS,
-        load_tasks, run_static_benchmark,
+        ALL_CONDITIONS,
+        BASE_CONDITIONS,
+        COMPETITOR_CONDITIONS,
+        load_tasks,
+        run_static_benchmark,
     )
 
     result_path = data_dir / "benchmark_results.json"

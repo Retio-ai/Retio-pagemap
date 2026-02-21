@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import pytest
+
+pytest.importorskip("pagemap.benchmark", reason="benchmark module excluded from release")
+
 from pagemap.benchmark.evaluator import (
     _eval_contains_discount_info,
     _eval_contains_measurement,

@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import pytest
 
+pytest.importorskip("pagemap.refresh_urls", reason="refresh_urls requires collect module (excluded from release)")
+
 from pagemap.refresh_urls import RefreshResult, UrlChange, extract_product_urls
 
 

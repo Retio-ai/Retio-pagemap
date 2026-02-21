@@ -17,7 +17,6 @@ from pagemap.pruning import ChunkType, HtmlChunk
 from pagemap.pruning.pipeline import prune_page
 from pagemap.pruning.pruner import PruneDecision, prune_chunks
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
