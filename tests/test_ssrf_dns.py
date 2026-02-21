@@ -760,6 +760,7 @@ class TestSsrfRouteGuard:
 # ── TestRouteGuardInstallation ───────────────────────────────────────
 
 
+@pytest.mark.allow_real_get_session
 class TestRouteGuardInstallation:
     """Test that route guard is installed during session creation."""
 

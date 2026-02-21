@@ -27,6 +27,8 @@ from playwright.async_api import (
     async_playwright,
 )
 
+from .interactive_detector import _CDP_AX_TREE_TIMEOUT
+
 logger = logging.getLogger(__name__)
 
 # Default browser config
@@ -129,9 +131,34 @@ class BrowserConfig:
     viewport_height: int = 800
     user_agent: str = DEFAULT_USER_AGENT
     timeout_ms: int = 30000
-    wait_until: str = "networkidle"
+    wait_until: str = "load"
     settle_quiet_ms: int = 200  # DOM mutation quiet period (ms)
     settle_max_ms: int = 3000  # Maximum settle wait (ms)
+    wait_strategy: str = "hybrid"  # "hybrid" | "networkidle" | "load"
+    networkidle_budget_ms: int = 6000  # hybrid mode: networkidle attempt budget
+
+
+@dataclass(frozen=True, slots=True)
+class NavigationResult:
+    """Result of a page navigation with strategy metadata."""
+
+    strategy: str  # "networkidle" | "load+settle" | "load"
+    settle_metrics: dict | None  # DOM settle: {waited_ms, mutations, reason}
+
+
+_BROWSER_DEAD_PATTERNS = (
+    "target closed",
+    "target page",
+    "browser has been closed",
+    "connection closed",
+    "browser disconnected",
+)
+
+
+def _is_browser_dead_error(exc: Exception) -> bool:
+    """Detect browser crash/disconnect errors."""
+    msg = str(exc).lower()
+    return any(p in msg for p in _BROWSER_DEAD_PATTERNS)
 
 
 class BrowserSession:
@@ -146,6 +173,7 @@ class BrowserSession:
         self._cdp_session: CDPSession | None = None
         self._pending_dialogs: list[DialogInfo] = []
         self._pending_new_page: Page | None = None
+        self._batch_pages: set[Page] = set()
 
     @property
     def page(self) -> Page:
@@ -292,6 +320,13 @@ class BrowserSession:
 
     async def stop(self) -> None:
         """Close browser and clean up. Safe to call on a crashed browser."""
+        # Clean up batch pages first
+        for page in list(self._batch_pages):
+            if not page.is_closed():
+                with suppress(Exception):
+                    await page.close()
+        self._batch_pages.clear()
+
         if self._cdp_session:
             with suppress(Exception):
                 await self._cdp_session.detach()
@@ -359,7 +394,10 @@ class BrowserSession:
 
         Stores the latest popup for consumption by consume_new_page().
         Closes any previously unconsumed popup (single-page model).
+        Skips batch-managed pages.
         """
+        if page in getattr(self, "_batch_pages", set()):
+            return  # batch-managed page — skip popup handler
         old = self._pending_new_page
         self._pending_new_page = page
         if old is not None and not old.is_closed():
@@ -387,8 +425,43 @@ class BrowserSession:
                 await old_page.close()
         logger.info("Switched to new page: %s", new_page.url)
 
-    async def navigate(self, url: str) -> None:
-        """Navigate to a URL and wait for load."""
+    async def create_batch_page(self) -> Page:
+        """Create a new page for batch processing."""
+        page = await self.context.new_page()
+        self._batch_pages.add(page)
+        return page
+
+    async def close_batch_page(self, page: Page) -> None:
+        """Close a batch-managed page."""
+        self._batch_pages.discard(page)
+        if not page.is_closed():
+            with suppress(Exception):
+                await page.close()
+
+    async def wait_for_dom_settle_on(
+        self,
+        page: Page,
+        quiet_ms: int | None = None,
+        max_ms: int | None = None,
+    ) -> dict | None:
+        """Wait for DOM mutations to settle on a specific page (batch use)."""
+        q = quiet_ms if quiet_ms is not None else self.config.settle_quiet_ms
+        m = max_ms if max_ms is not None else self.config.settle_max_ms
+        try:
+            return await page.evaluate(_DOM_SETTLE_JS, [q, m])
+        except Exception:
+            return None
+
+    async def navigate(self, url: str) -> NavigationResult:
+        """Navigate to a URL with hybrid wait strategy.
+
+        Strategies:
+        - "networkidle": legacy — goto with networkidle wait
+        - "load": goto with load event only
+        - "hybrid" (default): goto with load, then attempt networkidle
+          within budget; falls back to load+settle on timeout/error
+        """
+        import contextlib
         from urllib.parse import urlparse
 
         # Clear cookies/storage when switching domains
@@ -399,12 +472,48 @@ class BrowserSession:
             if current_host and new_host and current_host != new_host:
                 await self.context.clear_cookies()
 
-        await self.page.goto(
-            url,
-            wait_until=self.config.wait_until,
-            timeout=self.config.timeout_ms,
-        )
-        await self.wait_for_dom_settle()
+        strategy = self.config.wait_strategy
+
+        if strategy == "networkidle":
+            # Legacy path
+            await self.page.goto(url, wait_until="networkidle", timeout=self.config.timeout_ms)
+            settle = await self.wait_for_dom_settle()
+            return NavigationResult(strategy="networkidle", settle_metrics=settle)
+
+        # Step 1: goto with "load" (window load event)
+        await self.page.goto(url, wait_until="load", timeout=self.config.timeout_ms)
+
+        # Step 2: networkidle attempt (hybrid only, asyncio.wait for safe cancellation)
+        used_strategy = "load"
+        if strategy == "hybrid":
+            idle_task = asyncio.ensure_future(self.page.wait_for_load_state("networkidle"))
+            done, _pending = await asyncio.wait(
+                {idle_task},
+                timeout=self.config.networkidle_budget_ms / 1000,
+            )
+            if idle_task in done:
+                exc = idle_task.exception()
+                if exc is None:
+                    used_strategy = "networkidle"
+                    logger.debug("networkidle achieved within budget")
+                elif _is_browser_dead_error(exc):
+                    raise exc  # browser death propagates
+                else:
+                    used_strategy = "load+settle"
+                    logger.debug("networkidle completed with error: %s", exc)
+            else:
+                idle_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await idle_task
+                used_strategy = "load+settle"
+                logger.info(
+                    "networkidle budget exceeded (%.1fs), proceeding with load+settle",
+                    self.config.networkidle_budget_ms / 1000,
+                )
+
+        # Step 3: DOM settle (always)
+        settle = await self.wait_for_dom_settle()
+        return NavigationResult(strategy=used_strategy, settle_metrics=settle)
 
     async def load_html(self, html: str, base_url: str = "about:blank") -> None:
         """Load raw HTML content directly (offline mode)."""
@@ -451,7 +560,8 @@ class BrowserSession:
         for attempt in range(2):
             cdp = await self.get_cdp_session()
             try:
-                result = await cdp.send("Accessibility.getFullAXTree")
+                async with asyncio.timeout(_CDP_AX_TREE_TIMEOUT):
+                    result = await cdp.send("Accessibility.getFullAXTree")
                 nodes = result.get("nodes", [])
                 if not nodes:
                     return None
@@ -459,8 +569,8 @@ class BrowserSession:
             except Exception:
                 if attempt == 0:
                     logger.warning("CDP session stale in get_ax_tree, reconnecting")
-                    with suppress(Exception):
-                        await cdp.detach()
+                    with suppress(Exception, asyncio.CancelledError):
+                        await asyncio.shield(cdp.detach())
                     self._cdp_session = None
                     continue
                 raise

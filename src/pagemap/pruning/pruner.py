@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 
 from pagemap.i18n import (
@@ -33,9 +34,29 @@ from pagemap.i18n import (
     REVIEW_COUNT_TERMS,
     SHIPPING_TERMS,
 )
-from pagemap.pruning import ChunkType, HtmlChunk
+from pagemap.pruning import ChunkType, HtmlChunk, PruneReason
 
 logger = logging.getLogger(__name__)
+
+# ---- In-main thresholds ----
+_IN_MAIN_TEXT_MIN = 50  # TEXT_BLOCK, TABLE, LIST
+_IN_MAIN_MEDIA_MIN = 10  # MEDIA caption/alt
+# HEADING, FORM: always keep in main (no threshold)
+
+# ---- No-main fallback thresholds ----
+_NO_MAIN_TEXT_MIN = 30  # TEXT_BLOCK
+_NO_MAIN_FORM_MIN = 20  # FORM
+_NO_MAIN_MEDIA_MIN = 20  # MEDIA
+
+# ---- Schema-specific body text thresholds ----
+_NEWS_BODY_MIN = 50  # NewsArticle article_body
+_WIKI_SUMMARY_MIN = 100  # WikiArticle summary
+_WIKI_SECTION_MIN = 30  # WikiArticle section text
+_SAAS_DESC_MIN = 50  # SaaSPage description
+_GOV_BODY_MIN = 30  # GovernmentPage body text
+
+# ---- Coupang recommendation filter ----
+_COUPANG_PRICE_COUNT_LIMIT = 3  # start filtering after N price blocks
 
 # ---------------------------------------------------------------------------
 # Schema field matching heuristics — built from i18n universal terms
@@ -181,7 +202,7 @@ def _match_news_article(chunk: HtmlChunk) -> list[tuple[str, str]]:
         matches.append(("author", "author-pattern"))
 
     # body (long text blocks — news articles have substantial paragraphs)
-    if chunk.chunk_type == ChunkType.TEXT_BLOCK and len(text) > 50:
+    if chunk.chunk_type == ChunkType.TEXT_BLOCK and len(text) > _NEWS_BODY_MIN:
         matches.append(("article_body", "long-text-block"))
 
     # publisher (from META)
@@ -201,13 +222,13 @@ def _match_wiki_article(chunk: HtmlChunk) -> list[tuple[str, str]]:
         matches.append(("title", "h1/og:title"))
 
     # summary (first long paragraph)
-    if chunk.chunk_type == ChunkType.TEXT_BLOCK and len(text) > 100:
+    if chunk.chunk_type == ChunkType.TEXT_BLOCK and len(text) > _WIKI_SUMMARY_MIN:
         matches.append(("summary", "long-text-block"))
 
     # sections (headings + following text)
     if chunk.chunk_type == ChunkType.HEADING:
         matches.append(("sections", "heading"))
-    if chunk.chunk_type == ChunkType.TEXT_BLOCK and len(text) > 30:
+    if chunk.chunk_type == ChunkType.TEXT_BLOCK and len(text) > _WIKI_SECTION_MIN:
         matches.append(("sections", "section-text"))
 
     return matches
@@ -235,7 +256,7 @@ def _match_saas_page(chunk: HtmlChunk) -> list[tuple[str, str]]:
         matches.append(("features", "feature-heading"))
 
     # description
-    if chunk.chunk_type == ChunkType.TEXT_BLOCK and len(text) > 50:
+    if chunk.chunk_type == ChunkType.TEXT_BLOCK and len(text) > _SAAS_DESC_MIN:
         matches.append(("description", "long-text"))
 
     return matches
@@ -263,7 +284,7 @@ def _match_government_page(chunk: HtmlChunk) -> list[tuple[str, str]]:
     # body
     if (
         chunk.chunk_type == ChunkType.TEXT_BLOCK
-        and len(text) > 30
+        and len(text) > _GOV_BODY_MIN
         and (chunk.in_main or "article" in chunk.parent_xpath.lower())
     ):
         matches.append(("description", "body-text-in-main"))
@@ -315,7 +336,8 @@ class PruneDecision:
     """Decision for a single chunk."""
 
     keep: bool
-    reason: str
+    reason: PruneReason
+    reason_detail: str = ""
     matched_fields: list[str] = field(default_factory=list)
 
 
@@ -329,7 +351,7 @@ def prune_chunks(
     Returns list of (chunk, decision) pairs for all chunks.
     """
     matcher = _SCHEMA_MATCHERS.get(schema_name)
-    if schema_name and matcher is None:
+    if schema_name and schema_name != "Generic" and matcher is None:
         logger.warning("Unknown schema_name=%r, falling back to generic rules", schema_name)
     results: list[tuple[HtmlChunk, PruneDecision]] = []
 
@@ -345,7 +367,7 @@ def prune_chunks(
                     chunk,
                     PruneDecision(
                         keep=True,
-                        reason="meta-always-keep",
+                        reason=PruneReason.META_ALWAYS,
                     ),
                 )
             )
@@ -366,7 +388,7 @@ def prune_chunks(
                 price_count += 1
                 if first_price_xpath is None:
                     first_price_xpath = chunk.xpath
-                elif price_count > 3 and not chunk.in_main:
+                elif price_count > _COUPANG_PRICE_COUNT_LIMIT and not chunk.in_main:
                     shared = _xpath_common_depth(first_price_xpath, chunk.xpath)
                     if shared < _PRICE_SAME_CONTAINER_DEPTH:
                         # Different container → likely recommendation section
@@ -375,7 +397,7 @@ def prune_chunks(
                                 chunk,
                                 PruneDecision(
                                     keep=False,
-                                    reason="coupang-recommendation-filter",
+                                    reason=PruneReason.COUPANG_REC_FILTER,
                                     matched_fields=matched_fields,
                                 ),
                             )
@@ -388,7 +410,8 @@ def prune_chunks(
                     chunk,
                     PruneDecision(
                         keep=True,
-                        reason=f"schema-match: {match_reason}",
+                        reason=PruneReason.SCHEMA_MATCH,
+                        reason_detail=match_reason,
                         matched_fields=matched_fields,
                     ),
                 )
@@ -404,15 +427,17 @@ def prune_chunks(
                         chunk,
                         PruneDecision(
                             keep=True,
-                            reason="in-main-heading",
+                            reason=PruneReason.IN_MAIN_HEADING,
                         ),
                     )
                 )
                 continue
             if chunk.chunk_type == ChunkType.TEXT_BLOCK and (
-                len(chunk.text) > 50 or _is_high_value_short_text(chunk.text)
+                len(chunk.text) > _IN_MAIN_TEXT_MIN or _is_high_value_short_text(chunk.text)
             ):
-                reason = "in-main-text" if len(chunk.text) > 50 else "in-main-high-value-short"
+                reason = (
+                    PruneReason.IN_MAIN_TEXT if len(chunk.text) > _IN_MAIN_TEXT_MIN else PruneReason.IN_MAIN_HV_SHORT
+                )
                 results.append(
                     (
                         chunk,
@@ -424,9 +449,13 @@ def prune_chunks(
                 )
                 continue
             if chunk.chunk_type in (ChunkType.TABLE, ChunkType.LIST) and (
-                len(chunk.text) > 50 or _is_high_value_short_text(chunk.text)
+                len(chunk.text) > _IN_MAIN_TEXT_MIN or _is_high_value_short_text(chunk.text)
             ):
-                reason = "in-main-structured" if len(chunk.text) > 50 else "in-main-high-value-short"
+                reason = (
+                    PruneReason.IN_MAIN_STRUCTURED
+                    if len(chunk.text) > _IN_MAIN_TEXT_MIN
+                    else PruneReason.IN_MAIN_HV_SHORT
+                )
                 results.append(
                     (
                         chunk,
@@ -443,18 +472,18 @@ def prune_chunks(
                         chunk,
                         PruneDecision(
                             keep=True,
-                            reason="in-main-form",
+                            reason=PruneReason.IN_MAIN_FORM,
                         ),
                     )
                 )
                 continue
-            if chunk.chunk_type == ChunkType.MEDIA and len(chunk.text) > 10:
+            if chunk.chunk_type == ChunkType.MEDIA and len(chunk.text) > _IN_MAIN_MEDIA_MIN:
                 results.append(
                     (
                         chunk,
                         PruneDecision(
                             keep=True,
-                            reason="in-main-media",
+                            reason=PruneReason.IN_MAIN_MEDIA,
                         ),
                     )
                 )
@@ -465,7 +494,7 @@ def prune_chunks(
                     chunk,
                     PruneDecision(
                         keep=False,
-                        reason="in-main-short",
+                        reason=PruneReason.IN_MAIN_SHORT,
                     ),
                 )
             )
@@ -479,40 +508,40 @@ def prune_chunks(
                         chunk,
                         PruneDecision(
                             keep=True,
-                            reason="keep-heading-no-main",
+                            reason=PruneReason.KEEP_HEADING_NO_MAIN,
                         ),
                     )
                 )
                 continue
-            if chunk.chunk_type == ChunkType.TEXT_BLOCK and len(chunk.text) > 30:
+            if chunk.chunk_type == ChunkType.TEXT_BLOCK and len(chunk.text) > _NO_MAIN_TEXT_MIN:
                 results.append(
                     (
                         chunk,
                         PruneDecision(
                             keep=True,
-                            reason="keep-text-no-main",
+                            reason=PruneReason.KEEP_TEXT_NO_MAIN,
                         ),
                     )
                 )
                 continue
-            if chunk.chunk_type == ChunkType.FORM and len(chunk.text) > 20:
+            if chunk.chunk_type == ChunkType.FORM and len(chunk.text) > _NO_MAIN_FORM_MIN:
                 results.append(
                     (
                         chunk,
                         PruneDecision(
                             keep=True,
-                            reason="keep-form-no-main",
+                            reason=PruneReason.KEEP_FORM_NO_MAIN,
                         ),
                     )
                 )
                 continue
-            if chunk.chunk_type == ChunkType.MEDIA and len(chunk.text) > 20:
+            if chunk.chunk_type == ChunkType.MEDIA and len(chunk.text) > _NO_MAIN_MEDIA_MIN:
                 results.append(
                     (
                         chunk,
                         PruneDecision(
                             keep=True,
-                            reason="keep-media-no-main",
+                            reason=PruneReason.KEEP_MEDIA_NO_MAIN,
                         ),
                     )
                 )
@@ -524,13 +553,29 @@ def prune_chunks(
                 chunk,
                 PruneDecision(
                     keep=False,
-                    reason="no-match",
+                    reason=PruneReason.NO_MATCH,
                 ),
             )
         )
 
-    kept = sum(1 for _, d in results if d.keep)
+    kept = 0
+    reason_kept: Counter[str] = Counter()
+    reason_removed: Counter[str] = Counter()
+    for _chunk, decision in results:
+        if decision.keep:
+            kept += 1
+            reason_kept[decision.reason] += 1
+        else:
+            reason_removed[decision.reason] += 1
+
     total = len(results)
-    logger.debug("Pruner: %d/%d chunks kept (schema=%s)", kept, total, schema_name)
+    logger.debug(
+        "Pruner: %d/%d chunks kept (schema=%s) | kept_by=%s | removed_by=%s",
+        kept,
+        total,
+        schema_name,
+        reason_kept.most_common(),
+        reason_removed.most_common(),
+    )
 
     return results

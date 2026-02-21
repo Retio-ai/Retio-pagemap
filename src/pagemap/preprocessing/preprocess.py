@@ -19,19 +19,34 @@ _STRIP_TAGS = {"script", "style", "svg", "noscript", "link", "meta", "path", "de
 
 _ZERO_SIZE_RE = re.compile(r"(?:width|height)\s*:\s*0(?:px)?(?:[;\s]|$)")
 
-_enc: tiktoken.Encoding | None = None
+_enc: tiktoken.Encoding = tiktoken.get_encoding("cl100k_base")
+
+_CJK_APPROX_RE = re.compile(r"[\u3000-\u9fff\uac00-\ud7af]")
 
 
 def _get_encoder() -> tiktoken.Encoding:
-    global _enc
-    if _enc is None:
-        _enc = tiktoken.get_encoding("cl100k_base")
     return _enc
 
 
 def count_tokens(text: str) -> int:
     """Count tokens using cl100k_base (GPT-4 / Claude tokenizer approximation)."""
-    return len(_get_encoder().encode(text))
+    return len(_enc.encode(text))
+
+
+def count_tokens_approx(text: str) -> int:
+    """CJK-aware approximate token count.
+
+    Rough heuristic: ~4 chars/tok English, ~2 chars/tok CJK assumed.
+    Note: actual Korean BPE is ~1.1 chars/tok, so this UNDER-estimates
+    Korean token counts by ~50%. Safe for metrics; do NOT use for budgets.
+    """
+    sample = text[:2000]
+    if not sample:
+        return 0
+    cjk_count = len(_CJK_APPROX_RE.findall(sample))
+    ratio = cjk_count / len(sample)
+    chars_per_token = 4.0 - 2.0 * ratio
+    return int(len(text) / chars_per_token)
 
 
 def _remove_hidden_elements(soup: BeautifulSoup) -> None:

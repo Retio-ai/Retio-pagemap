@@ -139,6 +139,7 @@ class TestStopHardening:
 # ── _get_session() recovery ───────────────────────────────────────
 
 
+@pytest.mark.allow_real_get_session
 class TestGetSessionRecovery:
     """Tests for server._get_session() crash recovery logic."""
 

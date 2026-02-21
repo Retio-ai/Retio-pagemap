@@ -23,15 +23,14 @@ PageMap gives your agent a **compressed, actionable** view of any web page:
 
 | | PageMap | Playwright MCP | Firecrawl | Jina Reader |
 |--|:------:|:---------:|:-----------:|:--------:|
-| **Tokens / page** | **2-5K** | 50-540K | 10-50K | 10-50K |
+| **Tokens / page** | **2-5K** | 6-50K | 10-50K | 10-50K |
 | **Interaction** | **click / type / select / hover** | Raw tree parsing | Read-only | Read-only |
 | **Multi-page sessions** | **Unlimited** | Breaks at 2-3 pages | N/A | N/A |
-| **Task success (66 tasks)** | **95.2%** | 39.7% \* | 60.9% | 61.2% |
-| **Cost / 66 tasks** | **$0.58** | $6.71 \* | $2.66 | $1.54 |
+| **Task success (94 tasks)** | **63.6%** | 61.5% | 64.5% | 57.8% |
+| **Avg tokens / task** | **2,403** | 13,737 | 13,886 | 11,423 |
+| **Cost / 94 tasks** | **$0.97** | $4.09 | $3.97 | $2.26 |
 
-> Benchmarked across 9 e-commerce sites, 66 tasks. PageMap uses **5.6x fewer tokens** while being the only tool that supports **interaction**.
->
-> \* Playwright MCP figures are from 62-task static benchmark using pre-collected snapshots. SPA sites with empty snapshots lower all snapshot-based scores.
+> Benchmarked across 11 e-commerce sites, 94 static tasks, 7 conditions. PageMap matches competitors in accuracy while using **5.7x fewer tokens** and is the only tool that supports **interaction**.
 
 ---
 
@@ -57,7 +56,7 @@ Add to your project's `.mcp.json`:
 }
 ```
 
-Restart your IDE. Eight tools become available:
+Restart your IDE. Nine tools become available:
 
 | Tool | Description |
 |------|-------------|
@@ -69,6 +68,7 @@ Restart your IDE. Eight tools become available:
 | `scroll_page` | Scroll up/down by page, half-page, or pixel amount |
 | `fill_form` | Batch-fill multiple form fields in one call |
 | `wait_for` | Wait for text to appear or disappear on the page |
+| `batch_get_page_map` | Get Page Maps for multiple URLs in parallel |
 
 ### CLI
 

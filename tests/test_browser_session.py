@@ -43,7 +43,12 @@ class TestBrowserConfig:
 
     def test_default_wait_until(self):
         cfg = BrowserConfig()
-        assert cfg.wait_until == "networkidle"
+        assert cfg.wait_until == "load"
+
+    def test_default_wait_strategy(self):
+        cfg = BrowserConfig()
+        assert cfg.wait_strategy == "hybrid"
+        assert cfg.networkidle_budget_ms == 6000
 
     def test_default_settle_quiet_ms(self):
         cfg = BrowserConfig()

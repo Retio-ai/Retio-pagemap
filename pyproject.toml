@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "retio-pagemap"
-version = "0.4.0"
+version = "0.5.0"
 description = "Structured web page representation for AI agents — 97% HTML token reduction"
 requires-python = ">=3.11"
 license = {text = "AGPL-3.0-only"}
@@ -39,11 +39,11 @@ dependencies = [
     "tiktoken>=0.5.0",
     "beautifulsoup4>=4.9.0",
     "rapidfuzz>=3.0.0",
+    "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
 cli = [
-    "pyyaml>=6.0",
     "tabulate>=0.9.0",
 ]
 benchmark = [
@@ -122,6 +122,14 @@ exclude = [
     "README.md",
     "README_DRAFT.md",
     "ROADMAP.md",
+    "BENCHMARK_ROADMAP.md",
+    "PRUNING_ROADMAP.md",
+    "BUSINESS_PLAN_DRAFT.md",
+    "DIRECTION.md",
+    "AGPL_TRANSITION_CHECKLIST.md",
+    "server.json",
+    "smithery.yaml",
+    "glama.json",
     "*.pdf",
     "uv.lock",
 ]
@@ -152,3 +160,6 @@ known-first-party = ["pagemap"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = [
+    "allow_real_get_session: opt out of the _block_real_browser safety net",
+]

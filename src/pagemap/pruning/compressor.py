@@ -16,6 +16,8 @@ from pagemap.pruning import HtmlChunk
 
 logger = logging.getLogger(__name__)
 
+_EMPTY_TAG_REMOVAL_PASSES = 5
+
 # ---------------------------------------------------------------------------
 # XPath document-order sort key
 # ---------------------------------------------------------------------------
@@ -125,7 +127,7 @@ def compress_html(html: str) -> str:
 
     # Remove empty elements (no text, no children with text)
     # Iteratively remove empty tags (innermost first)
-    for _ in range(5):  # more passes for deeply nested empties
+    for _ in range(_EMPTY_TAG_REMOVAL_PASSES):  # more passes for deeply nested empties
         prev = result
         result = re.sub(
             r"<(div|span|p|section|article|aside|figure|figcaption|details|summary|"

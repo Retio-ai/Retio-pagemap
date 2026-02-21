@@ -463,6 +463,96 @@ SHIPPING_TERMS: tuple[str, ...] = (
     "lieferung",
 )
 
+LOGIN_TERMS: tuple[str, ...] = (
+    # ko
+    "로그인",
+    "로그 인",
+    # en
+    "Sign in",
+    "Log in",
+    "Login",
+    # ja
+    "ログイン",
+    "サインイン",
+    # fr
+    "Se connecter",
+    "Connexion",
+    # de
+    "Anmelden",
+    "Einloggen",
+)
+
+CHECKOUT_TERMS: tuple[str, ...] = (
+    # ko
+    "결제",
+    "결제하기",
+    "주문",
+    "주문하기",
+    "배송지",
+    # en
+    "Checkout",
+    "Place Order",
+    "Place order",
+    "Payment",
+    # ja
+    "チェックアウト",
+    "注文する",
+    "お支払い",
+    # fr
+    "Paiement",
+    "Commander",
+    "Passer commande",
+    # de
+    "Kasse",
+    "Bestellen",
+    "Zahlung",
+)
+
+FAQ_TERMS: tuple[str, ...] = (
+    # ko
+    "자주 묻는 질문",
+    "FAQ",
+    "도움말",
+    "고객센터",
+    # en
+    "Frequently Asked",
+    "Help Center",
+    "Help centre",
+    "Support",
+    # ja
+    "よくある質問",
+    "ヘルプセンター",
+    # fr
+    "Questions fréquentes",
+    "Foire aux questions",
+    "Centre d'aide",
+    # de
+    "Häufig gestellte Fragen",
+    "Hilfe-Center",
+    "Hilfe",
+)
+
+FORM_FIELD_TERMS: tuple[str, ...] = (
+    # ko
+    "필수",
+    "필수 입력",
+    "입력해 주세요",
+    # en
+    "Required",
+    "required",
+    "Please enter",
+    "Please fill",
+    # ja
+    "必須",
+    "入力してください",
+    # fr
+    "Obligatoire",
+    "Veuillez saisir",
+    # de
+    "Pflichtfeld",
+    "Bitte eingeben",
+)
+
 # ---------------------------------------------------------------------------
 # Layer 2 — LocaleConfig (rendering)
 # ---------------------------------------------------------------------------

@@ -45,6 +45,7 @@ from .dom_change_detector import (
     detect_dom_changes,
     fingerprints_structurally_equal,
 )
+from .pipeline_timer import PipelineTimer
 from .template_cache import InMemoryTemplateCache, TemplateKey, extract_template_domain
 
 # Configure logging to stderr only (STDIO transport requires clean stdout)
@@ -598,6 +599,9 @@ def _is_retryable_error(exc: Exception, action: str) -> bool:
 # ── Global state with lock ───────────────────────────────────────────
 
 
+_TOOL_LOCK_TIMEOUT = 90.0  # > PAGE_MAP_TIMEOUT_SECONDS(60) + margin
+
+
 class ServerState:
     """Encapsulates all mutable server state: browser session + cache."""
 
@@ -605,11 +609,13 @@ class ServerState:
         self.session: BrowserSession | None = None
         self.cache: PageMapCache = PageMapCache()
         self.template_cache: InMemoryTemplateCache = InMemoryTemplateCache()
-        self._lock: asyncio.Lock = asyncio.Lock()
+        self._session_lock: asyncio.Lock = asyncio.Lock()
+        self.tool_lock: asyncio.Lock = asyncio.Lock()
+        # Lock ordering invariant: tool_lock → _session_lock (reverse prohibited)
 
     async def get_session(self) -> BrowserSession:
         """Get or create the browser session (lock-protected)."""
-        async with self._lock:
+        async with self._session_lock:
             if self.session is not None:
                 if not await self.session.is_alive():
                     logger.warning("Browser health check failed — recovering session")
@@ -631,7 +637,7 @@ class ServerState:
 
     async def cleanup_session(self) -> None:
         """Clean up the browser session."""
-        async with self._lock:
+        async with self._session_lock:
             if self.session is not None:
                 await self.session.stop()
                 self.session = None
@@ -668,18 +674,31 @@ async def get_page_map(url: str | None = None) -> str:
     Args:
         url: URL to navigate to (http/https only). If None, uses current page.
     """
+    # URL validation is fast — do before acquiring lock
+    if url is not None:
+        error = await _validate_url_with_dns(url)
+        if error:
+            request_id = uuid.uuid4().hex[:12]
+            logger.warning("SSRF blocked: request=%s url=%s reason=%s", request_id, url, error)
+            return f"Error: {error}"
+
+    try:
+        async with asyncio.timeout(_TOOL_LOCK_TIMEOUT):
+            async with _state.tool_lock:
+                return await _get_page_map_impl(url)
+    except TimeoutError:
+        logger.error("Tool lock acquisition timed out for get_page_map")
+        return "Error: Server busy. Please retry."
+
+
+async def _get_page_map_impl(url: str | None = None) -> str:
     import time as _time
 
     request_id = uuid.uuid4().hex[:12]
 
-    # Validate URL before navigation (sync + async DNS check)
-    if url is not None:
-        error = await _validate_url_with_dns(url)
-        if error:
-            logger.warning("SSRF blocked: request=%s url=%s reason=%s", request_id, url, error)
-            return f"Error: {error}"
-
     logger.info("get_page_map: request=%s url=%s", request_id, url or "(current)")
+
+    timer = PipelineTimer()
 
     try:
         session = await _get_session()
@@ -693,10 +712,12 @@ async def get_page_map(url: str | None = None) -> str:
 
         # Step 1: Navigate if url provided → hard invalidation
         if url is not None:
+            timer.stage("navigation")
             await session.navigate(url)
             _state.cache.invalidate(InvalidationReason.NAVIGATION)
 
         # Step 2: Capture current fingerprint (~100ms)
+        timer.stage("fingerprint")
         page = session.page
         fingerprint = await capture_dom_fingerprint(page)
 
@@ -725,12 +746,14 @@ async def get_page_map(url: str | None = None) -> str:
             elif fingerprints_structurally_equal(fingerprint, active_entry.fingerprint):
                 # TIER B: Content refresh — structure same, text changed
                 tier = "B"
+                timer.stage("content_refresh")
                 page_map = await asyncio.wait_for(
                     rebuild_content_only(
                         session=session,
                         cached=active_entry.page_map,
                         max_pruned_tokens=DEFAULT_PRUNED_CONTEXT_TOKENS,
                         template_cache=_state.template_cache,
+                        timer=timer,
                     ),
                     timeout=PAGE_MAP_TIMEOUT_SECONDS,
                 )
@@ -740,6 +763,7 @@ async def get_page_map(url: str | None = None) -> str:
 
         # TIER C: Full rebuild
         if page_map is None:
+            timer.stage("build")
             page_map = await asyncio.wait_for(
                 build_page_map_live(
                     session=session,
@@ -747,12 +771,14 @@ async def get_page_map(url: str | None = None) -> str:
                     enable_tier3=True,
                     max_pruned_tokens=DEFAULT_PRUNED_CONTEXT_TOKENS,
                     template_cache=_state.template_cache,
+                    timer=timer,
                 ),
                 timeout=PAGE_MAP_TIMEOUT_SECONDS,
             )
             cache.record_miss()
 
         # Post-navigation URL revalidation (detect redirect-based SSRF + DNS rebinding)
+        timer.stage("post_validation")
         final_url = await session.get_page_url()
         post_error = await _validate_url_with_dns(final_url)
         if post_error:
@@ -763,6 +789,8 @@ async def get_page_map(url: str | None = None) -> str:
                 post_error,
             )
             return f"Error: Redirect led to blocked URL — {post_error}"
+
+        timer.finalize()
 
         # Store in cache
         cache.store(page_map, fingerprint)
@@ -820,8 +848,16 @@ async def get_page_map(url: str | None = None) -> str:
         return prompt
 
     except TimeoutError:
-        logger.error("get_page_map: request=%s timed_out after %ds", request_id, PAGE_MAP_TIMEOUT_SECONDS)
-        return f"Error: Page Map build timed out after {PAGE_MAP_TIMEOUT_SECONDS}s."
+        report = timer.timeout_report()
+        logger.error(
+            "get_page_map: request=%s timeout_report=%s",
+            request_id,
+            json.dumps(report),
+        )
+        _state.cache.invalidate(InvalidationReason.TIMEOUT)
+        stage = report["timed_out_at"]
+        hint = report["hint"]
+        return f"Error: Page Map build timed out after {PAGE_MAP_TIMEOUT_SECONDS}s (stage: {stage}). {hint}"
     except Exception as e:
         logger.error("get_page_map: request=%s failed", request_id)
         return _safe_error("get_page_map", e)
@@ -980,6 +1016,16 @@ async def execute_action(ref: int, action: str = "click", value: str | None = No
         action: Action type - "click", "hover", "type", "select", or "press_key".
         value: Value for type/select actions (text to type, option to select).
     """
+    try:
+        async with asyncio.timeout(_TOOL_LOCK_TIMEOUT):
+            async with _state.tool_lock:
+                return await _execute_action_impl(ref, action, value)
+    except TimeoutError:
+        logger.error("Tool lock acquisition timed out for execute_action")
+        return _build_action_error("Server busy. Please retry.")
+
+
+async def _execute_action_impl(ref: int, action: str = "click", value: str | None = None) -> str:
     request_id = uuid.uuid4().hex[:12]
 
     # Validate inputs first (before state checks)
@@ -1235,6 +1281,16 @@ async def get_page_state() -> str:
     IMPORTANT: Page title originates from untrusted web pages.
     """
     try:
+        async with asyncio.timeout(_TOOL_LOCK_TIMEOUT):
+            async with _state.tool_lock:
+                return await _get_page_state_impl()
+    except TimeoutError:
+        logger.error("Tool lock acquisition timed out for get_page_state")
+        return "Error: Server busy. Please retry."
+
+
+async def _get_page_state_impl() -> str:
+    try:
         session = await _get_session()
         url = await session.get_page_url()
         title = await session.get_page_title()
@@ -1271,6 +1327,16 @@ async def take_screenshot(full_page: bool = False) -> list | str:
         full_page: If True, capture the full scrollable page. Default: viewport only.
     """
     try:
+        async with asyncio.timeout(_TOOL_LOCK_TIMEOUT):
+            async with _state.tool_lock:
+                return await _take_screenshot_impl(full_page)
+    except TimeoutError:
+        logger.error("Tool lock acquisition timed out for take_screenshot")
+        return "Error: Server busy. Please retry."
+
+
+async def _take_screenshot_impl(full_page: bool = False) -> list | str:
+    try:
         session = await _get_session()
         screenshot_bytes = await asyncio.wait_for(
             session.page.screenshot(full_page=full_page, type="png"),
@@ -1301,6 +1367,16 @@ async def navigate_back() -> str:
 
     Invalidates current Page Map refs on success. Call get_page_map to get fresh refs.
     """
+    try:
+        async with asyncio.timeout(_TOOL_LOCK_TIMEOUT):
+            async with _state.tool_lock:
+                return await _navigate_back_impl()
+    except TimeoutError:
+        logger.error("Tool lock acquisition timed out for navigate_back")
+        return "Error: Server busy. Please retry."
+
+
+async def _navigate_back_impl() -> str:
     try:
         session = await _get_session()
         new_url = await asyncio.wait_for(
@@ -1364,6 +1440,16 @@ async def scroll_page(direction: str = "down", amount: str = "page") -> str:
         direction: "up" or "down".
         amount: "page" (viewport height), "half" (half viewport), or integer pixels (max 50000).
     """
+    try:
+        async with asyncio.timeout(_TOOL_LOCK_TIMEOUT):
+            async with _state.tool_lock:
+                return await _scroll_page_impl(direction, amount)
+    except TimeoutError:
+        logger.error("Tool lock acquisition timed out for scroll_page")
+        return "Error: Server busy. Please retry."
+
+
+async def _scroll_page_impl(direction: str = "down", amount: str = "page") -> str:
     # Input validation
     direction = direction.lower().strip()
     if direction not in VALID_SCROLL_DIRECTIONS:
@@ -1475,6 +1561,16 @@ async def fill_form(fields: list[FormField]) -> str:
                 Example: [{"ref": 2, "action": "type", "value": "user@email.com"},
                           {"ref": 5, "action": "click"}]
     """
+    try:
+        async with asyncio.timeout(_TOOL_LOCK_TIMEOUT):
+            async with _state.tool_lock:
+                return await _fill_form_impl(fields)
+    except TimeoutError:
+        logger.error("Tool lock acquisition timed out for fill_form")
+        return "Error: Server busy. Please retry."
+
+
+async def _fill_form_impl(fields: list[FormField]) -> str:
     request_id = uuid.uuid4().hex[:12]
 
     # ── Input validation ──
@@ -1730,6 +1826,20 @@ async def wait_for(
         text_gone: Wait for this text to disappear (e.g., "Loading...", spinner text).
         timeout: Maximum seconds to wait (default 10, max 30).
     """
+    try:
+        async with asyncio.timeout(_TOOL_LOCK_TIMEOUT):
+            async with _state.tool_lock:
+                return await _wait_for_impl(text, text_gone, timeout)
+    except TimeoutError:
+        logger.error("Tool lock acquisition timed out for wait_for")
+        return "Error: Server busy. Please retry."
+
+
+async def _wait_for_impl(
+    text: str | None = None,
+    text_gone: str | None = None,
+    timeout: float = 10.0,
+) -> str:
     import time
 
     # ── Input validation ──
@@ -1839,6 +1949,182 @@ async def wait_for(
             _state.cache.invalidate(InvalidationReason.BROWSER_DEAD)
             return "Error: Browser connection lost. Call get_page_map to recover."
         return _safe_error("wait_for", e)
+
+
+# ── batch_get_page_map ────────────────────────────────────────────
+
+BATCH_MAX_URLS = 10
+BATCH_MAX_CONCURRENCY = 5
+BATCH_PER_URL_TIMEOUT_SECONDS = 60
+BATCH_OVERALL_TIMEOUT_SECONDS = 120
+
+
+@mcp.tool()
+async def batch_get_page_map(urls: list[str], max_concurrency: int = 5) -> str:
+    """Get Page Maps for multiple URLs in parallel.
+
+    Each URL is opened in a separate browser tab and processed concurrently.
+    Results are stored in the URL LRU cache (not the active slot).
+    Individual URL failures do not affect other URLs.
+
+    Args:
+        urls: List of URLs to process (max 10, http/https only).
+        max_concurrency: Maximum parallel pages (default 5, max 5).
+    """
+    try:
+        async with asyncio.timeout(_TOOL_LOCK_TIMEOUT):
+            async with _state.tool_lock:
+                return await _batch_get_page_map_impl(urls, max_concurrency)
+    except TimeoutError:
+        logger.error("Tool lock acquisition timed out for batch_get_page_map")
+        return "Error: Server busy. Please retry."
+
+
+async def _batch_get_page_map_impl(urls: list[str], max_concurrency: int) -> str:
+    import time as _time
+
+    request_id = uuid.uuid4().hex[:12]
+    start = _time.monotonic()
+
+    # Input validation
+    if not urls:
+        return json.dumps({"error": "urls list is empty"}, ensure_ascii=False)
+    if len(urls) > BATCH_MAX_URLS:
+        return json.dumps(
+            {"error": f"Too many URLs ({len(urls)}). Maximum is {BATCH_MAX_URLS}."},
+            ensure_ascii=False,
+        )
+
+    # Deduplicate while preserving order
+    seen: set[str] = set()
+    valid_urls: list[str] = []
+    pre_errors: dict[str, str] = {}
+    for u in urls:
+        if u in seen:
+            continue
+        seen.add(u)
+        error = await _validate_url_with_dns(u)
+        if error:
+            pre_errors[u] = error
+        else:
+            valid_urls.append(u)
+
+    if not valid_urls and not pre_errors:
+        return json.dumps({"error": "No valid URLs after deduplication"}, ensure_ascii=False)
+
+    logger.info(
+        "batch_get_page_map: request=%s urls=%d valid=%d",
+        request_id,
+        len(urls),
+        len(valid_urls),
+    )
+
+    # All URLs blocked — return pre-errors without creating a session
+    if not valid_urls:
+        results = [{"url": u, "status": "error", "error": err} for u, err in pre_errors.items()]
+        elapsed_ms = round((_time.monotonic() - start) * 1000)
+        return json.dumps(
+            {
+                "results": results,
+                "summary": {
+                    "total": len(urls),
+                    "success": 0,
+                    "failed": len(results),
+                    "elapsed_ms": elapsed_ms,
+                },
+            },
+            ensure_ascii=False,
+        )
+
+    from .page_map_builder import build_page_map_from_page
+    from .serializer import to_agent_prompt
+
+    session = await _get_session()
+    effective_concurrency = min(max_concurrency, BATCH_MAX_CONCURRENCY)
+    semaphore = asyncio.Semaphore(effective_concurrency)
+
+    async def _process_one(url: str) -> tuple[str, str]:
+        """Process one URL. Returns (url, result_json_or_error)."""
+        async with semaphore:
+            page = None
+            try:
+                page = await session.create_batch_page()
+                await page.goto(url, wait_until="load", timeout=session.config.timeout_ms)
+                await session.wait_for_dom_settle_on(page)
+
+                page_map = await asyncio.wait_for(
+                    build_page_map_from_page(
+                        page,
+                        template_cache=_state.template_cache,
+                    ),
+                    timeout=BATCH_PER_URL_TIMEOUT_SECONDS,
+                )
+
+                # Post-nav SSRF check
+                post_error = await _validate_url_with_dns(page.url)
+                if post_error:
+                    return url, f"Error: Redirect blocked — {post_error}"
+
+                # Store in LRU only (don't overwrite active)
+                from .dom_change_detector import capture_dom_fingerprint as _capture_fp
+
+                fingerprint = await _capture_fp(page)
+                _state.cache.store_in_lru_only(page_map, fingerprint)
+
+                return url, to_agent_prompt(page_map, include_meta=True)
+
+            except TimeoutError:
+                return url, f"Error: Timed out after {BATCH_PER_URL_TIMEOUT_SECONDS}s"
+            except Exception as e:
+                return url, _safe_error(f"batch [{url}]", e)
+            finally:
+                if page is not None:
+                    await asyncio.shield(session.close_batch_page(page))
+
+    # Run all tasks with overall timeout
+    tasks = [_process_one(u) for u in valid_urls]
+    try:
+        raw_results = await asyncio.wait_for(
+            asyncio.gather(*tasks, return_exceptions=True),
+            timeout=BATCH_OVERALL_TIMEOUT_SECONDS,
+        )
+    except TimeoutError:
+        raw_results = []
+
+    # Build structured result
+    results: list[dict] = []
+
+    # Add pre-validation errors
+    for u, err in pre_errors.items():
+        results.append({"url": u, "status": "error", "error": err})
+
+    # Add processed results
+    success_count = 0
+    for r in raw_results:
+        if isinstance(r, BaseException):
+            results.append({"url": "unknown", "status": "error", "error": str(r)})
+        else:
+            url, result = r
+            if result.startswith("Error"):
+                results.append({"url": url, "status": "error", "error": result})
+            else:
+                results.append({"url": url, "status": "ok", "page_map": result})
+                success_count += 1
+
+    elapsed_ms = round((_time.monotonic() - start) * 1000)
+
+    return json.dumps(
+        {
+            "results": results,
+            "summary": {
+                "total": len(urls),
+                "success": success_count,
+                "failed": len(results) - success_count,
+                "elapsed_ms": elapsed_ms,
+            },
+        },
+        ensure_ascii=False,
+    )
 
 
 # ── fill_form helpers ─────────────────────────────────────────────

@@ -11,13 +11,15 @@ Two modes:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
-from pagemap.preprocessing.preprocess import count_tokens
+from pagemap.preprocessing.preprocess import count_tokens, count_tokens_approx
 
 from . import Interactable, PageMap
 from .browser_session import BrowserSession
@@ -28,7 +30,10 @@ from .i18n import (
     detect_locale,
 )
 from .interactive_detector import detect_all
+from .page_classifier import classify_page
+from .pipeline_timer import PipelineTimer
 from .pruned_context_builder import (
+    _NO_TEMPLATE,
     build_pruned_context,
     extract_pagination_structured,
     extract_product_images,
@@ -44,6 +49,12 @@ from .template_cache import (
 )
 
 logger = logging.getLogger(__name__)
+
+# ── Budget filtering constants ────────────────────────────────────────
+_OVERHEAD_TOKEN_ESTIMATE = 80
+_MIN_INTERACTABLE_BUDGET = 100
+_VISIBLE_TEXT_SAMPLE_LEN = 2000
+_HTML_BODY_SAMPLE_LEN = 30000
 
 # ── Constants ─────────────────────────────────────────────────────────
 
@@ -95,7 +106,7 @@ def _sample_visible_text(raw_html: str) -> str:
     # Jump to <body> to skip <head> content (meta, scripts, JSON-LD)
     body_idx = raw_html.lower().find("<body")
     start = body_idx if body_idx >= 0 else 0
-    html_slice = raw_html[start : start + 30000]
+    html_slice = raw_html[start : start + _HTML_BODY_SAMPLE_LEN]
 
     # Strip script/style/noscript CONTENT (not just tags)
     cleaned = _SCRIPT_STYLE_RE.sub(" ", html_slice)
@@ -103,7 +114,7 @@ def _sample_visible_text(raw_html: str) -> str:
     text = _TAG_RE.sub(" ", cleaned)
     # Collapse whitespace
     text = _WHITESPACE_RE.sub(" ", text).strip()
-    return text[:2000]
+    return text[:_VISIBLE_TEXT_SAMPLE_LEN]
 
 
 def compute_token_budget(
@@ -146,53 +157,40 @@ def compute_token_budget(
     )
 
 
-# Page type detection heuristics
-PAGE_TYPE_PATTERNS: dict[str, list[str]] = {
-    "product_detail": [
-        "/vp/products/",
-        "/products/",
-        "/goods/",
-        "/catalog/",
-        "/item/",
-        "/product/",
-        "/product.",  # COS (e.g. /women/denim-edit/product.facade-...)
-        "/dp/",
-        "/Product/",  # W Concept
-        "/t/",  # Nike
-        "/productDetail",  # Handsome
-        "/good",  # SSF (/good, /goods)
-    ],
-    "search_results": [
-        "/search",
-        "?q=",
-        "?query=",
-        "?keyword=",
-        "/browse",
-        "?searchTerm=",  # Zara
-        "/w?q=",  # Nike
-    ],
-    "article": [
-        "/article/",
-        "/articles/",
-        "/news/",
-        "/wiki/",
-        "/blog/",
-        "/post/",
-    ],
-    "listing": [
-        "/list",
-        "/ranking",
-        "/best",
-        "/category/",
-        "/w/",  # Nike categories
-        "/men/",
-        "/women/",  # Global fashion categories
-        "/man/",
-        "/woman/",
-        "/men.",
-        "/women.",
-    ],
-}
+_PRUNED_CONTEXT_THREAD_TIMEOUT = 30.0
+
+
+async def _build_pruned_context_async(
+    raw_html: str,
+    page_type: str = "default",
+    site_id: str = "unknown",
+    page_id: str = "unknown",
+    schema_name: str = "Product",
+    max_tokens: int = DEFAULT_PRUNED_CONTEXT_TOKENS,
+    locale: str | None = None,
+    template: Any = _NO_TEMPLATE,
+) -> tuple[str, int, dict]:
+    """Run build_pruned_context in a worker thread to unblock the event loop.
+
+    Thread-safe: all arguments are immutable or read-only.
+    lxml doc is created inside the function (thread-local).
+    lxml/tiktoken are C/Rust extensions that release the GIL.
+    """
+    return await asyncio.wait_for(
+        asyncio.to_thread(
+            build_pruned_context,
+            raw_html,
+            page_type=page_type,
+            site_id=site_id,
+            page_id=page_id,
+            schema_name=schema_name,
+            max_tokens=max_tokens,
+            locale=locale,
+            template=template,
+        ),
+        timeout=_PRUNED_CONTEXT_THREAD_TIMEOUT,
+    )
+
 
 # Domain → schema name mapping
 DOMAIN_SCHEMA_MAP: dict[str, str] = {
@@ -218,21 +216,77 @@ DOMAIN_SCHEMA_MAP: dict[str, str] = {
 }
 
 
-def detect_page_type(url: str) -> str:
-    """Detect page type from URL patterns."""
-    url_lower = url.lower()
-    for page_type, patterns in PAGE_TYPE_PATTERNS.items():
-        if any(p in url_lower for p in patterns):
-            return page_type
-    return "unknown"
+def detect_page_type(url: str, raw_html: str | None = None) -> str:
+    """Detect page type via weighted voting (backward-compatible wrapper).
+
+    Delegates to :func:`page_classifier.classify_page`.
+    """
+    return classify_page(url, raw_html).page_type
+
+
+_GOV_TLD_RE = re.compile(r"\.go(?:v)?(?:\.[a-z]{2})?(?:/|$)", re.IGNORECASE)
 
 
 def detect_schema(url: str) -> str:
-    """Detect schema name from URL domain."""
+    """Domain fast path + URL signal → Generic fallback."""
     for domain, schema in DOMAIN_SCHEMA_MAP.items():
         if domain in url:
             return schema
-    return "Product"
+    if _GOV_TLD_RE.search(url):
+        return "GovernmentPage"
+    return "Generic"
+
+
+# ---------------------------------------------------------------------------
+# JSON-LD schema sniffing (used for Generic → concrete schema override)
+# ---------------------------------------------------------------------------
+
+_JSONLD_RE = re.compile(
+    r'<script[^>]*type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
+    re.DOTALL | re.IGNORECASE,
+)
+
+_JSONLD_TYPE_TO_SCHEMA: dict[str, str] = {
+    "Product": "Product",
+    "IndividualProduct": "Product",
+    "NewsArticle": "NewsArticle",
+    "Article": "NewsArticle",
+    "ReportageNewsArticle": "NewsArticle",
+    "BlogPosting": "NewsArticle",
+    "SoftwareApplication": "SaaSPage",
+    "WebApplication": "SaaSPage",
+    "GovernmentOrganization": "GovernmentPage",
+    "GovernmentService": "GovernmentPage",
+}
+
+
+def _resolve_jsonld_type(data: Any) -> str | None:
+    """Recursively find @type in JSON-LD (handles @graph, arrays)."""
+    if isinstance(data, list):
+        return next((r for item in data if (r := _resolve_jsonld_type(item))), None)
+    if not isinstance(data, dict):
+        return None
+    if "@graph" in data:
+        return _resolve_jsonld_type(data["@graph"])
+    t = data.get("@type", "")
+    types = t if isinstance(t, list) else [t]
+    return next(
+        (_JSONLD_TYPE_TO_SCHEMA[x] for x in types if x in _JSONLD_TYPE_TO_SCHEMA),
+        None,
+    )
+
+
+def _detect_schema_from_jsonld(raw_html: str) -> str | None:
+    """Lightweight JSON-LD @type sniffing — regex + json.loads, no lxml."""
+    for m in _JSONLD_RE.finditer(raw_html):
+        try:
+            data = json.loads(m.group(1))
+        except (json.JSONDecodeError, TypeError):
+            continue
+        result = _resolve_jsonld_type(data)
+        if result is not None:
+            return result
+    return None
 
 
 def _extract_site_id(url: str) -> str:
@@ -266,6 +320,7 @@ async def build_page_map_live(
     enable_tier3: bool = True,
     max_pruned_tokens: int = DEFAULT_PRUNED_CONTEXT_TOKENS,
     template_cache: InMemoryTemplateCache | None = None,
+    timer: PipelineTimer | None = None,
 ) -> PageMap:
     """Build a PageMap from a live browser session.
 
@@ -285,11 +340,15 @@ async def build_page_map_live(
     start = time.monotonic()
 
     if url:
+        if timer:
+            timer.stage("navigation")
         await session.navigate(url)
 
+    if timer:
+        timer.stage("page_info")
     page_url = await session.get_page_url()
     page_title = await session.get_page_title()
-    page_type = detect_page_type(page_url)
+    page_type = detect_page_type(page_url)  # URL-only (pre raw_html)
     schema = detect_schema(page_url)
     site_id = _extract_site_id(page_url)
 
@@ -301,6 +360,8 @@ async def build_page_map_live(
         template = template_cache.lookup(_template_key)
 
     # Parallel: detect interactables + fetch HTML (independent read-only ops)
+    if timer:
+        timer.stage("detection")
     warnings: list[str] = []
     (interactables, detect_warnings), raw_html = await asyncio.gather(
         _detect_all_safe(session.page, enable_tier3),
@@ -308,10 +369,18 @@ async def build_page_map_live(
     )
     warnings.extend(detect_warnings)
 
+    # Re-classify with raw HTML for meta/DOM signals
+    page_type = detect_page_type(page_url, raw_html)
+    if template_cache is not None and page_type != "unknown":
+        _template_key = TemplateKey(extract_template_domain(page_url), page_type)
+        template = template_cache.lookup(_template_key)
+
     # Build pruned context with auto-detected locale + CJK budget compensation
+    if timer:
+        timer.stage("pruning")
     locale = detect_locale(page_url)
     budget = compute_token_budget(locale, raw_html, base_pruned=max_pruned_tokens)
-    pruned_context, pruned_tokens, metadata = build_pruned_context(
+    pruned_context, pruned_tokens, metadata = await _build_pruned_context_async(
         raw_html=raw_html,
         page_type=page_type,
         site_id=site_id,
@@ -375,6 +444,9 @@ async def build_page_map_live(
                 template_cache.record_validation_failure(_template_key)
                 logger.info("Template validation failed: %s", validation.mismatches)
 
+    # Assembly
+    if timer:
+        timer.stage("assembly")
     # Extract product images
     images = extract_product_images(raw_html, page_url)
 
@@ -394,6 +466,10 @@ async def build_page_map_live(
 
     # Navigation hints (after budget filter so refs match)
     navigation_hints = _build_navigation_hints(interactables, raw_html, page_type)
+
+    if timer:
+        timer.finalize()
+        metadata["stage_timing"] = timer.success_metadata()
 
     elapsed_ms = (time.monotonic() - start) * 1000
 
@@ -424,6 +500,105 @@ async def build_page_map_live(
     return page_map
 
 
+# ── Batch: build from an already-navigated Page ──────────────────────
+
+
+async def build_page_map_from_page(
+    page,
+    enable_tier3: bool = True,
+    max_pruned_tokens: int = DEFAULT_PRUNED_CONTEXT_TOKENS,
+    template_cache: InMemoryTemplateCache | None = None,
+) -> PageMap:
+    """Build a PageMap from an already-navigated Page object.
+
+    Used by batch_get_page_map — no navigation, no template learning.
+    Per-page CDP session is handled by detect_all internally.
+    """
+    start = time.monotonic()
+
+    page_url = page.url
+    page_title = await page.title()
+    schema = detect_schema(page_url)
+    site_id = _extract_site_id(page_url)
+
+    warnings: list[str] = []
+    (interactables, detect_warnings), raw_html = await asyncio.gather(
+        _detect_all_safe(page, enable_tier3),
+        page.content(),
+    )
+    warnings.extend(detect_warnings)
+
+    # Classify with full HTML
+    page_type = detect_page_type(page_url, raw_html)
+
+    locale = detect_locale(page_url)
+    budget = compute_token_budget(locale, raw_html, base_pruned=max_pruned_tokens)
+
+    # Template lookup (read-only — no learning in batch)
+    template: PageTemplate | None = None
+    if template_cache is not None and page_type != "unknown":
+        _template_key = TemplateKey(extract_template_domain(page_url), page_type)
+        template = template_cache.lookup(_template_key)
+
+    pruned_context, pruned_tokens, metadata = await _build_pruned_context_async(
+        raw_html=raw_html,
+        page_type=page_type,
+        site_id=site_id,
+        page_id="batch",
+        schema_name=schema,
+        max_tokens=budget.pruned_context,
+        locale=locale,
+        template=template,
+    )
+    metadata["_total_budget"] = budget.total
+
+    _pruning_warnings = metadata.pop("_pruning_warnings", [])
+    warnings.extend(_pruning_warnings)
+    metadata.pop("_pruning_result", None)
+    _pruned_regions: set[str] = metadata.pop("_pruned_regions", set())
+
+    images = extract_product_images(raw_html, page_url)
+
+    interactables = _budget_filter_interactables(
+        interactables, pruned_tokens, total_budget=budget.total, warnings=warnings
+    )
+
+    navigation_hints = _build_navigation_hints(interactables, raw_html, page_type)
+
+    if _pruned_regions and interactables:
+        affected = sum(1 for el in interactables if el.region in _pruned_regions)
+        if affected:
+            region_list = ", ".join(sorted(_pruned_regions))
+            warnings.append(
+                f"{affected} interactable(s) in pruned regions ({region_list}) — surrounding context unavailable"
+            )
+
+    elapsed_ms = (time.monotonic() - start) * 1000
+
+    page_map = PageMap(
+        url=page_url,
+        title=page_title,
+        page_type=page_type,
+        interactables=interactables,
+        pruned_context=pruned_context,
+        pruned_tokens=pruned_tokens,
+        generation_ms=elapsed_ms,
+        images=images,
+        metadata=metadata,
+        warnings=warnings,
+        navigation_hints=navigation_hints,
+        pruned_regions=_pruned_regions,
+    )
+
+    logger.info(
+        "PageMap (batch): %d interactables, %d pruned tokens, %.0fms",
+        len(interactables),
+        pruned_tokens,
+        elapsed_ms,
+    )
+    return page_map
+
+
 # ── Tier B/C partial rebuild functions ────────────────────────────────
 
 
@@ -432,6 +607,7 @@ async def rebuild_content_only(
     cached: PageMap,
     max_pruned_tokens: int = DEFAULT_PRUNED_CONTEXT_TOKENS,
     template_cache: InMemoryTemplateCache | None = None,
+    timer: PipelineTimer | None = None,
 ) -> PageMap:
     """Tier B: structure identical, text changed.
 
@@ -451,9 +627,13 @@ async def rebuild_content_only(
 
     page_url = await session.get_page_url()
     page_title = await session.get_page_title()
-    page_type = detect_page_type(page_url)
     schema = detect_schema(page_url)
     site_id = _extract_site_id(page_url)
+
+    raw_html = await session.get_page_html()
+
+    # Classify with full HTML
+    page_type = detect_page_type(page_url, raw_html)
 
     # Template lookup
     template: PageTemplate | None = None
@@ -462,11 +642,9 @@ async def rebuild_content_only(
         _template_key = TemplateKey(extract_template_domain(page_url), page_type)
         template = template_cache.lookup(_template_key)
 
-    raw_html = await session.get_page_html()
-
     locale = detect_locale(page_url)
     budget = compute_token_budget(locale, raw_html, base_pruned=max_pruned_tokens)
-    pruned_context, pruned_tokens, metadata = build_pruned_context(
+    pruned_context, pruned_tokens, metadata = await _build_pruned_context_async(
         raw_html=raw_html,
         page_type=page_type,
         site_id=site_id,
@@ -586,7 +764,6 @@ async def rebuild_interactables_only(
 
     page_url = await session.get_page_url()
     page_title = await session.get_page_title()
-    page_type = detect_page_type(page_url)
 
     # Reuse stored total_budget from original build, fallback to URL-only computation
     total_budget = cached.metadata.get("_total_budget")
@@ -604,6 +781,7 @@ async def rebuild_interactables_only(
     )
 
     raw_html = await session.get_page_html()
+    page_type = detect_page_type(page_url, raw_html)
     navigation_hints = _build_navigation_hints(interactables, raw_html, page_type)
 
     # Phase 4.1: Pruned region coherence warning (carry forward from cache)
@@ -823,7 +1001,7 @@ def build_page_map_offline(
     start = time.monotonic()
 
     if page_type is None:
-        page_type = detect_page_type(url)
+        page_type = detect_page_type(url, raw_html)
     if schema_name is None:
         schema_name = detect_schema(url)
 
@@ -948,7 +1126,7 @@ async def build_page_map_from_snapshot(
     site_id = meta.get("site_id", snapshot_dir.parent.name)
     page_id = meta.get("page_id", snapshot_dir.name)
 
-    page_type = detect_page_type(url)
+    page_type = detect_page_type(url, raw_html)
     schema_name = detect_schema(url)
 
     # Load HTML into browser for AX tree
@@ -967,7 +1145,7 @@ async def build_page_map_from_snapshot(
     # Build pruned context with auto-detected locale + CJK budget compensation
     locale = detect_locale(url)
     budget = compute_token_budget(locale, raw_html, base_pruned=max_pruned_tokens)
-    pruned_context, pruned_tokens, structured_meta = build_pruned_context(
+    pruned_context, pruned_tokens, structured_meta = await _build_pruned_context_async(
         raw_html=raw_html,
         page_type=page_type,
         site_id=site_id,
@@ -1065,12 +1243,18 @@ _LOAD_MORE_TERMS_LOWER = tuple(t.lower() for t in LOAD_MORE_TERMS)
 _MAX_FILTER_REFS = 10
 
 
+_SUBMIT_TERMS_LOWER = ("submit", "제출", "送信", "envoyer", "absenden", "pay", "결제", "place order", "주문")
+_CANCEL_TERMS_LOWER = ("cancel", "취소", "キャンセル", "annuler", "abbrechen", "back", "뒤로")
+_HOME_TERMS_LOWER = ("home", "홈", "ホーム", "accueil", "startseite", "go home", "go back")
+_SEARCH_TERMS_LOWER = ("search", "검색", "検索", "rechercher", "suchen")
+
+
 def _build_navigation_hints(
     interactables: list[Interactable],
     raw_html: str,
     page_type: str,
 ) -> dict:
-    """Build navigation hints (pagination + filter refs) for listing/search pages.
+    """Build navigation hints for various page types.
 
     Must be called AFTER budget filtering so refs match final numbering.
 
@@ -1080,17 +1264,36 @@ def _build_navigation_hints(
         page_type: detected page type
 
     Returns:
-        Dict with detected keys only; empty dict for non-listing pages.
+        Dict with detected keys only; empty dict for unsupported page types.
     """
-    if page_type not in ("search_results", "listing"):
-        return {}
+    # Pages that get pagination + filter hints
+    if page_type in ("search_results", "listing"):
+        return _build_listing_hints(interactables, raw_html)
 
+    # Pages that get submit/cancel hints
+    if page_type in ("checkout", "form"):
+        return _build_form_hints(interactables, page_type)
+
+    # Pages that get sidebar nav hints
+    if page_type in ("dashboard", "documentation"):
+        return _build_sidebar_hints(interactables)
+
+    # Pages that get accordion/search hints
+    if page_type == "help_faq":
+        return _build_faq_hints(interactables)
+
+    # Error pages: home link + search
+    if page_type == "error":
+        return _build_error_hints(interactables)
+
+    return {}
+
+
+def _build_listing_hints(interactables: list[Interactable], raw_html: str) -> dict:
+    """Pagination + filter hints for search/listing pages."""
     hints: dict = {}
-
-    # Pagination info from HTML
     pagination = extract_pagination_structured(raw_html)
 
-    # Match interactable names to navigation terms
     for item in interactables:
         name_lower = item.name.lower()
         if any(t in name_lower for t in _NEXT_TERMS_LOWER):
@@ -1112,10 +1315,86 @@ def _build_navigation_hints(
     if pagination:
         hints["pagination"] = pagination
 
-    # Filter refs: complementary-region interactables
     filter_refs = [item.ref for item in interactables if item.region == "complementary"]
     if filter_refs:
         hints["filters"] = {"filter_refs": filter_refs[:_MAX_FILTER_REFS]}
+
+    return hints
+
+
+def _build_form_hints(interactables: list[Interactable], page_type: str) -> dict:
+    """Submit/cancel hints for checkout and form pages."""
+    hints: dict = {}
+
+    for item in interactables:
+        name_lower = item.name.lower()
+        if any(t in name_lower for t in _SUBMIT_TERMS_LOWER):
+            hints["submit_ref"] = item.ref
+            break
+
+    for item in interactables:
+        name_lower = item.name.lower()
+        if any(t in name_lower for t in _CANCEL_TERMS_LOWER):
+            hints["cancel_ref"] = item.ref
+            break
+
+    # Checkout-specific: step indicator
+    if page_type == "checkout":
+        step_refs = [item.ref for item in interactables if "step" in item.name.lower() or "단계" in item.name.lower()]
+        if step_refs:
+            hints["step_refs"] = step_refs[:5]
+
+    return hints
+
+
+def _build_sidebar_hints(interactables: list[Interactable]) -> dict:
+    """Sidebar nav hints for dashboard/documentation pages."""
+    hints: dict = {}
+
+    nav_refs = [item.ref for item in interactables if item.region in ("navigation", "complementary")]
+    if nav_refs:
+        hints["nav_refs"] = nav_refs[:_MAX_FILTER_REFS]
+
+    # Tab refs
+    tab_refs = [item.ref for item in interactables if item.role == "tab"]
+    if tab_refs:
+        hints["tab_refs"] = tab_refs[:_MAX_FILTER_REFS]
+
+    return hints
+
+
+def _build_faq_hints(interactables: list[Interactable]) -> dict:
+    """Accordion/search hints for help/FAQ pages."""
+    hints: dict = {}
+
+    # Search ref
+    for item in interactables:
+        if item.role == "searchbox":
+            hints["search_ref"] = item.ref
+            break
+
+    # Accordion / question refs (buttons that toggle content)
+    question_refs = [item.ref for item in interactables if item.role == "button" and item.region == "main"]
+    if question_refs:
+        hints["question_refs"] = question_refs[:20]
+
+    return hints
+
+
+def _build_error_hints(interactables: list[Interactable]) -> dict:
+    """Home/search hints for error pages."""
+    hints: dict = {}
+
+    for item in interactables:
+        name_lower = item.name.lower()
+        if any(t in name_lower for t in _HOME_TERMS_LOWER):
+            hints["home_ref"] = item.ref
+            break
+
+    for item in interactables:
+        if item.role == "searchbox" or any(t in item.name.lower() for t in _SEARCH_TERMS_LOWER):
+            hints["search_ref"] = item.ref
+            break
 
     return hints
 
@@ -1147,10 +1426,10 @@ def _budget_filter_interactables(
         return interactables
 
     # Reserve tokens: header (~50) + meta (~30) + pruned_context
-    overhead = 80
+    overhead = _OVERHEAD_TOKEN_ESTIMATE
     available = total_budget - pruned_tokens - overhead
-    if available < 100:
-        available = 100
+    if available < _MIN_INTERACTABLE_BUDGET:
+        available = _MIN_INTERACTABLE_BUDGET
 
     # Priority buckets
     INPUT_ROLES = {"searchbox", "textbox", "combobox", "checkbox", "radio", "switch", "slider"}
@@ -1171,17 +1450,26 @@ def _budget_filter_interactables(
         else:
             bucket_rest.append(el)
 
-    # Greedily add from priority buckets
+    # Greedily add from priority buckets (approx token counting)
     selected: list[Interactable] = []
     current_tokens = 0
 
     for bucket in [bucket_input, bucket_high_region, bucket_tier1_main, bucket_rest]:
         for el in bucket:
-            el_tokens = count_tokens(str(el))
+            el_tokens = count_tokens_approx(str(el))
             if current_tokens + el_tokens > available:
                 break
             selected.append(el)
             current_tokens += el_tokens
+
+    # Exact trim: if approx under-counted, cut by ratio (1 tiktoken call)
+    if len(selected) > 1:
+        total_text = "\n".join(str(e) for e in selected)
+        actual_tokens = count_tokens(total_text)
+        if actual_tokens > available:
+            keep_ratio = available / actual_tokens
+            keep_count = max(1, int(len(selected) * keep_ratio * 0.95))
+            selected = selected[:keep_count]
 
     # Re-sort by original ref order and renumber
     selected.sort(key=lambda e: e.ref)

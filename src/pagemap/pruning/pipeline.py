@@ -23,11 +23,11 @@ import logging
 import time
 from dataclasses import dataclass, field
 
-from pagemap.preprocessing.preprocess import count_tokens
+from pagemap.preprocessing.preprocess import count_tokens, count_tokens_approx
 from pagemap.pruning import HtmlChunk, PruningError
 from pagemap.pruning.aom_filter import AomFilterStats, aom_filter
 from pagemap.pruning.compressor import compress_html, remerge_chunks
-from pagemap.pruning.preprocessor import _decompose_element, preprocess_and_chunk
+from pagemap.pruning.preprocessor import _decompose_element, preprocess
 from pagemap.pruning.pruner import prune_chunks
 
 logger = logging.getLogger(__name__)
@@ -76,24 +76,22 @@ def prune_page(
     start = time.monotonic()
 
     try:
-        # Measure raw tokens
-        result.raw_token_count = count_tokens(raw_html)
+        # Measure raw tokens (approx for large HTML — metrics only, not budget-critical)
+        if len(raw_html) > 50_000:
+            result.raw_token_count = count_tokens_approx(raw_html)
+        else:
+            result.raw_token_count = count_tokens(raw_html)
 
-        # Step 1-3: Preprocess + chunk
-        chunks, doc = preprocess_and_chunk(raw_html)
+        # Step 1-3: Preprocess (no chunk decomposition yet)
+        meta_chunks, doc = preprocess(raw_html)
 
         # Step 4: AOM filter (in-place on DOM)
         result.aom_filter_stats = aom_filter(doc, schema_name=schema_name)
 
-        # Re-chunk after AOM filtering (DOM was modified in-place)
+        # Step 5: Chunk decomposition — single pass after AOM filter
         body = doc.body if doc.body is not None else doc
         tree = doc.getroottree()
         dom_chunks = _decompose_element(body, tree)
-
-        # Keep meta chunks from original extraction (they're not in DOM)
-        from pagemap.pruning import ChunkType
-
-        meta_chunks = [c for c in chunks if c.chunk_type in (ChunkType.META, ChunkType.RSC_DATA)]
         all_chunks = meta_chunks + dom_chunks
 
         result.chunk_count_total = len(all_chunks)

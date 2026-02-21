@@ -394,6 +394,67 @@ def cmd_collect(args: argparse.Namespace) -> None:
             sys.exit(1)
 
 
+def cmd_check_urls(args: argparse.Namespace) -> None:
+    """Check health of all URLs in config.yaml."""
+    from .check_urls import check_all_urls, save_report
+
+    output_path = Path(args.output) if args.output else Path("url_health_report.json")
+    report = check_all_urls(site_filter=args.site)
+
+    s = report.summary
+    print(f"\nURL Health Report ({report.checked_at})")
+    print(f"  Total: {s.total}")
+    print(f"  Valid: {s.valid}")
+    print(f"  Expired: {s.expired}")
+    print(f"  Blocked: {s.blocked}")
+    print(f"  Dummy: {s.dummy}")
+    print(f"  Redirect: {s.redirect}")
+
+    save_report(report, output_path)
+    print(f"\nReport saved to {output_path}")
+
+
+def cmd_refresh_urls(args: argparse.Namespace) -> None:
+    """Replace expired/dummy URLs with fresh ones."""
+    from .refresh_urls import refresh_all_urls
+
+    health_report = None
+    if args.health_report:
+        import json as _json
+
+        _json.loads(Path(args.health_report).read_text(encoding="utf-8"))
+        # Load from JSON is not directly supported — pass None to auto-detect
+        health_report = None
+
+    results = refresh_all_urls(
+        health_report=health_report,
+        dry_run=args.dry_run,
+        site_filter=args.site,
+        use_simulator=not args.no_simulator,
+    )
+
+    total_changes = sum(len(r.changes) for r in results)
+    print(f"\nRefresh complete: {total_changes} URLs replaced across {len(results)} sites")
+    for r in results:
+        if r.changes:
+            print(f"  {r.site_id}: {len(r.changes)} changes (from {r.listing_url_used[:60]})")
+        elif r.skipped_reason:
+            print(f"  {r.site_id}: skipped — {r.skipped_reason}")
+
+
+def cmd_refresh_and_collect(args: argparse.Namespace) -> None:
+    """Replace URLs and re-collect snapshots."""
+    from .refresh_urls import refresh_and_collect
+
+    results = refresh_and_collect(site_filter=args.site)
+
+    total_changes = sum(len(r.changes) for r in results)
+    print(f"\nRefresh & collect complete: {total_changes} URLs replaced and re-collected")
+    for r in results:
+        if r.changes:
+            print(f"  {r.site_id}: {len(r.changes)} changes")
+
+
 def cmd_convert(args: argparse.Namespace) -> None:
     """Convert snapshots using competitor tools."""
     from .benchmark.converters import CONVERTERS, convert_all_pages
@@ -468,7 +529,10 @@ def _run_static_benchmark(args: argparse.Namespace, data_dir: Path) -> None:
         load_static_results,
         save_results_json,
     )
-    from .benchmark.runner import ALL_CONDITIONS, BASE_CONDITIONS, load_tasks, run_static_benchmark
+    from .benchmark.runner import (
+        ALL_CONDITIONS, BASE_CONDITIONS, COMPETITOR_CONDITIONS,
+        load_tasks, run_static_benchmark,
+    )
 
     result_path = data_dir / "benchmark_results.json"
     report_path = data_dir / "benchmark_report.md"
@@ -518,15 +582,18 @@ def _run_static_benchmark(args: argparse.Namespace, data_dir: Path) -> None:
             return
 
     # Load PageMap agent prompt files
+    # PageMap .txt files live under the project-root data/ directory,
+    # NOT under src/pagemap/data/ (which holds benchmark results/reports).
     page_maps: dict[str, str] = {}
-    for txt_file in data_dir.rglob("*.txt"):
+    pm_data_dir = Path(__file__).parent.parent.parent / "data"
+    for txt_file in pm_data_dir.rglob("*.txt"):
         site_id = txt_file.parent.name
         page_id = txt_file.stem
         page_maps[f"{site_id}/{page_id}"] = txt_file.read_text(encoding="utf-8")
 
     # Load converted pages for competitor conditions
     converted_pages: dict[str, dict[str, str]] | None = None
-    competitor_conds = set(conditions) & {"firecrawl", "jina_reader", "readability"}
+    competitor_conds = set(conditions) & set(COMPETITOR_CONDITIONS)
     if competitor_conds:
         converted_pages = load_converted_pages()
         loaded_tools = list(converted_pages.keys()) if converted_pages else []
@@ -731,14 +798,35 @@ def main() -> None:
         commands["validate"] = cmd_validate
         commands["collect"] = cmd_collect
 
+        p_check_urls = subparsers.add_parser("check-urls", help="Check health of all URLs in config")
+        p_check_urls.add_argument("--site", type=str, help="Only check this site")
+        p_check_urls.add_argument("--output", type=str, help="Output JSON path (default: url_health_report.json)")
+
+        p_refresh_urls = subparsers.add_parser("refresh-urls", help="Replace expired/dummy URLs")
+        p_refresh_urls.add_argument("--site", type=str, help="Only refresh this site")
+        p_refresh_urls.add_argument("--dry-run", action="store_true", help="Preview changes without modifying config")
+        p_refresh_urls.add_argument("--health-report", type=str, help="Path to health report JSON")
+        p_refresh_urls.add_argument("--no-simulator", action="store_true", help="Skip simulator, use snapshot fallback")
+
+        p_refresh_collect = subparsers.add_parser("refresh-and-collect", help="Replace URLs and re-collect snapshots")
+        p_refresh_collect.add_argument("--site", type=str, help="Only refresh this site")
+        p_refresh_collect.add_argument("--health-report", type=str, help="Path to health report JSON")
+
+        commands["check-urls"] = cmd_check_urls
+        commands["refresh-urls"] = cmd_refresh_urls
+        commands["refresh-and-collect"] = cmd_refresh_and_collect
+
     # Development-only: benchmark tools
     if _has_benchmark():
+        from .benchmark.converters import CONVERTERS
+        from .benchmark.runner import ALL_CONDITIONS
+
         p_convert = subparsers.add_parser("convert", help="Convert snapshots with competitor tools")
         p_convert.add_argument(
             "--tool",
             type=str,
             default="all",
-            choices=["firecrawl", "jina_reader", "readability", "all"],
+            choices=list(CONVERTERS.keys()) + ["all"],
             help="Converter tool to use (default: all)",
         )
         p_convert.add_argument("--snapshot-dir", type=str, help="Path to snapshot directory")
@@ -764,7 +852,7 @@ def main() -> None:
             type=str,
             default=None,
             help="Conditions to run: comma-separated list or 'all'. "
-            "Options: full_playwright, page_map, truncated_pw, firecrawl, jina_reader, readability",
+            f"Options: {', '.join(ALL_CONDITIONS)}",
         )
 
         commands["convert"] = cmd_convert

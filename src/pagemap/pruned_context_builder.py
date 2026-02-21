@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urljoin
 
@@ -840,18 +842,45 @@ def _build_card_output(
     return result
 
 
+def _calibrate_chars_per_token(lines: list[str], min_len: int, max_line_len: int) -> float:
+    """Calibrate chars/token ratio from a sample of lines.
+
+    One tiktoken call on a joined sample. Used to convert token budget
+    to char budget for O(1)-per-line accumulation loops.
+    """
+    sample_parts = []
+    for line in lines:
+        if len(line) < min_len:
+            continue
+        sample_parts.append(line[:max_line_len])
+        if len(sample_parts) >= 20:
+            break
+    if not sample_parts:
+        return 4.0  # English default
+    sample = "\n".join(sample_parts)
+    tok = count_tokens(sample)
+    if tok == 0:
+        return 4.0
+    return max(len(sample) / tok, 1.5)  # floor 1.5: safe for extreme CJK
+
+
 def _compress_default(pruned_html: str, max_tokens: int) -> str:
     """Default compression: headings + significant text blocks."""
     lines = _extract_text_lines(pruned_html)
+    cpt = _calibrate_chars_per_token(lines, min_len=5, max_line_len=300)
+    char_budget = int(max_tokens * cpt * 0.95)
 
-    parts = []
+    parts: list[str] = []
+    running_chars = 0
     for line in lines:
         if len(line) < 5:
             continue
-        parts.append(line[:300])
-        if count_tokens("\n".join(parts)) > max_tokens:
-            parts.pop()
+        text = line[:300]
+        cost = len(text) + 1
+        if running_chars + cost > char_budget:
             break
+        parts.append(text)
+        running_chars += cost
 
     result = "\n".join(parts)
     if count_tokens(result) > max_tokens:
@@ -872,6 +901,520 @@ def _truncate_to_tokens(text: str, max_tokens: int) -> str:
 
 
 _NO_TEMPLATE = object()  # sentinel: distinguishes "not passed" from "passed as None"
+
+
+# ---------------------------------------------------------------------------
+# Dispatch table for page-type-specific compression
+# ---------------------------------------------------------------------------
+
+
+@dataclass(slots=True)
+class CompressorContext:
+    """Bundled arguments for page-type-specific compression."""
+
+    pruned_html: str
+    max_tokens: int
+    chunks: list[HtmlChunk] | None = None
+    metadata: dict | None = None
+    lc: LocaleConfig | None = None
+    card_strategy_hint: str | None = None
+
+
+def _compress_product_dispatch(ctx: CompressorContext) -> str:
+    return _compress_for_product(ctx.pruned_html, ctx.max_tokens, metadata=ctx.metadata, lc=ctx.lc)
+
+
+def _compress_search_dispatch(ctx: CompressorContext) -> str:
+    return _compress_for_search_results(
+        ctx.pruned_html,
+        ctx.max_tokens,
+        chunks=ctx.chunks,
+        metadata=ctx.metadata,
+        lc=ctx.lc,
+        card_strategy_hint=ctx.card_strategy_hint,
+    )
+
+
+def _compress_listing_dispatch(ctx: CompressorContext) -> str:
+    return _compress_for_listing(
+        ctx.pruned_html,
+        ctx.max_tokens,
+        chunks=ctx.chunks,
+        metadata=ctx.metadata,
+        lc=ctx.lc,
+        card_strategy_hint=ctx.card_strategy_hint,
+    )
+
+
+def _compress_article_dispatch(ctx: CompressorContext) -> str:
+    return _compress_for_article(ctx.pruned_html, ctx.max_tokens, lc=ctx.lc)
+
+
+def _compress_default_dispatch(ctx: CompressorContext) -> str:
+    return _compress_default(ctx.pruned_html, ctx.max_tokens)
+
+
+# ---------------------------------------------------------------------------
+# P7.1: New page-type compressors
+# ---------------------------------------------------------------------------
+
+
+def _compress_for_login(pruned_html: str, max_tokens: int) -> str:
+    """Login page: form fields, social login buttons, error messages, forgot password."""
+    lines = _extract_text_lines(pruned_html)
+
+    parts: list[str] = []
+
+    # Error/validation messages (priority — no budget check)
+    for line in lines:
+        ll = line.lower()
+        if any(kw in ll for kw in ("error", "invalid", "incorrect", "실패", "오류", "잘못", "エラー")):
+            parts.append(f"[error] {line[:200]}")
+
+    # Calibrate + account for existing parts
+    cpt = _calibrate_chars_per_token(lines, min_len=5, max_line_len=200)
+    char_budget = int(max_tokens * cpt * 0.95)
+    running_chars = sum(len(p) + 1 for p in parts)
+
+    # Form field labels + social login
+    for line in lines:
+        ll = line.lower()
+        if any(
+            kw in ll
+            for kw in (
+                "email",
+                "password",
+                "username",
+                "이메일",
+                "비밀번호",
+                "아이디",
+                "remember",
+                "forgot",
+                "비밀번호 찾기",
+                "소셜",
+                "social",
+                "google",
+                "facebook",
+                "apple",
+                "kakao",
+                "naver",
+            )
+        ):
+            text = line[:200]
+            cost = len(text) + 1
+            if running_chars + cost > char_budget:
+                break
+            parts.append(text)
+            running_chars += cost
+
+    if not parts:
+        return _compress_default(pruned_html, max_tokens)
+
+    result = "\n".join(parts)
+    if count_tokens(result) > max_tokens:
+        result = _truncate_to_tokens(result, max_tokens)
+    return result
+
+
+def _compress_for_checkout(pruned_html: str, max_tokens: int) -> str:
+    """Checkout: cart items + total, current step, payment methods, shipping."""
+    lines = _extract_text_lines(pruned_html)
+    cpt = _calibrate_chars_per_token(lines, min_len=1, max_line_len=300)
+    char_budget = int(max_tokens * cpt * 0.95)
+
+    parts: list[str] = []
+    running_chars = 0
+
+    for line in lines:
+        ll = line.lower()
+        # Prioritize: totals, items, step info, payment, shipping
+        if any(
+            kw in ll
+            for kw in (
+                "total",
+                "합계",
+                "소계",
+                "subtotal",
+                "合計",
+                "step",
+                "단계",
+                "ステップ",
+                "payment",
+                "결제",
+                "お支払い",
+                "card",
+                "카드",
+                "shipping",
+                "배송",
+                "配送",
+                "address",
+                "주소",
+                "order",
+                "주문",
+                "注文",
+            )
+        ):
+            text = line[:300]
+            cost = len(text) + 1
+            if running_chars + cost > char_budget:
+                break
+            parts.append(text)
+            running_chars += cost
+
+    if not parts:
+        return _compress_default(pruned_html, max_tokens)
+
+    result = "\n".join(parts)
+    if count_tokens(result) > max_tokens:
+        result = _truncate_to_tokens(result, max_tokens)
+    return result
+
+
+def _compress_for_form(pruned_html: str, max_tokens: int) -> str:
+    """Form page: label+input pairs, required markers, validation errors, submit."""
+    lines = _extract_text_lines(pruned_html)
+
+    parts: list[str] = []
+
+    # Errors first (no budget check)
+    for line in lines:
+        ll = line.lower()
+        if any(kw in ll for kw in ("error", "invalid", "required", "필수", "오류", "必須", "エラー")):
+            parts.append(f"[validation] {line[:200]}")
+
+    # Calibrate + account for existing parts
+    cpt = _calibrate_chars_per_token(lines, min_len=5, max_line_len=200)
+    char_budget = int(max_tokens * cpt * 0.95)
+    running_chars = sum(len(p) + 1 for p in parts)
+
+    # Labels and field-related text
+    for line in lines:
+        ll = line.lower()
+        if any(
+            kw in ll
+            for kw in (
+                "name",
+                "email",
+                "phone",
+                "이름",
+                "이메일",
+                "전화",
+                "연락처",
+                "message",
+                "메시지",
+                "comment",
+                "submit",
+                "제출",
+                "등록",
+                "label",
+                "field",
+                "select",
+                "choose",
+                "선택",
+            )
+        ):
+            text = line[:200]
+            cost = len(text) + 1
+            if running_chars + cost > char_budget:
+                break
+            parts.append(text)
+            running_chars += cost
+
+    if not parts:
+        return _compress_default(pruned_html, max_tokens)
+
+    result = "\n".join(parts)
+    if count_tokens(result) > max_tokens:
+        result = _truncate_to_tokens(result, max_tokens)
+    return result
+
+
+def _compress_for_dashboard(pruned_html: str, max_tokens: int) -> str:
+    """Dashboard: key metrics, table summaries (header+row count), navigation."""
+    lines = _extract_text_lines(pruned_html)
+    cpt = _calibrate_chars_per_token(lines, min_len=5, max_line_len=300)
+    char_budget = int(max_tokens * cpt * 0.95)
+
+    parts: list[str] = []
+    running_chars = 0
+
+    # Headings and metrics
+    for line in lines:
+        if len(line) < 5:
+            continue
+        ll = line.lower()
+        # Short metric-like lines or headings
+        if len(line) < 80 or any(
+            kw in ll
+            for kw in (
+                "total",
+                "합계",
+                "count",
+                "average",
+                "revenue",
+                "users",
+                "views",
+                "매출",
+                "건수",
+                "analytics",
+                "metric",
+            )
+        ):
+            text = line[:300]
+            cost = len(text) + 1
+            if running_chars + cost > char_budget:
+                break
+            parts.append(text)
+            running_chars += cost
+
+    if not parts:
+        return _compress_default(pruned_html, max_tokens)
+
+    result = "\n".join(parts)
+    if count_tokens(result) > max_tokens:
+        result = _truncate_to_tokens(result, max_tokens)
+    return result
+
+
+def _compress_for_help_faq(pruned_html: str, max_tokens: int) -> str:
+    """FAQ/Help: Q&A list (numbered), category navigation."""
+    lines = _extract_text_lines(pruned_html)
+    cpt = _calibrate_chars_per_token(lines, min_len=5, max_line_len=200)
+    char_budget = int(max_tokens * cpt * 0.95)
+
+    parts: list[str] = []
+    running_chars = 0
+    q_num = 0
+
+    for line in lines:
+        if len(line) < 5:
+            continue
+        # Question-like lines (short, often end with ?)
+        if "?" in line or "？" in line or len(line) < 120:
+            q_num += 1
+            text = f"Q{q_num}. {line[:200]}"
+            cost = len(text) + 1
+            if running_chars + cost > char_budget:
+                break
+            parts.append(text)
+            running_chars += cost
+
+    if not parts:
+        return _compress_default(pruned_html, max_tokens)
+
+    result = "\n".join(parts)
+    if count_tokens(result) > max_tokens:
+        result = _truncate_to_tokens(result, max_tokens)
+    return result
+
+
+def _compress_for_settings(pruned_html: str, max_tokens: int) -> str:
+    """Settings: section headings, field labels + current values, toggle states."""
+    lines = _extract_text_lines(pruned_html)
+    cpt = _calibrate_chars_per_token(lines, min_len=3, max_line_len=200)
+    char_budget = int(max_tokens * cpt * 0.95)
+
+    parts: list[str] = []
+    running_chars = 0
+
+    for line in lines:
+        if len(line) < 3:
+            continue
+        ll = line.lower()
+        if any(
+            kw in ll
+            for kw in (
+                "setting",
+                "preference",
+                "notification",
+                "설정",
+                "알림",
+                "profile",
+                "프로필",
+                "account",
+                "계정",
+                "privacy",
+                "개인정보",
+                "language",
+                "언어",
+                "theme",
+                "테마",
+                "on",
+                "off",
+                "enable",
+                "disable",
+                "활성",
+                "비활성",
+            )
+        ):
+            text = line[:200]
+            cost = len(text) + 1
+            if running_chars + cost > char_budget:
+                break
+            parts.append(text)
+            running_chars += cost
+
+    if not parts:
+        return _compress_default(pruned_html, max_tokens)
+
+    result = "\n".join(parts)
+    if count_tokens(result) > max_tokens:
+        result = _truncate_to_tokens(result, max_tokens)
+    return result
+
+
+def _compress_for_error(pruned_html: str, max_tokens: int) -> str:
+    """Error page: status code, error message, available actions."""
+    lines = _extract_text_lines(pruned_html)
+    cpt = _calibrate_chars_per_token(lines, min_len=3, max_line_len=200)
+    char_budget = int(max_tokens * cpt * 0.95)
+
+    parts: list[str] = []
+    running_chars = 0
+
+    for line in lines:
+        if len(line) < 3:
+            continue
+        text = line[:200]
+        cost = len(text) + 1
+        if running_chars + cost > char_budget:
+            break
+        parts.append(text)
+        running_chars += cost
+
+    result = "\n".join(parts) if parts else ""
+    if not result:
+        return _compress_default(pruned_html, max_tokens)
+    if count_tokens(result) > max_tokens:
+        result = _truncate_to_tokens(result, max_tokens)
+    return result
+
+
+def _compress_for_documentation(pruned_html: str, max_tokens: int) -> str:
+    """Documentation: heading outline, code blocks (first N lines), API signatures."""
+    lines = _extract_text_lines(pruned_html)
+    cpt = _calibrate_chars_per_token(lines, min_len=3, max_line_len=200)
+    char_budget = int(max_tokens * cpt * 0.95)
+
+    parts: list[str] = []
+    running_chars = 0
+
+    for line in lines:
+        if len(line) < 3:
+            continue
+        # Headings (short lines, likely headings)
+        if len(line) < 80:
+            text = line[:200]
+        # Code-like lines
+        elif any(
+            kw in line for kw in ("def ", "function ", "class ", "import ", "const ", "export ", "->", "=>", "return ")
+        ):
+            text = f"  {line[:200]}"
+        else:
+            continue
+
+        cost = len(text) + 1
+        if running_chars + cost > char_budget:
+            break
+        parts.append(text)
+        running_chars += cost
+
+    if not parts:
+        return _compress_default(pruned_html, max_tokens)
+
+    result = "\n".join(parts)
+    if count_tokens(result) > max_tokens:
+        result = _truncate_to_tokens(result, max_tokens)
+    return result
+
+
+def _compress_for_landing(pruned_html: str, max_tokens: int) -> str:
+    """Landing page: hero text, CTA buttons, major section titles."""
+    lines = _extract_text_lines(pruned_html)
+    cpt = _calibrate_chars_per_token(lines, min_len=5, max_line_len=200)
+    char_budget = int(max_tokens * cpt * 0.95)
+
+    parts: list[str] = []
+    running_chars = 0
+
+    for line in lines:
+        if len(line) < 5:
+            continue
+        # Short lines are likely headings/CTAs; keep them
+        if len(line) < 100:
+            text = line[:200]
+            cost = len(text) + 1
+            if running_chars + cost > char_budget:
+                break
+            parts.append(text)
+            running_chars += cost
+
+    if not parts:
+        return _compress_default(pruned_html, max_tokens)
+
+    result = "\n".join(parts)
+    if count_tokens(result) > max_tokens:
+        result = _truncate_to_tokens(result, max_tokens)
+    return result
+
+
+# Dispatch wrappers for new types
+
+
+def _compress_login_dispatch(ctx: CompressorContext) -> str:
+    return _compress_for_login(ctx.pruned_html, ctx.max_tokens)
+
+
+def _compress_checkout_dispatch(ctx: CompressorContext) -> str:
+    return _compress_for_checkout(ctx.pruned_html, ctx.max_tokens)
+
+
+def _compress_form_dispatch(ctx: CompressorContext) -> str:
+    return _compress_for_form(ctx.pruned_html, ctx.max_tokens)
+
+
+def _compress_dashboard_dispatch(ctx: CompressorContext) -> str:
+    return _compress_for_dashboard(ctx.pruned_html, ctx.max_tokens)
+
+
+def _compress_help_faq_dispatch(ctx: CompressorContext) -> str:
+    return _compress_for_help_faq(ctx.pruned_html, ctx.max_tokens)
+
+
+def _compress_settings_dispatch(ctx: CompressorContext) -> str:
+    return _compress_for_settings(ctx.pruned_html, ctx.max_tokens)
+
+
+def _compress_error_dispatch(ctx: CompressorContext) -> str:
+    return _compress_for_error(ctx.pruned_html, ctx.max_tokens)
+
+
+def _compress_documentation_dispatch(ctx: CompressorContext) -> str:
+    return _compress_for_documentation(ctx.pruned_html, ctx.max_tokens)
+
+
+def _compress_landing_dispatch(ctx: CompressorContext) -> str:
+    return _compress_for_landing(ctx.pruned_html, ctx.max_tokens)
+
+
+_COMPRESSORS: dict[str, Callable[[CompressorContext], str]] = {
+    # Existing 5
+    "product_detail": _compress_product_dispatch,
+    "search_results": _compress_search_dispatch,
+    "listing": _compress_listing_dispatch,
+    "article": _compress_article_dispatch,
+    "news": _compress_article_dispatch,
+    # P7.1 new 9
+    "login": _compress_login_dispatch,
+    "checkout": _compress_checkout_dispatch,
+    "form": _compress_form_dispatch,
+    "dashboard": _compress_dashboard_dispatch,
+    "help_faq": _compress_help_faq_dispatch,
+    "settings": _compress_settings_dispatch,
+    "error": _compress_error_dispatch,
+    "documentation": _compress_documentation_dispatch,
+    "landing": _compress_landing_dispatch,
+}
 
 
 def build_pruned_context(
@@ -916,6 +1459,15 @@ def build_pruned_context(
         _pag_hint = template.data.pagination_param
         if not template.data.has_pagination:
             _pag_hint = "none"
+
+    # Schema refinement: Generic → detect from JSON-LD in raw HTML
+    if schema_name == "Generic":
+        from pagemap.page_map_builder import _detect_schema_from_jsonld
+
+        detected = _detect_schema_from_jsonld(raw_html)
+        if detected is not None:
+            logger.info("Dynamic schema: Generic -> %s", detected)
+            schema_name = detected
 
     # Step 1: Run pruning2 pipeline
     t0 = _time.monotonic()
@@ -973,31 +1525,17 @@ def build_pruned_context(
     if _template_caching_active and result is not None:
         metadata["_pruning_result"] = result
 
-    # Step 3: Apply page-type-specific aggressive compression
-    if page_type == "product_detail":
-        context = _compress_for_product(pruned_html, max_tokens, metadata=metadata, lc=lc)
-    elif page_type == "search_results":
-        context = _compress_for_search_results(
-            pruned_html,
-            max_tokens,
-            chunks=selected_chunks,
-            metadata=metadata,
-            lc=lc,
-            card_strategy_hint=_card_hint,
-        )
-    elif page_type == "listing":
-        context = _compress_for_listing(
-            pruned_html,
-            max_tokens,
-            chunks=selected_chunks,
-            metadata=metadata,
-            lc=lc,
-            card_strategy_hint=_card_hint,
-        )
-    elif page_type in ("article", "news"):
-        context = _compress_for_article(pruned_html, max_tokens, lc=lc)
-    else:
-        context = _compress_default(pruned_html, max_tokens)
+    # Step 3: Apply page-type-specific aggressive compression (dispatch table)
+    ctx = CompressorContext(
+        pruned_html=pruned_html,
+        max_tokens=max_tokens,
+        chunks=selected_chunks,
+        metadata=metadata,
+        lc=lc,
+        card_strategy_hint=_card_hint,
+    )
+    compressor = _COMPRESSORS.get(page_type, _compress_default_dispatch)
+    context = compressor(ctx)
     t3 = _time.monotonic()
 
     # Append pagination info for listing/search pages

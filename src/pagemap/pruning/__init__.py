@@ -25,6 +25,58 @@ class ChunkType(StrEnum):
     RSC_DATA = "rsc_data"  # Next.js RSC payload (Naver)
 
 
+class SchemaName(StrEnum):
+    """Schema classification for pruning heuristics."""
+
+    PRODUCT = "Product"
+    NEWS_ARTICLE = "NewsArticle"
+    WIKI_ARTICLE = "WikiArticle"
+    SAAS_PAGE = "SaaSPage"
+    GOVERNMENT_PAGE = "GovernmentPage"
+    GENERIC = "Generic"
+
+
+class PageType(StrEnum):
+    """Page type classification for compression strategy."""
+
+    PRODUCT_DETAIL = "product_detail"
+    SEARCH_RESULTS = "search_results"
+    ARTICLE = "article"
+    LISTING = "listing"
+    NEWS = "news"
+    # P7.1 new types
+    LOGIN = "login"
+    FORM = "form"
+    CHECKOUT = "checkout"
+    DASHBOARD = "dashboard"
+    HELP_FAQ = "help_faq"
+    SETTINGS = "settings"
+    ERROR = "error"
+    DOCUMENTATION = "documentation"
+    LANDING = "landing"
+    UNKNOWN = "unknown"
+
+
+class PruneReason(StrEnum):
+    """Why a chunk was kept or removed."""
+
+    META_ALWAYS = "meta-always-keep"
+    SCHEMA_MATCH = "schema-match"
+    COUPANG_REC_FILTER = "coupang-recommendation-filter"
+    IN_MAIN_HEADING = "in-main-heading"
+    IN_MAIN_TEXT = "in-main-text"
+    IN_MAIN_HV_SHORT = "in-main-high-value-short"
+    IN_MAIN_STRUCTURED = "in-main-structured"
+    IN_MAIN_FORM = "in-main-form"
+    IN_MAIN_MEDIA = "in-main-media"
+    IN_MAIN_SHORT = "in-main-short"
+    KEEP_HEADING_NO_MAIN = "keep-heading-no-main"
+    KEEP_TEXT_NO_MAIN = "keep-text-no-main"
+    KEEP_FORM_NO_MAIN = "keep-form-no-main"
+    KEEP_MEDIA_NO_MAIN = "keep-media-no-main"
+    NO_MATCH = "no-match"
+
+
 @dataclass(frozen=True, slots=True)
 class HtmlChunk:
     """An atomic HTML chunk extracted from the DOM tree."""

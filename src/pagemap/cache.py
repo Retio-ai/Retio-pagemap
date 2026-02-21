@@ -203,6 +203,32 @@ class PageMapCache:
         )
         return gen_id
 
+    def store_in_lru_only(
+        self,
+        page_map: PageMap,
+        fingerprint: DomFingerprint | None,
+    ) -> str:
+        """Store in URL LRU only. Does NOT update active slot (batch use).
+
+        Returns the generation_id assigned.
+        """
+        gen_id = uuid.uuid4().hex[:8]
+        entry = CacheEntry(
+            page_map=page_map,
+            fingerprint=fingerprint,
+            created_at=time.monotonic(),
+            generation_id=gen_id,
+        )
+        key = normalize_cache_url(page_map.url)
+        self._url_lru[key] = entry
+        self._url_lru.move_to_end(key)
+
+        while len(self._url_lru) > self._max_entries:
+            self._url_lru.popitem(last=False)
+            self._stats.evictions += 1
+
+        return gen_id
+
     # -- Invalidation --
 
     def invalidate(self, reason: InvalidationReason) -> None:

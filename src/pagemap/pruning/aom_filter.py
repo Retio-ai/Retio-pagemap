@@ -20,6 +20,18 @@ import lxml.html
 
 logger = logging.getLogger(__name__)
 
+# ---- AOM weight thresholds ----
+_DEFAULT_THRESHOLD = 0.5  # below this = remove
+_FILTER_SIDEBAR_WEIGHT = 0.7  # aside/complementary with form controls
+_LINK_DENSITY_HIGH = 0.8  # ratio above this = heavy penalty
+_LINK_DENSITY_MODERATE = 0.5  # ratio above this = moderate penalty
+_LINK_DENSITY_HIGH_WEIGHT = 0.2  # weight assigned at high density
+_LINK_DENSITY_MODERATE_WEIGHT = 0.4  # weight assigned at moderate density
+_NOISE_PATTERN_WEIGHT = 0.2  # weight for 2+ noise class/id matches
+_NOISE_COUNT_THRESHOLD = 2  # min noise pattern matches to penalize
+_CONTENT_NOISE_OVERRIDE_WEIGHT = 0.7  # content + noise coexist
+_LINK_DENSITY_MIN_TEXT_LEN = 50  # skip density calc below this
+
 # HTML5 semantic tag → implicit ARIA role → default weight
 _SEMANTIC_WEIGHTS: dict[str, tuple[str, float]] = {
     "main": ("main", 1.0),
@@ -161,7 +173,7 @@ def _compute_weight(
             if role == "contentinfo" and schema_name == "GovernmentPage":
                 return 0.6, "footer-gov-exception"
             if role == "complementary" and _has_interactive_descendants(el):
-                return 0.7, "complementary-filter-sidebar"
+                return _FILTER_SIDEBAR_WEIGHT, "filter-sidebar"
             return 0.0 if role in ("navigation", "banner", "contentinfo") else 0.3, f"role={role}"
         if role in ("main", "article"):
             return 1.0, f"role={role}"
@@ -190,7 +202,7 @@ def _compute_weight(
 
         if tag == "aside":
             if _has_interactive_descendants(el):
-                return 0.7, "aside-filter-sidebar"
+                return _FILTER_SIDEBAR_WEIGHT, "filter-sidebar"
             return default_weight, f"semantic-{tag}"
 
         return default_weight, f"semantic-{tag}"
@@ -211,10 +223,10 @@ def _compute_weight(
     noise_count = _count_noise_matches(el)
     content_count = _count_content_matches(el)
 
-    if noise_count >= 2:
+    if noise_count >= _NOISE_COUNT_THRESHOLD:
         if content_count > 0:
-            return 0.7, f"content-override-noise({content_count}vs{noise_count})"
-        return 0.2, f"noise-pattern({noise_count})"
+            return _CONTENT_NOISE_OVERRIDE_WEIGHT, f"content-override-noise({content_count}vs{noise_count})"
+        return _NOISE_PATTERN_WEIGHT, f"noise-pattern({noise_count})"
 
     if content_count > 0:
         return 1.0, f"content-pattern({content_count})"
@@ -223,14 +235,14 @@ def _compute_weight(
     if tag in _LINK_DENSITY_TAGS:
         total_text = (el.text_content() or "").strip()
         total_len = len(total_text)
-        if total_len > 50:
+        if total_len > _LINK_DENSITY_MIN_TEXT_LEN:
             link_text_len = sum(len((a.text_content() or "").strip()) for a in el.iter("a"))
             if link_text_len > 0:
                 density = link_text_len / total_len
-                if density > 0.8:
-                    return 0.2, f"link-density-high({density:.2f})"
-                if density > 0.5:
-                    return 0.4, f"link-density({density:.2f})"
+                if density > _LINK_DENSITY_HIGH:
+                    return _LINK_DENSITY_HIGH_WEIGHT, f"link-density-high({density:.2f})"
+                if density > _LINK_DENSITY_MODERATE:
+                    return _LINK_DENSITY_MODERATE_WEIGHT, f"link-density({density:.2f})"
 
     # Default: keep
     return 1.0, "default"
@@ -239,7 +251,7 @@ def _compute_weight(
 def aom_filter(
     doc: lxml.html.HtmlElement,
     schema_name: str | None = None,
-    threshold: float = 0.5,
+    threshold: float = _DEFAULT_THRESHOLD,
 ) -> AomFilterStats:
     """Apply AOM-based filtering to DOM tree (in-place).
 

@@ -151,7 +151,7 @@ class TestAsideFilterSidebar:
         el = _parse_el('<div role="complementary"><input type="text" placeholder="Filter" /></div>')
         weight, reason = _compute_weight(el)
         assert weight >= 0.5
-        assert "complementary-filter-sidebar" in reason
+        assert "filter-sidebar" in reason
 
     def test_complementary_role_without_controls_low_weight(self):
         el = _parse_el('<div role="complementary"><a href="/link">Link</a></div>')

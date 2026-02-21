@@ -83,6 +83,8 @@ _CONTAINER_TAGS = {"article", "section", "main", "aside", "nav", "header", "foot
 # RSC payload pattern
 _RSC_PATTERN = re.compile(r"self\.__next_f\.push\(\s*\[.*?\]\s*\)", re.DOTALL)
 
+_RSC_PAYLOAD_TRUNCATE_LEN = 500
+
 _MAX_DECOMPOSE_DEPTH = 100
 
 
@@ -161,7 +163,7 @@ def _extract_rsc_data(html: str) -> list[HtmlChunk]:
             chunks.append(
                 HtmlChunk(
                     xpath=f"/rsc-data[{i}]",
-                    html=f"<script>{content[:500]}</script>",
+                    html=f"<script>{content[:_RSC_PAYLOAD_TRUNCATE_LEN]}</script>",
                     text=text,
                     tag="script",
                     chunk_type=ChunkType.RSC_DATA,
@@ -399,46 +401,28 @@ def _decompose_element(
     return []
 
 
-def preprocess_and_chunk(raw_html: str) -> tuple[list[HtmlChunk], lxml.html.HtmlElement]:
-    """Full preprocessing pipeline: extract specials → clean → parse → chunk.
+def preprocess(raw_html: str) -> tuple[list[HtmlChunk], lxml.html.HtmlElement]:
+    """Preprocess: extract specials → clean → parse. No chunk decomposition.
 
     Returns:
-        (chunks, dom_root) — list of HtmlChunks and the lxml DOM root
+        (meta_chunks, doc) — extracted meta chunks and lxml DOM root.
     """
     if not raw_html or not raw_html.strip():
         raise PruningError("Empty HTML input")
 
-    # Step 1: Extract special content before stripping
-    meta_chunks = []
+    meta_chunks: list[HtmlChunk] = []
     meta_chunks.extend(_extract_json_ld(raw_html))
     meta_chunks.extend(_extract_og_meta(raw_html))
     meta_chunks.extend(_extract_rsc_data(raw_html))
 
-    # Step 2: HTMLRAG Pass 1 cleaning
     cleaned = _clean_html_pass1(raw_html)
     if not cleaned:
         raise PruningError("HTML empty after Pass 1 cleaning")
 
-    # Step 3: Parse with lxml
     try:
         parser = lxml.html.HTMLParser(recover=True, encoding="utf-8")
         doc = lxml.html.document_fromstring(cleaned.encode("utf-8"), parser=parser)
     except Exception as e:
         raise PruningError(f"lxml parsing failed: {e}") from e
 
-    tree = doc.getroottree()
-
-    # Step 4: Atomic chunk decomposition
-    body = doc.body
-    if body is None:
-        body = doc
-
-    dom_chunks = _decompose_element(body, tree)
-
-    # Combine: meta chunks first, then DOM chunks
-    all_chunks = meta_chunks + dom_chunks
-
-    if not all_chunks:
-        logger.warning("No chunks extracted from HTML (%d chars)", len(raw_html))
-
-    return all_chunks, doc
+    return meta_chunks, doc

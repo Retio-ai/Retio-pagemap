@@ -14,7 +14,10 @@ supplemented by CDP DOMDebugger.getEventListeners() for Tier 3.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 
 from playwright.async_api import CDPSession, Page
@@ -23,6 +26,32 @@ from . import Interactable
 from .sanitizer import sanitize_text
 
 logger = logging.getLogger(__name__)
+
+# ── CDP call timeouts (seconds) ──────────────────────────────────────
+_CDP_AX_TREE_TIMEOUT = 15.0  # Accessibility.getFullAXTree
+_CDP_CSS_BUDGET = 10.0  # CSS selector resolution loop (shared budget)
+_CDP_TIER3_TIMEOUT = 10.0  # Runtime.evaluate (Tier 3 batch JS)
+
+
+@asynccontextmanager
+async def _cdp_session(page: Page) -> AsyncGenerator[CDPSession, None]:
+    """Cancellation-safe CDP session lifecycle.
+
+    Ensures cdp.detach() runs even when the parent task is cancelled
+    by an outer asyncio.wait_for() (server.py pipeline timeout).
+
+    Without shield(): cancelled task -> await cdp.detach() raises
+    CancelledError immediately -> detach IPC never executes -> session leaks.
+    With shield(): detach runs as independent Task, decoupled from parent
+    cancellation state.
+    """
+    cdp = await page.context.new_cdp_session(page)
+    try:
+        yield cdp
+    finally:
+        with suppress(Exception, asyncio.CancelledError):
+            await asyncio.shield(cdp.detach())
+
 
 # ── Role → Affordance mapping ──────────────────────────────────────────
 
@@ -464,9 +493,9 @@ async def detect_interactables_ax(
     """
     from .browser_session import _cdp_ax_nodes_to_tree
 
-    cdp = await page.context.new_cdp_session(page)
-    try:
-        result = await cdp.send("Accessibility.getFullAXTree")
+    async with _cdp_session(page) as cdp:
+        async with asyncio.timeout(_CDP_AX_TREE_TIMEOUT):
+            result = await cdp.send("Accessibility.getFullAXTree")
         nodes = result.get("nodes", [])
         snapshot = _cdp_ax_nodes_to_tree(nodes) if nodes else None
 
@@ -481,7 +510,17 @@ async def detect_interactables_ax(
 
         # Resolve CSS selectors while CDP session is still alive
         if backend_id_map:
-            await _resolve_css_selectors(cdp, results, backend_id_map)
+            try:
+                async with asyncio.timeout(_CDP_CSS_BUDGET):
+                    await _resolve_css_selectors(cdp, results, backend_id_map)
+            except TimeoutError:
+                resolved = sum(1 for r in results if r.selector)
+                logger.warning(
+                    "CSS selector resolution timed out after %.0fs (%d/%d resolved)",
+                    _CDP_CSS_BUDGET,
+                    resolved,
+                    len(backend_id_map),
+                )
 
         logger.info(
             "Tier 1-2: %d interactables (%d Tier 1, %d Tier 2, %d with selector)",
@@ -491,8 +530,6 @@ async def detect_interactables_ax(
             sum(1 for r in results if r.selector),
         )
         return results
-    finally:
-        await cdp.detach()
 
 
 def _process_tier3_batch(
@@ -571,34 +608,36 @@ async def detect_interactables_cdp(
     if existing:
         existing_names = {e.name.lower() for e in existing if e.name}
 
-    cdp = await page.context.new_cdp_session(page)
-    try:
-        result = await cdp.send(
-            "Runtime.evaluate",
-            {
-                "expression": _TIER3_BATCH_JS,
-                "returnByValue": True,
-                "includeCommandLineAPI": True,
-            },
-        )
+    async with _cdp_session(page) as cdp:
+        try:
+            async with asyncio.timeout(_CDP_TIER3_TIMEOUT):
+                result = await cdp.send(
+                    "Runtime.evaluate",
+                    {
+                        "expression": _TIER3_BATCH_JS,
+                        "returnByValue": True,
+                        "includeCommandLineAPI": True,
+                    },
+                )
 
-        value = result.get("result", {}).get("value")
-        if not value or not isinstance(value, dict):
-            logger.warning("CDP Tier 3: unexpected result format from Runtime.evaluate")
+            value = result.get("result", {}).get("value")
+            if not value or not isinstance(value, dict):
+                logger.warning("CDP Tier 3: unexpected result format from Runtime.evaluate")
+                return []
+
+            error = value.get("error")
+            if error:
+                logger.warning("CDP Tier 3: JS-side error: %s", error)
+                return []
+
+            raw_elements = value.get("elements", [])
+
+        except TimeoutError:
+            logger.warning("CDP Tier 3 timed out after %.0fs", _CDP_TIER3_TIMEOUT)
             return []
-
-        error = value.get("error")
-        if error:
-            logger.warning("CDP Tier 3: JS-side error: %s", error)
+        except Exception as e:
+            logger.warning("CDP Tier 3 detection failed: %s", e)
             return []
-
-        raw_elements = value.get("elements", [])
-
-    except Exception as e:
-        logger.warning("CDP Tier 3 detection failed: %s", e)
-        return []
-    finally:
-        await cdp.detach()
 
     results = _process_tier3_batch(raw_elements, existing_names, ref_start)
     logger.info("Tier 3: %d additional interactables from CDP", len(results))
@@ -628,10 +667,14 @@ async def detect_all(
         ax_elements = []
         warnings.append(f"AX tree detection failed ({type(e).__name__}): interactive elements may be incomplete")
 
-    # Tier 3 from CDP (already isolated internally)
+    # Tier 3 from CDP (isolated: session creation failure yields empty list + warning)
     cdp_elements = []
     if enable_tier3:
-        cdp_elements = await detect_interactables_cdp(page, existing=ax_elements)
+        try:
+            cdp_elements = await detect_interactables_cdp(page, existing=ax_elements)
+        except Exception as e:
+            logger.warning("CDP Tier 3 detection failed: %s", e)
+            warnings.append(f"Tier 3 detection failed ({type(e).__name__}): some interactive elements may be missing")
 
     # Combine and renumber
     all_elements = ax_elements + cdp_elements
