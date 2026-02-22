@@ -9,7 +9,7 @@ description = "Structured web page representation for AI agents — 97% HTML tok
 requires-python = ">=3.11"
 license = {text = "AGPL-3.0-only"}
 authors = [{name = "Retio AI"}]
-readme = "README_PUBLIC.md"
+readme = "README.md"
 keywords = [
     "web-scraping",
     "ai-agent",
