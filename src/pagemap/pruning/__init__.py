@@ -11,6 +11,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import StrEnum
 
+from pagemap.errors import PageMapError
+
 
 class ChunkType(StrEnum):
     """Atomic chunk classification."""
@@ -92,5 +94,5 @@ class HtmlChunk:
     in_main: bool = False
 
 
-class PruningError(Exception):
+class PruningError(PageMapError):
     """Raised when HTML parsing or pruning fails fatally."""

@@ -251,7 +251,7 @@ def _build_offline(output_dir: Path) -> None:
     from .page_map_builder import build_page_map_offline
     from .serializer import to_agent_prompt, to_json
 
-    snapshots_dir = Path(__file__).parent.parent.parent.parent / "data" / "snapshots"
+    snapshots_dir = Path(__file__).parent.parent.parent / "data" / "snapshots"
 
     # Domain → schema mapping
     domain_schema = {

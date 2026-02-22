@@ -566,6 +566,8 @@ class LocaleConfig:
     label_title: str
     label_rating: str
     label_brand: str
+    label_original_price: str
+    label_discount: str
     label_pagination: str
     label_next_available: str
     label_page_suffix: str
@@ -581,6 +583,8 @@ _LOCALES: dict[str, LocaleConfig] = {
         label_title="제목",
         label_rating="평점",
         label_brand="브랜드",
+        label_original_price="원가",
+        label_discount="할인",
         label_pagination="페이지네이션",
         label_next_available="다음 있음",
         label_page_suffix="페이지",
@@ -594,6 +598,8 @@ _LOCALES: dict[str, LocaleConfig] = {
         label_title="Title",
         label_rating="Rating",
         label_brand="Brand",
+        label_original_price="Original price",
+        label_discount="Discount",
         label_pagination="Pagination",
         label_next_available="Next available",
         label_page_suffix="pages",
@@ -607,6 +613,8 @@ _LOCALES: dict[str, LocaleConfig] = {
         label_title="タイトル",
         label_rating="評価",
         label_brand="ブランド",
+        label_original_price="定価",
+        label_discount="割引",
         label_pagination="ページネーション",
         label_next_available="次あり",
         label_page_suffix="ページ",
@@ -620,6 +628,8 @@ _LOCALES: dict[str, LocaleConfig] = {
         label_title="Titre",
         label_rating="Note",
         label_brand="Marque",
+        label_original_price="Prix d'origine",
+        label_discount="Remise",
         label_pagination="Pagination",
         label_next_available="Suivant disponible",
         label_page_suffix="pages",
@@ -633,6 +643,8 @@ _LOCALES: dict[str, LocaleConfig] = {
         label_title="Titel",
         label_rating="Bewertung",
         label_brand="Marke",
+        label_original_price="Originalpreis",
+        label_discount="Rabatt",
         label_pagination="Seitennavigation",
         label_next_available="Weiter verfügbar",
         label_page_suffix="Seiten",

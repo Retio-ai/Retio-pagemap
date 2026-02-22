@@ -230,6 +230,39 @@ class TestSafeError:
         msg = _safe_error("test", exc)
         assert "mysupersecretvalue" not in msg
 
+    def test_preserves_url_path(self):
+        exc = Exception("Page timed out: https://www.musinsa.com/products/4960603")
+        msg = _safe_error("test", exc)
+        assert "/products/4960603" in msg
+
+    def test_preserves_url_path_with_query(self):
+        exc = Exception("Failed: https://example.com/api/v1/search?q=test")
+        msg = _safe_error("test", exc)
+        assert "/api/v1/search" in msg
+
+    def test_preserves_wiki_path(self):
+        exc = Exception("Error at https://en.wikipedia.org/wiki/Python")
+        msg = _safe_error("test", exc)
+        assert "/wiki/Python" in msg
+
+    def test_strips_tmp_path(self):
+        exc = Exception("Error reading /tmp/pagemap_cache/session.json")
+        msg = _safe_error("test", exc)
+        assert "/tmp/pagemap_cache" not in msg
+        assert "<path>" in msg
+
+    def test_strips_var_path(self):
+        exc = Exception("Log at /var/log/pagemap/error.log")
+        msg = _safe_error("test", exc)
+        assert "/var/log" not in msg
+        assert "<path>" in msg
+
+    def test_strips_windows_path(self):
+        exc = Exception(r"File C:\Users\admin\secrets\key.pem not found")
+        msg = _safe_error("test", exc)
+        assert "admin" not in msg
+        assert "<path>" in msg
+
 
 # ── IP Normalization ────────────────────────────────────────────────
 

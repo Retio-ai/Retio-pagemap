@@ -27,9 +27,5 @@ class SanitizationError(PageMapError):
     """Content sanitization failure (should not reach users)."""
 
 
-class PruningError(PageMapError):
-    """HTML pruning pipeline failure."""
-
-
 class PageMapBuildError(PageMapError):
     """PageMap construction failed (orchestrator-level)."""

@@ -361,19 +361,16 @@ class TestCoupangPriceFilter:
             assert decision.keep is True
 
     def test_recommendation_prices_different_container_filtered(self):
-        """Prices in different top-level divs → filtered after 3rd."""
-        chunks = [
-            self._make_price_chunk("/html/body/div[1]/span[1]"),
-            self._make_price_chunk("/html/body/div[1]/span[2]"),
-            self._make_price_chunk("/html/body/div[1]/span[3]"),
-            # These are in a different container
-            self._make_price_chunk("/html/body/div[5]/span[1]"),
-            self._make_price_chunk("/html/body/div[5]/span[2]"),
-        ]
+        """Prices in different top-level divs → filtered after 10th (raised from 3)."""
+        # Build 11 price chunks in main container, then extras in different container
+        chunks = [self._make_price_chunk(f"/html/body/div[1]/span[{i}]") for i in range(1, 12)]
+        # These are in a different container — should be filtered after limit
+        chunks.append(self._make_price_chunk("/html/body/div[5]/span[1]"))
+        chunks.append(self._make_price_chunk("/html/body/div[5]/span[2]"))
         results = prune_chunks(chunks, schema_name="Product", has_main=False)
         kept = [i for i, (_, d) in enumerate(results) if d.keep]
         filtered = [i for i, (_, d) in enumerate(results) if not d.keep]
-        assert len(kept) >= 3  # first 3 kept
+        assert len(kept) >= 10  # first 10 kept
         assert len(filtered) >= 1  # at least some filtered
 
     def test_old_new_price_pair_kept(self):

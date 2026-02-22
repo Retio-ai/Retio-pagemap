@@ -257,11 +257,13 @@ def _compute_depth(el: lxml.html.HtmlElement) -> int:
 
 
 def _is_in_main(el: lxml.html.HtmlElement) -> bool:
-    """Check if element is inside a <main> tag."""
+    """Check if element is inside a <main> tag or role='main' container."""
     parent = el.getparent()
     while parent is not None:
         tag = parent.tag.lower() if isinstance(parent.tag, str) else ""
         if tag == "main":
+            return True
+        if isinstance(parent.tag, str) and parent.get("role", "").lower() == "main":
             return True
         parent = parent.getparent()
     return False

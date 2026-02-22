@@ -229,8 +229,14 @@ _GOV_TLD_RE = re.compile(r"\.go(?:v)?(?:\.[a-z]{2})?(?:/|$)", re.IGNORECASE)
 
 def detect_schema(url: str) -> str:
     """Domain fast path + URL signal → Generic fallback."""
+    from urllib.parse import urlparse
+
+    try:
+        hostname = urlparse(url).hostname or ""
+    except Exception:
+        hostname = ""
     for domain, schema in DOMAIN_SCHEMA_MAP.items():
-        if domain in url:
+        if hostname == domain or hostname.endswith("." + domain):
             return schema
     if _GOV_TLD_RE.search(url):
         return "GovernmentPage"

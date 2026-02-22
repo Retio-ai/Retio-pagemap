@@ -18,6 +18,21 @@ logger = logging.getLogger(__name__)
 
 _EMPTY_TAG_REMOVAL_PASSES = 5
 
+# Pre-compiled patterns for compress_html() (Phase 6.3a)
+_EMPTY_TAG_RE = re.compile(
+    r"<(div|span|p|section|article|aside|figure|figcaption|details|summary|"
+    r"b|i|em|strong|small|sup|sub|a|abbr|cite|code|mark|u|s)\b[^>]*>\s*</\1>",
+    re.IGNORECASE,
+)
+_WRAPPER_DIV_RE = re.compile(
+    r"<div\b[^>]*>\s*(<(?:p|h[1-6]|ul|ol|table|article|section|figure)\b[^>]*>.*?</(?:p|h[1-6]|ul|ol|table|article|section|figure)>)\s*</div>",
+    re.DOTALL | re.IGNORECASE,
+)
+_SPAN_WRAPPER_RE = re.compile(r"<span\s*>(.*?)</span>", re.DOTALL)
+_HORIZ_SPACE_RE = re.compile(r"[ \t]+")
+_BLANK_LINES_RE = re.compile(r"\n\s*\n+")
+_TAG_GAP_RE = re.compile(r">\s+<")
+
 # ---------------------------------------------------------------------------
 # XPath document-order sort key
 # ---------------------------------------------------------------------------
@@ -129,30 +144,19 @@ def compress_html(html: str) -> str:
     # Iteratively remove empty tags (innermost first)
     for _ in range(_EMPTY_TAG_REMOVAL_PASSES):  # more passes for deeply nested empties
         prev = result
-        result = re.sub(
-            r"<(div|span|p|section|article|aside|figure|figcaption|details|summary|"
-            r"b|i|em|strong|small|sup|sub|a|abbr|cite|code|mark|u|s)\b[^>]*>\s*</\1>",
-            "",
-            result,
-            flags=re.IGNORECASE,
-        )
+        result = _EMPTY_TAG_RE.sub("", result)
         if result == prev:
             break
 
     # Collapse single-child wrapper divs: <div><p>text</p></div> → <p>text</p>
-    result = re.sub(
-        r"<div\b[^>]*>\s*(<(?:p|h[1-6]|ul|ol|table|article|section|figure)\b[^>]*>.*?</(?:p|h[1-6]|ul|ol|table|article|section|figure)>)\s*</div>",
-        r"\1",
-        result,
-        flags=re.DOTALL | re.IGNORECASE,
-    )
+    result = _WRAPPER_DIV_RE.sub(r"\1", result)
 
     # Remove redundant span wrappers: <span>text</span> → text (when no attributes)
-    result = re.sub(r"<span\s*>(.*?)</span>", r"\1", result, flags=re.DOTALL)
+    result = _SPAN_WRAPPER_RE.sub(r"\1", result)
 
     # Normalize whitespace
-    result = re.sub(r"[ \t]+", " ", result)
-    result = re.sub(r"\n\s*\n+", "\n", result)
-    result = re.sub(r">\s+<", ">\n<", result)
+    result = _HORIZ_SPACE_RE.sub(" ", result)
+    result = _BLANK_LINES_RE.sub("\n", result)
+    result = _TAG_GAP_RE.sub(">\n<", result)
 
     return result.strip()

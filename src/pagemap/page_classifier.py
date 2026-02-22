@@ -161,6 +161,11 @@ _URL_SIGNALS: list[SignalDef] = [
     # ---- article ----
     SignalDef("url_article", {"article": 25, "news": 5}, check_url=lambda u: "/article/" in u or "/articles/" in u),
     SignalDef("url_wiki", {"article": 30}, check_url=lambda u: "/wiki/" in u),
+    SignalDef(
+        "url_wikipedia_domain",
+        {"article": 15, "dashboard": -15},
+        check_url=lambda u: "wikipedia.org" in u,
+    ),
     SignalDef("url_blog", {"article": 25}, check_url=lambda u: "/blog/" in u),
     SignalDef("url_post", {"article": 20}, check_url=lambda u: "/post/" in u),
     # ---- news ----
@@ -355,6 +360,12 @@ _DOM_SIGNALS: list[SignalDef] = [
         {"documentation": 15},
         check_dom=lambda h: "version" in h and ("<select" in h or "dropdown" in h),
     ),
+    # ---- article (MediaWiki sites) ----
+    SignalDef(
+        "dom_mw_content",
+        {"article": 25, "dashboard": -20},
+        check_dom=lambda h: "mw-content-text" in h or "mw-parser-output" in h,
+    ),
     # ---- landing ----
     SignalDef(
         "dom_hero_cta",
@@ -496,8 +507,8 @@ def classify_page(url: str, raw_html: str | None = None) -> ClassificationResult
     threshold = THRESHOLDS.get(winner_type, _DEFAULT_THRESHOLD)
     if winner_score < threshold:
         # Below threshold — return unknown
-        runner_up = sorted_types[0][0] if sorted_types else None
-        runner_up_score = sorted_types[0][1] if sorted_types else 0
+        runner_up = sorted_types[1][0] if len(sorted_types) > 1 else None
+        runner_up_score = sorted_types[1][1] if len(sorted_types) > 1 else 0
         return ClassificationResult(
             page_type="unknown",
             confidence=min(1.0, winner_score / (threshold * 2)) if threshold else 0.0,

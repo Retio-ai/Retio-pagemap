@@ -32,7 +32,7 @@ class DomFingerprint:
     has_dialog: bool
     body_child_count: int
     title: str
-    content_hash: int = 0  # hash of visible text first 2KB
+    content_hash: int | None = None  # hash of visible text first 2KB
 
 
 @dataclass
@@ -102,7 +102,7 @@ async def capture_dom_fingerprint(page: Page) -> DomFingerprint | None:
         has_dialog=bool(raw.get("hasDialog", False)),
         body_child_count=raw.get("bodyChildCount", 0),
         title=raw.get("title", ""),
-        content_hash=raw.get("contentHash", 0),
+        content_hash=raw.get("contentHash"),
     )
 
 
@@ -161,7 +161,7 @@ def detect_dom_changes(
         return DomChangeVerdict(changed=True, reasons=minor_reasons, severity="minor")
 
     # --- Content-only change (structure identical, text changed) ---
-    if before.content_hash != after.content_hash and before.content_hash != 0:
+    if before.content_hash is not None and before.content_hash != after.content_hash:
         return DomChangeVerdict(
             changed=True,
             reasons=["visible text changed"],

@@ -70,7 +70,17 @@ _CONTENT_PATTERNS = [
     re.compile(r"\bentry\b", re.IGNORECASE),
     re.compile(r"\bpost\b", re.IGNORECASE),
     re.compile(r"\bstory\b", re.IGNORECASE),
+    re.compile(r"\bproduct\b", re.IGNORECASE),
+    re.compile(r"\bitem\b", re.IGNORECASE),
+    re.compile(r"\bgoods\b", re.IGNORECASE),
 ]
+
+# Pre-compiled patterns for inline style checks (Phase 6.3b)
+_DISPLAY_NONE_RE = re.compile(r"display\s*:\s*none", re.IGNORECASE)
+_VISIBILITY_HIDDEN_RE = re.compile(r"visibility\s*:\s*hidden", re.IGNORECASE)
+
+# Price pattern for Product schema noise override (Phase 3.3)
+_PRICE_IN_NOISE_RE = re.compile(r"(?:₩|원|\$|€|£|¥)\s*[\d,]+|\d{2,3}(?:,\d{3})+", re.IGNORECASE)
 
 
 @dataclass
@@ -214,9 +224,9 @@ def _compute_weight(
     # 4. Inline style checks
     style = el.get("style", "")
     if style:
-        if re.search(r"display\s*:\s*none", style, re.IGNORECASE):
+        if _DISPLAY_NONE_RE.search(style):
             return 0.0, "display-none"
-        if re.search(r"visibility\s*:\s*hidden", style, re.IGNORECASE):
+        if _VISIBILITY_HIDDEN_RE.search(style):
             return 0.0, "visibility-hidden"
 
     # 5. Class/ID noise patterns + content patterns
@@ -226,6 +236,11 @@ def _compute_weight(
     if noise_count >= _NOISE_COUNT_THRESHOLD:
         if content_count > 0:
             return _CONTENT_NOISE_OVERRIDE_WEIGHT, f"content-override-noise({content_count}vs{noise_count})"
+        # Product schema: preserve noise-matched elements that contain price data
+        if schema_name == "Product":
+            text_content = (el.text_content() or "").strip()
+            if text_content and _PRICE_IN_NOISE_RE.search(text_content):
+                return _CONTENT_NOISE_OVERRIDE_WEIGHT, f"product-price-in-noise({noise_count})"
         return _NOISE_PATTERN_WEIGHT, f"noise-pattern({noise_count})"
 
     if content_count > 0:
@@ -288,13 +303,11 @@ def aom_filter(
         except ValueError:
             continue
 
-        # Check if any ancestor was already removed
-        already_removed = False
-        for removed_xpath in stats.removed_xpaths:
-            if xpath.startswith(removed_xpath + "/"):
-                already_removed = True
-                break
-        if already_removed:
+        # O(depth) ancestor prefix check via set lookup,
+        # replacing O(removed_count) linear scan.
+        # range(4,...): /html(2), /html/body(3) never removed (line 272 guard).
+        parts = xpath.split("/")
+        if any("/".join(parts[:i]) in stats.removed_xpaths for i in range(4, len(parts))):
             continue
 
         parent.remove(el)

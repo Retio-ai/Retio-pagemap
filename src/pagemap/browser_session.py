@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
 from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
@@ -161,6 +162,52 @@ def _is_browser_dead_error(exc: Exception) -> bool:
     return any(p in msg for p in _BROWSER_DEAD_PATTERNS)
 
 
+# ── Chromium auto-install ─────────────────────────────────────────
+
+_chromium_install_attempted = False
+_AUTO_INSTALL_TIMEOUT = 300  # seconds — Chromium ~140MB download
+
+
+async def _auto_install_chromium() -> bool:
+    """Run ``playwright install chromium`` once per process.
+
+    Returns True if install succeeded, False otherwise.
+    stdout/stderr are captured to avoid polluting the MCP STDIO stream.
+    """
+    global _chromium_install_attempted  # noqa: PLW0603
+    if _chromium_install_attempted:
+        return False
+    _chromium_install_attempted = True
+
+    logger.info("Chromium not found — running 'playwright install chromium' …")
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-m",
+            "playwright",
+            "install",
+            "chromium",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=_AUTO_INSTALL_TIMEOUT)
+        if proc.returncode == 0:
+            logger.info("Chromium installed successfully")
+            return True
+        logger.warning(
+            "playwright install chromium failed (rc=%d): %s",
+            proc.returncode,
+            stderr.decode(errors="replace")[:500],
+        )
+        return False
+    except TimeoutError:
+        logger.warning("Chromium install timed out after %ds", _AUTO_INSTALL_TIMEOUT)
+        return False
+    except Exception:
+        logger.warning("Chromium auto-install failed", exc_info=True)
+        return False
+
+
 class BrowserSession:
     """Manages a Playwright browser session with CDP access."""
 
@@ -201,42 +248,65 @@ class BrowserSession:
         except Exception:
             return False
 
+    def _chromium_launch_args(self) -> list[str]:
+        """Return hardened Chromium launch arguments."""
+        return [
+            "--disable-blink-features=AutomationControlled",
+            f"--lang={self.config.locale}",
+            # Core isolation
+            "--disable-extensions",
+            "--disable-plugins",
+            "--disable-dev-shm-usage",
+            "--disable-background-networking",
+            "--disable-sync",
+            "--disable-gpu",
+            "--no-first-run",
+            # Popups handled by context.on("page") → auto-switch
+            # S3: WebRTC IP leak prevention
+            "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+            # S3: Disable dangerous features (single flag — last wins)
+            "--disable-features=ServiceWorker,WebRtcHideLocalIpsWithMdns",
+            # S3: Auto-deny permission prompts (camera, geo, mic, etc.)
+            "--deny-permission-prompts",
+            # S3: Suppress crash/telemetry outbound calls
+            "--disable-breakpad",
+            "--no-pings",
+            "--disable-domain-reliability",
+            "--disable-component-update",
+            "--disable-client-side-phishing-detection",
+            # S3: Block external app/intent deep links
+            "--disable-external-intent-requests",
+            # S3: No error/repost dialogs in headless
+            "--noerrdialogs",
+            "--disable-prompt-on-repost",
+        ]
+
+    async def _launch_browser(self) -> None:
+        """Launch Chromium, auto-installing on first 'executable not found' error."""
+        args = self._chromium_launch_args()
+        try:
+            self._browser = await self._playwright.chromium.launch(
+                headless=self.config.headless,
+                args=args,
+            )
+        except Exception as exc:
+            if "executable doesn't exist" in str(exc).lower():
+                if await _auto_install_chromium():
+                    self._browser = await self._playwright.chromium.launch(
+                        headless=self.config.headless,
+                        args=args,
+                    )
+                else:
+                    raise RuntimeError(
+                        "Chromium is not installed and auto-install failed. Please run: playwright install chromium"
+                    ) from exc
+            else:
+                raise
+
     async def start(self) -> None:
         """Launch browser and create initial page."""
         self._playwright = await async_playwright().start()
-        self._browser = await self._playwright.chromium.launch(
-            headless=self.config.headless,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                f"--lang={self.config.locale}",
-                # Core isolation
-                "--disable-extensions",
-                "--disable-plugins",
-                "--disable-dev-shm-usage",
-                "--disable-background-networking",
-                "--disable-sync",
-                "--disable-gpu",
-                "--no-first-run",
-                # Popups handled by context.on("page") → auto-switch
-                # S3: WebRTC IP leak prevention
-                "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
-                # S3: Disable dangerous features (single flag — last wins)
-                "--disable-features=ServiceWorker,WebRtcHideLocalIpsWithMdns",
-                # S3: Auto-deny permission prompts (camera, geo, mic, etc.)
-                "--deny-permission-prompts",
-                # S3: Suppress crash/telemetry outbound calls
-                "--disable-breakpad",
-                "--no-pings",
-                "--disable-domain-reliability",
-                "--disable-component-update",
-                "--disable-client-side-phishing-detection",
-                # S3: Block external app/intent deep links
-                "--disable-external-intent-requests",
-                # S3: No error/repost dialogs in headless
-                "--noerrdialogs",
-                "--disable-prompt-on-repost",
-            ],
-        )
+        await self._launch_browser()
         self._context = await self._browser.new_context(
             viewport={
                 "width": self.config.viewport_width,

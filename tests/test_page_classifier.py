@@ -411,3 +411,74 @@ class TestJSONLDSignals:
         html = f"""<html><head><script type="application/ld+json">{{"@type": "NewsArticle", "headline": "Breaking"}}</script></head><body><article><p>{body_text}</p></article></body></html>"""
         result = classify_page(url, raw_html=html)
         assert result.page_type == "news"
+
+
+# ---------------------------------------------------------------------------
+# C4 regression: Wikipedia page type (article, not dashboard)
+# ---------------------------------------------------------------------------
+
+
+class TestWikipediaClassification:
+    """C4: Wikipedia pages must be classified as 'article', not 'dashboard'."""
+
+    def test_wikipedia_url_only(self):
+        """Wikipedia URL-only → article (high confidence, short-circuit)."""
+        url = "https://en.wikipedia.org/wiki/Python_(programming_language)"
+        result = classify_page(url)
+        assert result.page_type == "article"
+        # Should short-circuit (score > threshold * 2)
+        assert result.score > 40
+
+    def test_wikipedia_with_dashboard_like_html(self):
+        """Wikipedia URL + dashboard-like DOM signals → still article."""
+        url = "https://en.wikipedia.org/wiki/Python_(programming_language)"
+        # Simulate Wikipedia HTML with multiple tables, sidebar nav, many sections
+        html = """<html><body>
+            <nav role="navigation"><div class="sidebar">Navigation</div></nav>
+            <div id="mw-content-text" class="mw-parser-output">
+                <table><tr><td>Infobox</td></tr></table>
+                <table><tr><td>Comparison table</td></tr></table>
+                <section>Section 1</section>
+                <section>Section 2</section>
+                <section>Section 3</section>
+                <section>Section 4</section>
+                <section>Section 5</section>
+            </div>
+        </body></html>"""
+        result = classify_page(url, raw_html=html)
+        assert result.page_type == "article"
+
+    def test_wikipedia_ko(self):
+        """Korean Wikipedia → article."""
+        url = "https://ko.wikipedia.org/wiki/파이썬"
+        result = classify_page(url)
+        assert result.page_type == "article"
+
+    def test_wikipedia_ja(self):
+        """Japanese Wikipedia → article."""
+        url = "https://ja.wikipedia.org/wiki/Python"
+        result = classify_page(url)
+        assert result.page_type == "article"
+
+    def test_non_wikipedia_wiki_still_works(self):
+        """Non-Wikipedia /wiki/ URL → article from url_wiki signal."""
+        url = "https://company.com/wiki/internal-doc"
+        result = classify_page(url)
+        assert result.page_type == "article"
+        # Lower score than Wikipedia (no domain bonus)
+        assert result.score == 30
+
+    def test_mediawiki_dom_signal(self):
+        """Non-Wikipedia site with MediaWiki DOM + /wiki/ URL → article."""
+        url = "https://wiki.archlinux.org/wiki/Installation_guide"
+        html = """<html><body>
+            <nav role="navigation"><div class="sidebar">Portal</div></nav>
+            <div id="mw-content-text" class="mw-parser-output">
+                <table><tr><td>Info</td></tr></table>
+                <table><tr><td>Packages</td></tr></table>
+                <p>Main article content here with enough text to avoid error classification.</p>
+            </div>
+        </body></html>"""
+        result = classify_page(url, raw_html=html)
+        assert result.page_type == "article"
+        assert "dom_mw_content" in result.signals

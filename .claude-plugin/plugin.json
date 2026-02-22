@@ -1,0 +1,13 @@
+{
+  "name": "pagemap",
+  "version": "0.5.2",
+  "description": "Browse and interact with any web page at 97% fewer tokens",
+  "author": { "name": "Retio AI", "url": "https://github.com/Retio-ai" },
+  "homepage": "https://github.com/Retio-ai/Retio-pagemap",
+  "repository": "https://github.com/Retio-ai/Retio-pagemap",
+  "license": "AGPL-3.0-only",
+  "keywords": ["web-scraping", "browsing", "mcp", "html-compression", "ai-agent"],
+  "mcpServers": {
+    "pagemap": { "command": "uvx", "args": ["retio-pagemap"] }
+  }
+}

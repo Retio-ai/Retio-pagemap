@@ -26,24 +26,104 @@ PageMap gives your agent a **compressed, actionable** view of any web page:
 | **Tokens / page** | **2-5K** | 6-50K | 10-50K | 10-50K |
 | **Interaction** | **click / type / select / hover** | Raw tree parsing | Read-only | Read-only |
 | **Multi-page sessions** | **Unlimited** | Breaks at 2-3 pages | N/A | N/A |
-| **Task success (94 tasks)** | **63.6%** | 61.5% | 64.5% | 57.8% |
-| **Avg tokens / task** | **2,403** | 13,737 | 13,886 | 11,423 |
-| **Cost / 94 tasks** | **$0.97** | $4.09 | $3.97 | $2.26 |
+| **Task success (94 tasks)** | **84.7%** | 61.5% | 64.5% | 57.8% |
+| **Avg tokens / task** | **2,710** | 13,737 | 13,888 | 11,424 |
+| **Cost / 94 tasks** | **$1.06** | $4.09 | $3.98 | $2.26 |
 
-> Benchmarked across 11 e-commerce sites, 94 static tasks, 7 conditions. PageMap matches competitors in accuracy while using **5.7x fewer tokens** and is the only tool that supports **interaction**.
+> Benchmarked across 16 sites, 94 static tasks, 7 conditions. PageMap leads all competitors in accuracy (+20%p over next best) while using **5.1x fewer tokens** and is the only tool that supports **interaction**.
 
 ---
 
 ## Quick Start
 
-### MCP Server (Claude Code / Cursor)
+Chromium is auto-installed on first use — no manual `playwright install` needed.
 
-```bash
-pip install retio-pagemap
-playwright install chromium
-```
+### Claude Code
 
 Add to your project's `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "pagemap": {
+      "command": "uvx",
+      "args": ["retio-pagemap"]
+    }
+  }
+}
+```
+
+Or install as a plugin:
+
+```bash
+claude plugin add pagemap
+```
+
+### Cursor
+
+Add to your project's `.cursor/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "pagemap": {
+      "command": "uvx",
+      "args": ["retio-pagemap"]
+    }
+  }
+}
+```
+
+### Claude Desktop (macOS)
+
+Claude Desktop does not inherit your shell PATH. Use the absolute path to `uvx`:
+
+```json
+{
+  "mcpServers": {
+    "pagemap": {
+      "command": "/opt/homebrew/bin/uvx",
+      "args": ["retio-pagemap"]
+    }
+  }
+}
+```
+
+> Find your uvx path with `which uvx`. Config location: `~/Library/Application Support/Claude/claude_desktop_config.json`
+
+### Claude Desktop (Windows)
+
+```json
+{
+  "mcpServers": {
+    "pagemap": {
+      "command": "uvx",
+      "args": ["retio-pagemap"]
+    }
+  }
+}
+```
+
+> Config location: `%APPDATA%\Claude\claude_desktop_config.json`
+
+### VS Code (Copilot)
+
+Add to your project's `.vscode/mcp.json`:
+
+```json
+{
+  "servers": {
+    "pagemap": {
+      "command": "uvx",
+      "args": ["retio-pagemap"]
+    }
+  }
+}
+```
+
+### Windsurf
+
+Add to `~/.codeium/windsurf/mcp_config.json`:
 
 ```json
 {
@@ -102,6 +182,32 @@ Type: product_detail
 ```
 
 An agent reads the page and executes `execute_action(ref=3, action="select", value="260")` to select a size — all in one context window.
+
+---
+
+## Example Prompts
+
+Try these prompts with any MCP-compatible AI client:
+
+**Product Information**
+- "Go to this Nike page and tell me the price, available sizes, and rating."
+- "What's the cheapest running shoe on this search results page?"
+
+**Form & Search**
+- "Search for 'wireless headphones' on this site and show me the top 3 results."
+- "Fill in the shipping form with my address: 123 Main St, Seoul, 04789."
+
+**Multi-Site Comparison**
+- "Compare the price of this jacket on Zara and H&M."
+- "Open these 3 product pages and tell me which has the best reviews."
+
+**Multi-Step Workflows**
+- "Add the medium-size black t-shirt to cart, then go to checkout."
+- "Navigate to the sale section, filter by price under $50, and list the items."
+
+**Content Extraction**
+- "Read this Wikipedia article and summarize the key dates."
+- "Extract all image URLs from this product page."
 
 ---
 
@@ -182,6 +288,41 @@ Cloud metadata endpoints (169.254.x.x, metadata.google.internal) remain blocked.
 
 ---
 
+## Troubleshooting
+
+### "Chromium not found" or "Executable doesn't exist"
+
+PageMap auto-installs Chromium on first launch. If auto-install fails (e.g., network issues), install manually:
+
+```bash
+pip install retio-pagemap
+playwright install chromium
+```
+
+### "spawn uvx ENOENT" (Claude Desktop on macOS)
+
+Claude Desktop does not inherit your shell PATH. Use the absolute path:
+
+```bash
+which uvx    # e.g., /opt/homebrew/bin/uvx
+```
+
+Then use that full path in your `claude_desktop_config.json`.
+
+### First page takes a long time
+
+The first navigation is slower (~10-30s) due to Chromium cold start. Subsequent pages load in 1-3 seconds. The browser session persists across tool calls.
+
+### Localhost / private network blocked
+
+PageMap blocks private IPs by default (SSRF defense). Use `--allow-local` flag:
+
+```json
+{ "command": "uvx", "args": ["retio-pagemap", "--allow-local"] }
+```
+
+---
+
 ## Multilingual Support
 
 Built-in i18n for price, review, rating, and pagination extraction:
@@ -240,11 +381,17 @@ page_map = build_page_map_offline(html, url="https://example.com/product/123")
 ## Requirements
 
 - Python 3.11+
-- Chromium (`playwright install chromium`)
+- Chromium (auto-installed on first use)
 
 ## Community
 
 Have a question or idea? Join the conversation in [GitHub Discussions](https://github.com/Retio-ai/Retio-pagemap/discussions).
+
+## Pricing
+
+**Local (STDIO)** — Free forever. Self-hosted, open source under AGPL-3.0.
+
+**Cloud API** — Coming soon. Hosted endpoint, no browser setup, team-ready. For early access, contact **retio1001@retio.ai**.
 
 ## License
 

@@ -33,6 +33,7 @@ from urllib.parse import urlparse
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp import Image as McpImage
+from mcp.types import ToolAnnotations
 from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import Locator, Page
 from pydantic import BaseModel, Field
@@ -561,8 +562,15 @@ def _safe_error(context: str, exc: Exception) -> str:
         exc_msg,
         flags=re.IGNORECASE,
     )
-    # Strip file paths (anything matching /.../ or C:\...\)
-    exc_msg = re.sub(r"(/[\w./-]+|[A-Z]:\\[\w.\\-]+)", "<path>", exc_msg)
+    # Strip filesystem paths only — not URL paths like /products/123
+    # Match paths starting from known OS root directories
+    exc_msg = re.sub(
+        r"(/(?:Users|home|tmp|var|etc|opt|root|srv|proc|sys|usr|Library"
+        r"|Applications|private|snap|mnt|media|nix)/[\w./-]+"
+        r"|[A-Z]:\\[\w.\\-]+)",
+        "<path>",
+        exc_msg,
+    )
     # Truncate long messages
     if len(exc_msg) > 200:
         exc_msg = exc_msg[:200] + "..."
@@ -599,7 +607,7 @@ def _is_retryable_error(exc: Exception, action: str) -> bool:
 # ── Global state with lock ───────────────────────────────────────────
 
 
-_TOOL_LOCK_TIMEOUT = 90.0  # > PAGE_MAP_TIMEOUT_SECONDS(60) + margin
+_TOOL_LOCK_TIMEOUT = 150.0  # > BATCH_OVERALL_TIMEOUT(120) + margin
 
 
 class ServerState:
@@ -659,7 +667,7 @@ async def _get_session():
 # ── MCP Tools ────────────────────────────────────────────────────────
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True))
 async def get_page_map(url: str | None = None) -> str:
     """Get structured Page Map for a web page.
 
@@ -1000,7 +1008,7 @@ async def _execute_locator_action_with_retry(
     raise RuntimeError("Retry loop exited unexpectedly")
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, openWorldHint=True))
 async def execute_action(ref: int, action: str = "click", value: str | None = None) -> str:
     """Execute an interaction on a page element by its ref number.
 
@@ -1269,10 +1277,14 @@ async def _execute_action_impl(ref: int, action: str = "click", value: str | Non
                 "Browser connection lost during action. Call get_page_map to recover and refresh refs.",
                 refs_expired=True,
             )
-        return _safe_error(f"execute_action [{ref}] {action}", e)
+        logger.error("execute_action: request=%s ref=%d action=%s error=%s", request_id, ref, action, e, exc_info=True)
+        return _build_action_error(
+            f"Action [{action}] on ref [{ref}] failed: {type(e).__name__}",
+            refs_expired=False,
+        )
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True))
 async def get_page_state() -> str:
     """Get lightweight current page state (URL, title) without full Page Map rebuild.
 
@@ -1317,7 +1329,7 @@ async def _get_page_state_impl() -> str:
 SCREENSHOT_TIMEOUT_SECONDS = 15
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True))
 async def take_screenshot(full_page: bool = False) -> list | str:
     """Take a screenshot of the current page.
 
@@ -1361,7 +1373,7 @@ async def _take_screenshot_impl(full_page: bool = False) -> list | str:
 NAVIGATE_BACK_TIMEOUT_SECONDS = 30
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, openWorldHint=True))
 async def navigate_back() -> str:
     """Navigate back to the previous page in browser history.
 
@@ -1429,7 +1441,7 @@ SCROLL_TIMEOUT_SECONDS = 10
 _MAX_SCROLL_PIXELS = 50000
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True))
 async def scroll_page(direction: str = "down", amount: str = "page") -> str:
     """Scroll the page up or down.
 
@@ -1544,7 +1556,7 @@ async def _scroll_page_impl(direction: str = "down", amount: str = "page") -> st
 # ── fill_form ─────────────────────────────────────────────────────
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, openWorldHint=True))
 async def fill_form(fields: list[FormField]) -> str:
     """Fill multiple form fields in a single batch call.
 
@@ -1808,7 +1820,7 @@ async def _fill_form_impl(fields: list[FormField]) -> str:
 # ── wait_for ─────────────────────────────────────────────────────
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True))
 async def wait_for(
     text: str | None = None,
     text_gone: str | None = None,
@@ -1959,7 +1971,7 @@ BATCH_PER_URL_TIMEOUT_SECONDS = 60
 BATCH_OVERALL_TIMEOUT_SECONDS = 120
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True))
 async def batch_get_page_map(urls: list[str], max_concurrency: int = 5) -> str:
     """Get Page Maps for multiple URLs in parallel.
 
@@ -2043,8 +2055,8 @@ async def _batch_get_page_map_impl(urls: list[str], max_concurrency: int) -> str
     effective_concurrency = min(max_concurrency, BATCH_MAX_CONCURRENCY)
     semaphore = asyncio.Semaphore(effective_concurrency)
 
-    async def _process_one(url: str) -> tuple[str, str]:
-        """Process one URL. Returns (url, result_json_or_error)."""
+    async def _process_one(url: str) -> tuple[str, bool, str]:
+        """Process one URL. Returns (url, is_error, result_or_error_message)."""
         async with semaphore:
             page = None
             try:
@@ -2063,20 +2075,18 @@ async def _batch_get_page_map_impl(urls: list[str], max_concurrency: int) -> str
                 # Post-nav SSRF check
                 post_error = await _validate_url_with_dns(page.url)
                 if post_error:
-                    return url, f"Error: Redirect blocked — {post_error}"
+                    return url, True, f"Redirect blocked — {post_error}"
 
                 # Store in LRU only (don't overwrite active)
-                from .dom_change_detector import capture_dom_fingerprint as _capture_fp
-
-                fingerprint = await _capture_fp(page)
+                fingerprint = await capture_dom_fingerprint(page)
                 _state.cache.store_in_lru_only(page_map, fingerprint)
 
-                return url, to_agent_prompt(page_map, include_meta=True)
+                return url, False, to_agent_prompt(page_map, include_meta=True)
 
             except TimeoutError:
-                return url, f"Error: Timed out after {BATCH_PER_URL_TIMEOUT_SECONDS}s"
+                return url, True, f"Timed out after {BATCH_PER_URL_TIMEOUT_SECONDS}s"
             except Exception as e:
-                return url, _safe_error(f"batch [{url}]", e)
+                return url, True, _safe_error(f"batch [{url}]", e)
             finally:
                 if page is not None:
                     await asyncio.shield(session.close_batch_page(page))
@@ -2104,8 +2114,8 @@ async def _batch_get_page_map_impl(urls: list[str], max_concurrency: int) -> str
         if isinstance(r, BaseException):
             results.append({"url": "unknown", "status": "error", "error": str(r)})
         else:
-            url, result = r
-            if result.startswith("Error"):
+            url, is_error, result = r
+            if is_error:
                 results.append({"url": url, "status": "error", "error": result})
             else:
                 results.append({"url": url, "status": "ok", "page_map": result})

@@ -56,7 +56,7 @@ _SAAS_DESC_MIN = 50  # SaaSPage description
 _GOV_BODY_MIN = 30  # GovernmentPage body text
 
 # ---- Coupang recommendation filter ----
-_COUPANG_PRICE_COUNT_LIMIT = 3  # start filtering after N price blocks
+_COUPANG_PRICE_COUNT_LIMIT = 10  # start filtering after N price blocks
 
 # ---------------------------------------------------------------------------
 # Schema field matching heuristics — built from i18n universal terms
@@ -97,6 +97,15 @@ _PRICING_RE = re.compile(_terms_pattern(PRICING_TERMS), re.IGNORECASE)
 _AVAILABILITY_RE = re.compile(_terms_pattern(AVAILABILITY_TERMS), re.IGNORECASE)
 _SHIPPING_RE = re.compile(_terms_pattern(SHIPPING_TERMS), re.IGNORECASE)
 _SCARCITY_RE = re.compile(r"(?:only|just|남은|残り|seulement|nur)\s*\d+", re.IGNORECASE)
+_MEASUREMENT_RE = re.compile(
+    r"\d+\.?\d*\s*(?:cm|mm|\uc778\uce58|inch|inches|kg|g|lb|oz|%|\u2033|\u2032|\u2034|ml|L)",
+    re.IGNORECASE,
+)
+_SIZE_LABEL_RE = re.compile(
+    r"\b(?:XS|S|M|L|XL|XXL|2XL|3XL|FREE|총장|가슴[단둘]레|어깨[너폭]비|소매[길장]이"
+    r"|허리[단둘]레|hip|waist|chest|shoulder|sleeve|length|inseam)\b",
+    re.IGNORECASE,
+)
 _DISCOUNT_RE = re.compile(
     r"\d+\s*%\s*(?:" + "|".join(re.escape(t) for t in DISCOUNT_TERMS) + r")",
     re.IGNORECASE,
@@ -111,6 +120,11 @@ def _is_high_value_short_text(text: str) -> bool:
         or _SCARCITY_RE.search(text)
         or _DISCOUNT_RE.search(text)
     )
+
+
+def _is_measurement_data(text: str) -> bool:
+    """Check if text contains measurement/size spec data (e.g. size tables)."""
+    return bool(_MEASUREMENT_RE.search(text) or _SIZE_LABEL_RE.search(text))
 
 
 def _has_itemprop(chunk: HtmlChunk, prop: str) -> bool:
@@ -449,7 +463,9 @@ def prune_chunks(
                 )
                 continue
             if chunk.chunk_type in (ChunkType.TABLE, ChunkType.LIST) and (
-                len(chunk.text) > _IN_MAIN_TEXT_MIN or _is_high_value_short_text(chunk.text)
+                len(chunk.text) > _IN_MAIN_TEXT_MIN
+                or _is_high_value_short_text(chunk.text)
+                or _is_measurement_data(chunk.text)
             ):
                 reason = (
                     PruneReason.IN_MAIN_STRUCTURED

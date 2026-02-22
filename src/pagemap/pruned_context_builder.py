@@ -84,6 +84,47 @@ _EXCLUDE_IMG_PATTERNS = re.compile(
 _ALLOWED_URL_PREFIXES = ("http://", "https://", "//")
 _MAX_URL_LENGTH = 2048
 
+# Pre-compiled patterns for text extraction and compression (Phase 6.3c)
+_SCRIPT_STYLE_RE = re.compile(r"<(script|style|noscript)[^>]*>.*?</\1>", re.DOTALL | re.IGNORECASE)
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+_MULTI_NEWLINE_RE = re.compile(r"\n{3,}")
+_HORIZ_SPACE_RE = re.compile(r"[ \t]+")
+_ANY_WHITESPACE_RE = re.compile(r"\s+")
+_LI_SPLIT_RE = re.compile(r"<li[^>]*>", re.IGNORECASE)
+_KRW_PRICE_BARE_RE = re.compile(r"^\d{2,3}(?:,\d{3})+$")
+_DATE_PATTERN_RE = re.compile(r"\d{4}[.\-/]\d{1,2}[.\-/]\d{1,2}")
+
+# Payment promotion filter — lines about payment-method-specific discounts (low value for agents)
+_PAYMENT_PROMOTION_RE = re.compile(
+    r"(?:"
+    # ko: card/payment promotions
+    r"결제\s*시|이상\s*결제|카드.*할인|페이\s*[×xX·]|무이자\s*할부"
+    r"|적립금|포인트\s*적립|쿠폰\s*(?:받기|다운|적용)"
+    r"|무신사페이|네이버페이|카카오페이|토스페이"
+    # en
+    r"|pay\s*with|payment\s*method|installment|credit\s*card\s*(?:offer|deal)"
+    # ja
+    r"|お支払い方法|ポイント還元|分割払い"
+    r")",
+    re.IGNORECASE,
+)
+
+# Footer/boilerplate noise — common footer patterns in Korean e-commerce
+_FOOTER_NOISE_RE = re.compile(
+    r"(?:"
+    r"어바웃|회사\s*소개|비즈니스|고객지원|고객센터|이용약관|개인정보"
+    r"|사업자\s*등록|통신판매|대표\s*이사|주소\s*:"
+    r"|copyright|©|\(c\)|all\s*rights\s*reserved"
+    r")",
+    re.IGNORECASE,
+)
+
+# Discount percentage pattern (e.g. "89%", "89% 할인", "30% OFF")
+_DISCOUNT_PCT_RE = re.compile(r"(\d{1,2})%\s*(?:할인|세일|OFF|off|引き|割引|rabatt|remise)?")
+
+# Extract numeric price value from a price string for comparison
+_PRICE_NUMERIC_RE = re.compile(r"[\d,]+(?:\.\d+)?")
+
 
 def extract_product_images(raw_html: str, base_url: str = "") -> list[str]:
     """Extract likely product image URLs from HTML.
@@ -157,11 +198,11 @@ def extract_product_images(raw_html: str, base_url: str = "") -> list[str]:
 def _extract_text_lines(html: str) -> list[str]:
     """Extract visible text lines from HTML, preserving key structure."""
     # Remove script/style
-    cleaned = re.sub(r"<(script|style|noscript)[^>]*>.*?</\1>", "", html, flags=re.DOTALL | re.IGNORECASE)
+    cleaned = _SCRIPT_STYLE_RE.sub("", html)
     # Strip remaining tags
-    text = re.sub(r"<[^>]+>", "\n", cleaned)
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    text = re.sub(r"[ \t]+", " ", text)
+    text = _HTML_TAG_RE.sub("\n", cleaned)
+    text = _MULTI_NEWLINE_RE.sub("\n\n", text)
+    text = _HORIZ_SPACE_RE.sub(" ", text)
 
     lines = [line.strip() for line in text.split("\n") if line.strip()]
     return lines
@@ -209,10 +250,10 @@ def _detect_cards_from_chunks(chunks: list[HtmlChunk]) -> list[dict[str, Any]]:
     list_chunks = [c for c in chunks if c.chunk_type in (ChunkType.LIST, ChunkType.TABLE)]
     for chunk in list_chunks:
         # Split by <li> tags
-        li_parts = re.split(r"<li[^>]*>", chunk.html, flags=re.IGNORECASE)
+        li_parts = _LI_SPLIT_RE.split(chunk.html)
         for part in li_parts[1:]:  # skip pre-<li> content
-            part_text = re.sub(r"<[^>]+>", " ", part)
-            part_text = re.sub(r"\s+", " ", part_text).strip()
+            part_text = _HTML_TAG_RE.sub(" ", part)
+            part_text = _ANY_WHITESPACE_RE.sub(" ", part_text).strip()
             if not part_text or len(part_text) < 5:
                 continue
             price_m = _CARD_PRICE_RE.search(part_text)
@@ -563,6 +604,17 @@ def extract_pagination_structured(raw_html: str, lc: LocaleConfig | None = None)
     return result
 
 
+def _extract_price_numeric(text: str) -> float | None:
+    """Extract numeric price value from a string for comparison."""
+    m = _PRICE_NUMERIC_RE.search(text)
+    if not m:
+        return None
+    try:
+        return float(m.group(0).replace(",", ""))
+    except ValueError:
+        return None
+
+
 def _compress_for_product(
     pruned_html: str,
     max_tokens: int,
@@ -573,6 +625,7 @@ def _compress_for_product(
 
     Phase 1: Use structured metadata (high confidence) if available.
     Phase 2: Regex fallback for fields not covered by metadata.
+    Phase 2b: Extract original price + discount from text when metadata lacks them.
     """
     if lc is None:
         lc = get_locale(None)
@@ -580,6 +633,7 @@ def _compress_for_product(
     used: set[str] = set()
 
     # -- Phase 1: structured metadata (high confidence) --
+    meta_price_val: float | None = None
     if metadata:
         if metadata.get("name"):
             parts.append(f"{lc.label_title}: {metadata['name']}")
@@ -590,6 +644,13 @@ def _compress_for_product(
             currency = metadata.get("currency", "KRW")
             parts.append(format_price(metadata["price"], currency))
             used.add("price")
+            meta_price_val = float(metadata["price"])
+        if metadata.get("original_price") is not None:
+            from pagemap.preprocessing.normalize import format_price
+
+            currency = metadata.get("currency", "KRW")
+            parts.append(f"{lc.label_original_price}: {format_price(metadata['original_price'], currency)}")
+            used.add("original_price")
         if metadata.get("rating") is not None:
             rating_str = f"{lc.label_rating}: {metadata['rating']}"
             if metadata.get("review_count"):
@@ -606,6 +667,7 @@ def _compress_for_product(
         "price": [],
         "rating": [],
         "options": [],
+        "discount": [],
         "other": [],
     }
 
@@ -614,9 +676,30 @@ def _compress_for_product(
             continue
         line_lower = line.lower()
 
-        if "price" not in used and PRICE_PATTERN.search(line) and re.search(r"\d", line):
-            if line not in sections["price"]:
-                sections["price"].append(line)
+        # Price lines get priority — check before filtering promotions
+        has_price = PRICE_PATTERN.search(line) and re.search(r"\d", line)
+
+        if has_price:
+            # When price is from metadata, still collect price lines for original_price detection
+            if "price" not in used:
+                if line not in sections["price"]:
+                    sections["price"].append(line)
+            elif "original_price" not in used:
+                # Check if this price is higher than metadata price → likely original price
+                line_price = _extract_price_numeric(line)
+                if line_price and meta_price_val and line_price > meta_price_val * 1.1:
+                    if line not in sections["price"]:
+                        sections["price"].append(line)
+            continue
+
+        # Filter out payment promotions and footer noise (non-price lines only)
+        if _PAYMENT_PROMOTION_RE.search(line):
+            continue
+        if _FOOTER_NOISE_RE.search(line):
+            continue
+
+        if _DISCOUNT_PCT_RE.search(line):
+            sections["discount"].append(line)
         elif "rating" not in used and RATING_PATTERN.search(line):
             if line not in sections["rating"]:
                 sections["rating"].append(line)
@@ -630,7 +713,7 @@ def _compress_for_product(
     # "원" post-processing -- only when price not from metadata
     if "price" not in used:
         for i, p in enumerate(sections["price"]):
-            if re.match(r"^\d{2,3}(?:,\d{3})+$", p.strip()):
+            if _KRW_PRICE_BARE_RE.match(p.strip()):
                 sections["price"][i] = p.strip() + "원"
 
     # -- Phase 3: combine --
@@ -639,12 +722,18 @@ def _compress_for_product(
     if "price" not in used:
         for p in sections["price"][:5]:
             parts.append(p)
+    elif "original_price" not in used and sections["price"]:
+        # Original price detected from text (higher than sale price)
+        parts.append(f"{lc.label_original_price}: {sections['price'][0]}")
     if "rating" not in used:
         for r in sections["rating"][:2]:
             parts.append(r)
+    # Discount percentage
+    if sections["discount"]:
+        parts.append(f"{lc.label_discount}: {sections['discount'][0]}")
     for o in sections["options"][:5]:
         parts.append(o)
-    for d in sections["other"][:3]:
+    for d in sections["other"][:5]:
         if len(d) > 15:
             parts.append(d[:200])
 
@@ -680,7 +769,7 @@ def _compress_for_article(
             title_found = True
             continue
         # Date-like
-        if re.search(r"\d{4}[.\-/]\d{1,2}[.\-/]\d{1,2}", line):
+        if _DATE_PATTERN_RE.search(line):
             parts.append(line)
             continue
         # Paragraphs

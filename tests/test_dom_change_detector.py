@@ -272,7 +272,7 @@ class TestCaptureDomFingerprint:
         assert fp.has_dialog is False
         assert fp.body_child_count == 0
         assert fp.title == ""
-        assert fp.content_hash == 0
+        assert fp.content_hash is None
 
     @pytest.mark.asyncio
     async def test_content_hash_captured(self):
@@ -318,12 +318,12 @@ class TestContentHashDetection:
         assert v.severity == "none"
         assert not v.changed
 
-    def test_content_hash_zero_before_ignored(self):
-        """content_hash=0 (legacy/missing) → not treated as content change."""
-        before = _fp(content_hash=0)
+    def test_content_hash_none_before_ignored(self):
+        """content_hash=None (missing) → not treated as content change."""
+        before = _fp(content_hash=None)
         after = _fp(content_hash=999)
         v = detect_dom_changes(before, after)
-        assert v.severity == "none"  # zero = unknown, no change detected
+        assert v.severity == "none"  # None = unknown, no change detected
 
     def test_major_takes_precedence_over_content_changed(self):
         """Major structural change + content change → major (not content_changed)."""

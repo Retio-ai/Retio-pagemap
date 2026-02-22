@@ -4,10 +4,12 @@ Tests BrowserConfig defaults, security launch args, CDP AX tree conversion,
 property guards, and S3 browser hardening. Does not require a running browser.
 """
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+import pagemap.browser_session as _bs_module
 from pagemap.browser_session import (
     BLOCKED_URL_SCHEMES,
     DEFAULT_LOCALE,
@@ -15,6 +17,7 @@ from pagemap.browser_session import (
     DEFAULT_VIEWPORT,
     BrowserConfig,
     BrowserSession,
+    _auto_install_chromium,
     _cdp_ax_nodes_to_tree,
 )
 
@@ -724,3 +727,140 @@ class TestScrollMethods:
         # The JS code should be a static string, not contain the actual values
         assert "100" not in js_code
         assert "0" not in js_code or js_code == "([dx, dy]) => window.scrollBy(dx, dy)"
+
+
+# ── Chromium Auto-Install ───────────────────────────────────────
+
+
+class TestAutoInstallChromium:
+    """Tests for _auto_install_chromium() and start() auto-install integration."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_flag(self):
+        """Reset the module-level install flag before each test."""
+        _bs_module._chromium_install_attempted = False
+        yield
+        _bs_module._chromium_install_attempted = False
+
+    @pytest.mark.asyncio
+    async def test_subprocess_called_correctly(self):
+        """Verify the correct playwright install command is invoked."""
+        import sys
+
+        mock_proc = AsyncMock()
+        mock_proc.communicate = AsyncMock(return_value=(b"ok", b""))
+        mock_proc.returncode = 0
+
+        with patch("pagemap.browser_session.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
+            result = await _auto_install_chromium()
+
+        assert result is True
+        mock_exec.assert_called_once_with(
+            sys.executable,
+            "-m",
+            "playwright",
+            "install",
+            "chromium",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+
+    @pytest.mark.asyncio
+    async def test_only_runs_once(self):
+        """Second call should return False without running subprocess."""
+        mock_proc = AsyncMock()
+        mock_proc.communicate = AsyncMock(return_value=(b"ok", b""))
+        mock_proc.returncode = 0
+
+        with patch("pagemap.browser_session.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
+            first = await _auto_install_chromium()
+            second = await _auto_install_chromium()
+
+        assert first is True
+        assert second is False
+        assert mock_exec.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_returns_false_on_nonzero_rc(self):
+        """Non-zero return code should yield False."""
+        mock_proc = AsyncMock()
+        mock_proc.communicate = AsyncMock(return_value=(b"", b"error"))
+        mock_proc.returncode = 1
+
+        with patch("pagemap.browser_session.asyncio.create_subprocess_exec", return_value=mock_proc):
+            result = await _auto_install_chromium()
+
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_returns_false_on_timeout(self):
+        """TimeoutError should be caught and return False."""
+        with patch(
+            "pagemap.browser_session.asyncio.create_subprocess_exec",
+            side_effect=TimeoutError,
+        ):
+            result = await _auto_install_chromium()
+
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_start_triggers_auto_install_on_missing_chromium(self):
+        """start() should auto-install and retry launch when executable missing."""
+        mock_pw_cm, mock_chromium, mock_browser, mock_context, mock_page = _build_mock_chain()
+
+        # First launch raises "executable doesn't exist", second succeeds
+        mock_chromium.launch = AsyncMock(
+            side_effect=[
+                Exception("Executable doesn't exist at /path/chromium"),
+                mock_browser,
+            ]
+        )
+
+        mock_proc = AsyncMock()
+        mock_proc.communicate = AsyncMock(return_value=(b"ok", b""))
+        mock_proc.returncode = 0
+
+        with (
+            patch("pagemap.browser_session.async_playwright", return_value=mock_pw_cm),
+            patch("pagemap.browser_session.asyncio.create_subprocess_exec", return_value=mock_proc),
+        ):
+            session = BrowserSession()
+            await session.start()
+
+        # chromium.launch called twice: fail then succeed
+        assert mock_chromium.launch.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_start_raises_on_install_failure(self):
+        """start() should raise RuntimeError when auto-install fails."""
+        mock_pw_cm, mock_chromium, mock_browser, mock_context, mock_page = _build_mock_chain()
+
+        mock_chromium.launch = AsyncMock(
+            side_effect=Exception("Executable doesn't exist at /path/chromium"),
+        )
+
+        mock_proc = AsyncMock()
+        mock_proc.communicate = AsyncMock(return_value=(b"", b"fail"))
+        mock_proc.returncode = 1
+
+        with (
+            patch("pagemap.browser_session.async_playwright", return_value=mock_pw_cm),
+            patch("pagemap.browser_session.asyncio.create_subprocess_exec", return_value=mock_proc),
+        ):
+            session = BrowserSession()
+            with pytest.raises(RuntimeError, match="auto-install failed"):
+                await session.start()
+
+    @pytest.mark.asyncio
+    async def test_start_propagates_non_chromium_error(self):
+        """start() should not intercept errors unrelated to missing chromium."""
+        mock_pw_cm, mock_chromium, mock_browser, mock_context, mock_page = _build_mock_chain()
+
+        mock_chromium.launch = AsyncMock(
+            side_effect=Exception("some other playwright error"),
+        )
+
+        with patch("pagemap.browser_session.async_playwright", return_value=mock_pw_cm):
+            session = BrowserSession()
+            with pytest.raises(Exception, match="some other playwright error"):
+                await session.start()
