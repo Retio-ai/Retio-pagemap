@@ -12,6 +12,7 @@ Compresses ~100K-token HTML into a 2-5K-token structured map while preserving ev
 [![PyPI](https://img.shields.io/pypi/v/retio-pagemap)](https://pypi.org/project/retio-pagemap/)
 [![Python](https://img.shields.io/pypi/pyversions/retio-pagemap)](https://pypi.org/project/retio-pagemap/)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
+[![Awesome MCP Servers](https://img.shields.io/badge/Awesome-MCP%20Servers-fc60a8?logo=awesomelists&logoColor=white)](https://github.com/punkpeye/awesome-mcp-servers)
 
 ---
 
@@ -150,6 +151,8 @@ Restart your IDE. Nine tools become available:
 | `wait_for` | Wait for text to appear or disappear on the page |
 | `batch_get_page_map` | Get Page Maps for multiple URLs in parallel |
 
+All tools include [MCP Tool Annotations](https://modelcontextprotocol.io/docs/concepts/tool-annotations) — `readOnlyHint` for safe tools (`get_page_map`, `scroll_page`, etc.) and `destructiveHint` for state-changing tools (`execute_action`, `fill_form`). MCP clients can use these hints to auto-approve read-only calls.
+
 ### CLI
 
 ```bash
@@ -244,6 +247,18 @@ URL → Playwright Browser
 | 2 | Implicit HTML roles | `<input>`, `<select>`, `<textarea>` |
 | 3 | CDP event listeners | Divs/spans with click handlers |
 
+### Caching & Diff Updates
+
+PageMap uses a 3-tier rebuild strategy to minimize latency on repeated visits:
+
+| Tier | Trigger | Latency | What happens |
+|:----:|---------|:-------:|--------------|
+| A | DOM unchanged | ~100ms | Cache hit — return previous PageMap |
+| B | Content changed, structure same | ~500ms | Refresh text content only |
+| C | New page or major change | ~1.5s | Full rebuild from scratch |
+
+A URL-keyed LRU cache (20 entries) stores recent PageMaps. Diff-based updates output only changed sections — unchanged parts are marked `— unchanged`, cutting redundant tokens across multi-step workflows. This is why agents can browse dozens of pages without hitting context limits.
+
 ---
 
 ## Reliability
@@ -335,7 +350,7 @@ Built-in i18n for price, review, rating, and pagination extraction:
 | French | `fr` | €, CHF | avis, note, suivant |
 | German | `de` | €, CHF | Bewertungen, Bewertung, weiter |
 
-Locale is auto-detected from the URL domain.
+Locale is auto-detected from the URL domain. Token budgets are automatically adjusted for CJK scripts — Korean uses ~9.4x more tokens per character than English, so PageMap compensates with language-aware budget weights to ensure consistent output quality.
 
 ---
 
