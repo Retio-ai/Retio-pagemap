@@ -1,0 +1,13 @@
+.git
+.github
+.venv
+.env*
+data/
+docs/
+tests/
+dist/
+build/
+__pycache__/
+*.pyc
+*.md
+*.lock

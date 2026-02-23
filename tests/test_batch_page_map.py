@@ -17,8 +17,8 @@ from pagemap.cache import PageMapCache
 
 
 @pytest.fixture(autouse=True)
-def _reset_state():
-    """Reset server state before each test."""
+def _reset_state_full():
+    """Reset full server state (cache + template cache + lock) before each test."""
     srv._state.cache = PageMapCache()
     srv._state.template_cache = srv.InMemoryTemplateCache()
     srv._state.tool_lock = asyncio.Lock()
@@ -44,13 +44,11 @@ def _make_page_map(url="https://example.com"):
 
 
 class TestBatchInputValidation:
-    @pytest.mark.asyncio
     async def test_empty_urls(self):
         result = await srv._batch_get_page_map_impl([], 5)
         data = json.loads(result)
         assert "error" in data
 
-    @pytest.mark.asyncio
     async def test_too_many_urls(self):
         urls = [f"https://example.com/{i}" for i in range(15)]
         result = await srv._batch_get_page_map_impl(urls, 5)
@@ -58,7 +56,6 @@ class TestBatchInputValidation:
         assert "error" in data
         assert "Maximum" in data["error"]
 
-    @pytest.mark.asyncio
     async def test_ssrf_blocked_url(self):
         urls = ["https://169.254.169.254/latest/meta-data/"]
         result = await srv._batch_get_page_map_impl(urls, 5)
@@ -69,7 +66,6 @@ class TestBatchInputValidation:
 
 
 class TestBatchProcessing:
-    @pytest.mark.asyncio
     async def test_deduplication(self):
         """Duplicate URLs should be deduplicated."""
         # We need mocks for the session
@@ -144,7 +140,6 @@ class TestCacheStoreInLruOnly:
 
 
 class TestBrowserSessionBatch:
-    @pytest.mark.asyncio
     async def test_create_and_close_batch_page(self):
         session = BrowserSession.__new__(BrowserSession)
         session._batch_pages = set()
@@ -165,7 +160,6 @@ class TestBrowserSessionBatch:
         assert page not in session._batch_pages
         mock_page.close.assert_called_once()
 
-    @pytest.mark.asyncio
     async def test_on_new_page_skips_batch_pages(self):
         session = BrowserSession.__new__(BrowserSession)
         session._pending_new_page = None

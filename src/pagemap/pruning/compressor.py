@@ -132,6 +132,8 @@ def compress_html(html: str) -> str:
     if not html:
         return html
 
+    _before_len = len(html)
+
     # NOTE: htmlrag's clean_html() strips <script> and <meta> tags, which
     # destroys JSON-LD and OG metadata that we explicitly preserved.
     # Always use our own compression that keeps these elements.
@@ -159,4 +161,11 @@ def compress_html(html: str) -> str:
     result = _BLANK_LINES_RE.sub("\n", result)
     result = _TAG_GAP_RE.sub(">\n<", result)
 
-    return result.strip()
+    _compressed = result.strip()
+
+    from pagemap.telemetry import emit
+    from pagemap.telemetry.events import COMPRESSION_COMPLETE
+
+    emit(COMPRESSION_COMPLETE, {"before_len": _before_len, "after_len": len(_compressed)})
+
+    return _compressed

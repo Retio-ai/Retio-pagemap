@@ -67,7 +67,6 @@ class TestExtractTextLinesRegression:
 class TestDetectAllSafe:
     """Test error isolation wrapper for detect_all."""
 
-    @pytest.mark.asyncio
     async def test_success_passthrough(self):
         from pagemap import Interactable
         from pagemap.page_map_builder import _detect_all_safe
@@ -80,7 +79,6 @@ class TestDetectAllSafe:
         assert result[0].name == "Buy"
         assert warnings == ["warn1"]
 
-    @pytest.mark.asyncio
     async def test_error_isolation(self):
         from pagemap.page_map_builder import _detect_all_safe
 
@@ -91,7 +89,6 @@ class TestDetectAllSafe:
         assert len(warnings) == 1
         assert "RuntimeError" in warnings[0]
 
-    @pytest.mark.asyncio
     async def test_cancelled_error_propagates(self):
         from pagemap.page_map_builder import _detect_all_safe
 
@@ -116,7 +113,6 @@ class TestParallelPageMapBuild:
         session.get_page_html = AsyncMock(return_value="<html><body><h1>Product</h1></body></html>")
         return session
 
-    @pytest.mark.asyncio
     async def test_both_called(self):
         from pagemap.page_map_builder import build_page_map_live
 
@@ -128,7 +124,6 @@ class TestParallelPageMapBuild:
         session.get_page_html.assert_called_once()
         assert pm.url == "https://example.com/products/1"
 
-    @pytest.mark.asyncio
     async def test_detect_failure_yields_valid_pagemap(self):
         from pagemap.page_map_builder import build_page_map_live
 
@@ -139,7 +134,6 @@ class TestParallelPageMapBuild:
         assert pm.interactables == []
         assert "detection failed" in pm.warnings
 
-    @pytest.mark.asyncio
     async def test_html_failure_propagates(self):
         from pagemap.page_map_builder import build_page_map_live
 
@@ -167,7 +161,6 @@ class TestCdpSessionReuse:
         session._page = mock_page
         return session, mock_context
 
-    @pytest.mark.asyncio
     async def test_reuses_existing_session(self):
         session, mock_context = self._make_session()
         mock_cdp = AsyncMock()
@@ -192,7 +185,6 @@ class TestCdpSessionReuse:
         # Should NOT have created a new session
         mock_context.new_cdp_session.assert_not_called()
 
-    @pytest.mark.asyncio
     async def test_creates_session_when_none(self):
         session, mock_context = self._make_session()
         mock_cdp = AsyncMock()
@@ -215,7 +207,6 @@ class TestCdpSessionReuse:
         assert tree is not None
         mock_context.new_cdp_session.assert_called_once()
 
-    @pytest.mark.asyncio
     async def test_stale_session_reconnects(self):
         session, mock_context = self._make_session()
 
@@ -246,7 +237,6 @@ class TestCdpSessionReuse:
         stale_cdp.detach.assert_called_once()
         mock_context.new_cdp_session.assert_called_once()
 
-    @pytest.mark.asyncio
     async def test_double_failure_raises(self):
         session, mock_context = self._make_session()
 
@@ -276,7 +266,6 @@ class TestWaitForDomSettle:
         session._page = mock_page
         return session, mock_page
 
-    @pytest.mark.asyncio
     async def test_passes_default_params(self):
         session, mock_page = self._make_session()
         mock_page.evaluate = AsyncMock(return_value={"waited_ms": 200, "mutations": 0, "reason": "quiet"})
@@ -285,7 +274,6 @@ class TestWaitForDomSettle:
         mock_page.evaluate.assert_called_once_with(_DOM_SETTLE_JS, [200, 3000])
         assert result["reason"] == "quiet"
 
-    @pytest.mark.asyncio
     async def test_custom_override(self):
         session, mock_page = self._make_session()
         mock_page.evaluate = AsyncMock(return_value={"waited_ms": 100, "mutations": 5, "reason": "quiet"})
@@ -294,7 +282,6 @@ class TestWaitForDomSettle:
         mock_page.evaluate.assert_called_once_with(_DOM_SETTLE_JS, [100, 1500])
         assert result is not None
 
-    @pytest.mark.asyncio
     async def test_failure_returns_none(self):
         session, mock_page = self._make_session()
         mock_page.evaluate = AsyncMock(side_effect=Exception("page crashed"))
@@ -302,7 +289,6 @@ class TestWaitForDomSettle:
         result = await session.wait_for_dom_settle()
         assert result is None
 
-    @pytest.mark.asyncio
     async def test_metrics_returned(self):
         session, mock_page = self._make_session()
         mock_page.evaluate = AsyncMock(return_value={"waited_ms": 450, "mutations": 12, "reason": "timeout"})
@@ -329,7 +315,6 @@ class TestDynamicNavigateWait:
         session.wait_for_dom_settle = AsyncMock(return_value=None)
         return session, mock_page
 
-    @pytest.mark.asyncio
     async def test_navigate_uses_dom_settle(self):
         session, mock_page = self._make_session()
         mock_page.goto = AsyncMock()
@@ -339,7 +324,6 @@ class TestDynamicNavigateWait:
         # Must NOT call wait_for_timeout(1500)
         mock_page.wait_for_timeout.assert_not_called()
 
-    @pytest.mark.asyncio
     async def test_navigate_clears_cookies_on_domain_change(self):
         session, mock_page = self._make_session()
         mock_page.url = "https://old-domain.com/page"
@@ -348,7 +332,6 @@ class TestDynamicNavigateWait:
         await session.navigate("https://new-domain.com/page")
         session._context.clear_cookies.assert_called_once()
 
-    @pytest.mark.asyncio
     async def test_navigate_no_cookie_clear_same_domain(self):
         session, mock_page = self._make_session()
         mock_page.url = "https://example.com/page1"

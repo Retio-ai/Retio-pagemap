@@ -16,7 +16,6 @@ import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
-import pytest
 from playwright.async_api import Error as PlaywrightError
 
 from pagemap import Interactable, PageMap
@@ -115,16 +114,6 @@ def _fp(
     )
 
 
-@pytest.fixture(autouse=True)
-def _reset_state():
-    """Reset global state before each test."""
-    import pagemap.server as srv
-
-    srv._state.cache.invalidate_all()
-    yield
-    srv._state.cache.invalidate_all()
-
-
 # ── TestHoverConstants ──────────────────────────────────────────────
 
 
@@ -169,7 +158,6 @@ class TestHoverConstants:
 class TestHoverBasic:
     """Basic hover action tests."""
 
-    @pytest.mark.asyncio
     async def test_hover_button_success(self):
         import pagemap.server as srv
 
@@ -183,7 +171,6 @@ class TestHoverBasic:
         assert "Hovered over [1] button: Menu" in data["description"]
         mock_session.page.get_by_role.return_value.first.hover.assert_called_once()
 
-    @pytest.mark.asyncio
     async def test_hover_link_success(self):
         import pagemap.server as srv
 
@@ -196,7 +183,6 @@ class TestHoverBasic:
         data = json.loads(result)
         assert "Hovered over [2] link: Products" in data["description"]
 
-    @pytest.mark.asyncio
     async def test_hover_on_type_affordance(self):
         """hover should work on any affordance including type."""
         import pagemap.server as srv
@@ -210,7 +196,6 @@ class TestHoverBasic:
         data = json.loads(result)
         assert "Hovered over [3] textbox: Search" in data["description"]
 
-    @pytest.mark.asyncio
     async def test_hover_settle_time_500ms(self):
         """hover uses 500ms settle time for CSS transitions."""
         import pagemap.server as srv
@@ -223,7 +208,6 @@ class TestHoverBasic:
 
         mock_session.page.wait_for_timeout.assert_called_with(500)
 
-    @pytest.mark.asyncio
     async def test_hover_no_value_required(self):
         """hover does not require a value parameter."""
         import pagemap.server as srv
@@ -237,14 +221,12 @@ class TestHoverBasic:
         data = json.loads(result)
         assert "Hovered over [1]" in data["description"]
 
-    @pytest.mark.asyncio
     async def test_hover_no_page_map(self):
         """hover without page map returns error."""
         result = await execute_action(ref=1, action="hover")
         data = json.loads(result)
         assert "No active Page Map" in data["error"]
 
-    @pytest.mark.asyncio
     async def test_hover_invalid_ref(self):
         """hover on non-existent ref returns error."""
         import pagemap.server as srv
@@ -261,7 +243,6 @@ class TestHoverBasic:
 class TestHoverDomDetection:
     """Verify DOM change detection works with hover."""
 
-    @pytest.mark.asyncio
     async def test_hover_major_dom_change_clears_page_map(self):
         """hover that opens dropdown → major DOM change → refs expired."""
         import pagemap.server as srv
@@ -284,7 +265,6 @@ class TestHoverDomDetection:
         assert data["refs_expired"] is True
         assert srv._state.cache.active is None
 
-    @pytest.mark.asyncio
     async def test_hover_minor_dom_change_preserves_page_map(self):
         """hover causes small change → minor warning, page map kept."""
         import pagemap.server as srv
@@ -308,7 +288,6 @@ class TestHoverDomDetection:
         assert data["refs_expired"] is False
         assert srv._state.cache.active is page_map
 
-    @pytest.mark.asyncio
     async def test_hover_no_dom_change(self):
         """hover with no DOM change → no warning."""
         import pagemap.server as srv
@@ -338,7 +317,6 @@ class TestHoverDomDetection:
 class TestHoverRetry:
     """Verify retry behavior for hover action."""
 
-    @pytest.mark.asyncio
     async def test_hover_not_visible_retried(self):
         """'not visible' error on first attempt → retry succeeds."""
         import pagemap.server as srv
@@ -355,7 +333,6 @@ class TestHoverRetry:
         assert "Hovered over [1]" in data["description"]
         assert locator.first.hover.call_count == 2
 
-    @pytest.mark.asyncio
     async def test_hover_intercept_retried(self):
         """'intercept' error on first attempt → retry succeeds."""
         import pagemap.server as srv
@@ -381,7 +358,6 @@ class TestHoverRetry:
 class TestHoverCssFallback:
     """Verify CSS selector fallback for hover."""
 
-    @pytest.mark.asyncio
     async def test_hover_ambiguous_role_uses_css(self):
         """Multiple role matches → fallback to CSS selector."""
         import pagemap.server as srv
@@ -415,7 +391,6 @@ class TestHoverCssFallback:
 class TestHoverBrowserDead:
     """Browser death during hover → recovery message."""
 
-    @pytest.mark.asyncio
     async def test_hover_target_closed(self):
         import pagemap.server as srv
 
@@ -431,7 +406,6 @@ class TestHoverBrowserDead:
         assert "Browser connection lost" in data["error"]
         assert srv._state.cache.active is None
 
-    @pytest.mark.asyncio
     async def test_hover_browser_disconnected(self):
         import pagemap.server as srv
 
@@ -454,7 +428,6 @@ class TestHoverBrowserDead:
 class TestHoverTimeout:
     """Overall timeout handling for hover."""
 
-    @pytest.mark.asyncio
     async def test_hover_overall_timeout(self):
         import pagemap.server as srv
 
@@ -484,7 +457,6 @@ class TestHoverTimeout:
 class TestHoverDialogWarning:
     """Dialog warnings included in hover responses."""
 
-    @pytest.mark.asyncio
     async def test_hover_with_dialog_warning(self):
         import pagemap.server as srv
         from pagemap.browser_session import DialogInfo

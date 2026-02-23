@@ -14,8 +14,6 @@ from __future__ import annotations
 import json
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
-import pytest
-
 from pagemap import Interactable, PageMap
 from pagemap.browser_session import (
     _MAX_DIALOG_BUFFER,
@@ -81,22 +79,12 @@ def _make_dialog(dtype: str = "alert", message: str = "Hello") -> AsyncMock:
     return dialog
 
 
-@pytest.fixture(autouse=True)
-def _reset_state():
-    import pagemap.server as srv
-
-    srv._state.cache.invalidate_all()
-    yield
-    srv._state.cache.invalidate_all()
-
-
 # ── TestDialogHandlerBehavior ─────────────────────────────────────────
 
 
 class TestDialogHandlerBehavior:
     """Test _on_dialog() calls accept/dismiss per dialog type."""
 
-    @pytest.mark.asyncio
     async def test_alert_calls_accept(self):
         session = BrowserSession.__new__(BrowserSession)
         session._pending_dialogs = []
@@ -107,7 +95,6 @@ class TestDialogHandlerBehavior:
         dialog.accept.assert_awaited_once()
         dialog.dismiss.assert_not_awaited()
 
-    @pytest.mark.asyncio
     async def test_confirm_calls_dismiss(self):
         session = BrowserSession.__new__(BrowserSession)
         session._pending_dialogs = []
@@ -118,7 +105,6 @@ class TestDialogHandlerBehavior:
         dialog.dismiss.assert_awaited_once()
         dialog.accept.assert_not_awaited()
 
-    @pytest.mark.asyncio
     async def test_prompt_calls_dismiss(self):
         session = BrowserSession.__new__(BrowserSession)
         session._pending_dialogs = []
@@ -129,7 +115,6 @@ class TestDialogHandlerBehavior:
         dialog.dismiss.assert_awaited_once()
         dialog.accept.assert_not_awaited()
 
-    @pytest.mark.asyncio
     async def test_beforeunload_calls_accept(self):
         session = BrowserSession.__new__(BrowserSession)
         session._pending_dialogs = []
@@ -140,7 +125,6 @@ class TestDialogHandlerBehavior:
         dialog.accept.assert_awaited_once()
         dialog.dismiss.assert_not_awaited()
 
-    @pytest.mark.asyncio
     async def test_dialog_info_stored_correctly(self):
         session = BrowserSession.__new__(BrowserSession)
         session._pending_dialogs = []
@@ -154,7 +138,6 @@ class TestDialogHandlerBehavior:
         assert info.message == "Test message"
         assert info.dismissed is False  # alert → accept
 
-    @pytest.mark.asyncio
     async def test_confirm_info_dismissed_true(self):
         session = BrowserSession.__new__(BrowserSession)
         session._pending_dialogs = []
@@ -164,7 +147,6 @@ class TestDialogHandlerBehavior:
 
         assert session._pending_dialogs[0].dismissed is True
 
-    @pytest.mark.asyncio
     async def test_buffer_overflow_keeps_latest(self):
         session = BrowserSession.__new__(BrowserSession)
         session._pending_dialogs = []
@@ -178,7 +160,6 @@ class TestDialogHandlerBehavior:
         assert session._pending_dialogs[-1].message == f"msg-{_MAX_DIALOG_BUFFER + 4}"
         assert session._pending_dialogs[0].message == "msg-5"
 
-    @pytest.mark.asyncio
     async def test_handler_exception_falls_back_to_dismiss(self):
         session = BrowserSession.__new__(BrowserSession)
         session._pending_dialogs = []
@@ -246,7 +227,6 @@ def _build_mock_chain():
 
 
 class TestDialogHandlerRegistration:
-    @pytest.mark.asyncio
     async def test_dialog_handler_registered_on_context(self):
         mock_pw_cm, _, _, mock_context, _ = _build_mock_chain()
 
@@ -265,7 +245,6 @@ class TestDialogHandlerRegistration:
 
 
 class TestDialogDuringExecuteAction:
-    @pytest.mark.asyncio
     async def test_click_with_alert_shows_warning(self):
         import pagemap.server as srv
 
@@ -287,7 +266,6 @@ class TestDialogDuringExecuteAction:
         assert data["dialogs"][0]["message"] == "Welcome!"
         assert data["dialogs"][0]["action"] == "accepted"
 
-    @pytest.mark.asyncio
     async def test_no_dialog_no_warning(self):
         import pagemap.server as srv
 
@@ -300,7 +278,6 @@ class TestDialogDuringExecuteAction:
         data = json.loads(result)
         assert "dialogs" not in data
 
-    @pytest.mark.asyncio
     async def test_multiple_dialogs_all_reported(self):
         import pagemap.server as srv
 
@@ -325,7 +302,6 @@ class TestDialogDuringExecuteAction:
         assert data["dialogs"][1]["message"] == "Delete?"
         assert data["dialogs"][1]["action"] == "dismissed"
 
-    @pytest.mark.asyncio
     async def test_dialog_with_navigation(self):
         """Dialog + URL change → both reported in JSON."""
         import pagemap.server as srv

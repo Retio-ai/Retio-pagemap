@@ -10,8 +10,6 @@ from __future__ import annotations
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
-
 from pagemap import Interactable, PageMap
 from pagemap.browser_session import DialogInfo
 from pagemap.dom_change_detector import DomFingerprint
@@ -78,15 +76,6 @@ def _fp(
         body_child_count=body_child_count,
         title=title,
     )
-
-
-@pytest.fixture(autouse=True)
-def _reset_state():
-    import pagemap.server as srv
-
-    srv._state.cache.invalidate_all()
-    yield
-    srv._state.cache.invalidate_all()
 
 
 # ── TestBuildActionResult ────────────────────────────────────────────
@@ -234,7 +223,6 @@ class TestBuildActionError:
 class TestExecuteActionJsonReturn:
     """Integration tests: execute_action returns valid JSON for each path."""
 
-    @pytest.mark.asyncio
     async def test_validation_error_is_json(self):
         import pagemap.server as srv
 
@@ -244,7 +232,6 @@ class TestExecuteActionJsonReturn:
         assert "error" in data
         assert "Invalid action" in data["error"]
 
-    @pytest.mark.asyncio
     async def test_no_page_map_error_is_json(self):
         result = await execute_action(ref=1, action="click")
         data = json.loads(result)
@@ -252,7 +239,6 @@ class TestExecuteActionJsonReturn:
         assert "No active Page Map" in data["error"]
         assert data["refs_expired"] is True
 
-    @pytest.mark.asyncio
     async def test_ref_not_found_is_json(self):
         import pagemap.server as srv
 
@@ -262,7 +248,6 @@ class TestExecuteActionJsonReturn:
         assert "error" in data
         assert "ref [99] not found" in data["error"]
 
-    @pytest.mark.asyncio
     async def test_affordance_mismatch_is_json(self):
         import pagemap.server as srv
 
@@ -272,7 +257,6 @@ class TestExecuteActionJsonReturn:
         assert "error" in data
         assert "Cannot type" in data["error"]
 
-    @pytest.mark.asyncio
     async def test_click_no_change_is_json(self):
         import pagemap.server as srv
 
@@ -291,7 +275,6 @@ class TestExecuteActionJsonReturn:
         assert data["refs_expired"] is False
         assert "Clicked [1]" in data["description"]
 
-    @pytest.mark.asyncio
     async def test_click_navigation_is_json(self):
         import pagemap.server as srv
 
@@ -307,7 +290,6 @@ class TestExecuteActionJsonReturn:
         assert data["current_url"] == "https://example.com/page2"
         assert "Navigated from" in data["change_details"][0]
 
-    @pytest.mark.asyncio
     async def test_click_dom_major_is_json(self):
         import pagemap.server as srv
 
@@ -326,7 +308,6 @@ class TestExecuteActionJsonReturn:
         assert data["change"] == "major"
         assert data["refs_expired"] is True
 
-    @pytest.mark.asyncio
     async def test_click_dom_minor_is_json(self):
         import pagemap.server as srv
 
@@ -346,7 +327,6 @@ class TestExecuteActionJsonReturn:
         assert data["change"] == "minor"
         assert data["refs_expired"] is False
 
-    @pytest.mark.asyncio
     async def test_type_action_is_json(self):
         import pagemap.server as srv
 
@@ -359,7 +339,6 @@ class TestExecuteActionJsonReturn:
         data = json.loads(result)
         assert "Typed into [2]" in data["description"]
 
-    @pytest.mark.asyncio
     async def test_select_action_is_json(self):
         import pagemap.server as srv
 
@@ -372,7 +351,6 @@ class TestExecuteActionJsonReturn:
         data = json.loads(result)
         assert "Selected option in [3]" in data["description"]
 
-    @pytest.mark.asyncio
     async def test_press_key_action_is_json(self):
         import pagemap.server as srv
 
@@ -385,7 +363,6 @@ class TestExecuteActionJsonReturn:
         data = json.loads(result)
         assert "Pressed key" in data["description"]
 
-    @pytest.mark.asyncio
     async def test_dialog_in_json_response(self):
         import pagemap.server as srv
 
@@ -405,7 +382,6 @@ class TestExecuteActionJsonReturn:
         assert data["dialogs"][0]["type"] == "alert"
         assert data["dialogs"][0]["message"] == "Welcome!"
 
-    @pytest.mark.asyncio
     async def test_timeout_error_is_json(self):
         import asyncio
 
@@ -430,7 +406,6 @@ class TestExecuteActionJsonReturn:
         assert "timed out" in data["error"]
         assert data["refs_expired"] is True
 
-    @pytest.mark.asyncio
     async def test_browser_dead_error_is_json(self):
         from playwright.async_api import Error as PlaywrightError
 
@@ -448,7 +423,6 @@ class TestExecuteActionJsonReturn:
         assert "Browser connection lost" in data["error"]
         assert data["refs_expired"] is True
 
-    @pytest.mark.asyncio
     async def test_value_required_error_is_json(self):
         import pagemap.server as srv
 

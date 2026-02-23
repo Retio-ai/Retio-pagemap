@@ -1634,6 +1634,7 @@ def build_pruned_context(
             context = context.rstrip() + "\n" + pagination
 
     token_count = count_tokens(context)
+    _template_status = "hit" if (template is not None and template is not _NO_TEMPLATE) else "miss"
     logger.info(
         "pruned_context: %d tokens (budget: %d) prune=%.0fms meta=%.0fms compress=%.0fms template=%s",
         token_count,
@@ -1641,8 +1642,25 @@ def build_pruned_context(
         (t1 - t0) * 1000,
         (t2 - t1) * 1000,
         (t3 - t2) * 1000,
-        "hit" if (template is not None and template is not _NO_TEMPLATE) else "miss",
+        _template_status,
     )
+
+    from pagemap.telemetry import emit
+    from pagemap.telemetry.events import PRUNED_CONTEXT_COMPLETE
+
+    emit(
+        PRUNED_CONTEXT_COMPLETE,
+        {
+            "tokens": token_count,
+            "budget": max_tokens,
+            "prune_ms": round((t1 - t0) * 1000, 1),
+            "meta_ms": round((t2 - t1) * 1000, 1),
+            "compress_ms": round((t3 - t2) * 1000, 1),
+            "template_status": _template_status,
+            "page_type": page_type,
+        },
+    )
+
     return context, token_count, metadata
 
 

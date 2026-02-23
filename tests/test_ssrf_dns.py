@@ -83,29 +83,17 @@ def _fake_getaddrinfo_factory(ip_list: list[str]):
     return _fake
 
 
-@pytest.fixture(autouse=True)
-def _reset_state():
-    """Reset global state before each test."""
-    import pagemap.server as srv
-
-    srv._state.cache.invalidate_all()
-    yield
-    srv._state.cache.invalidate_all()
-
-
 # ── TestResolveDns ───────────────────────────────────────────────────
 
 
 class TestResolveDns:
     """Tests for _resolve_dns async DNS resolution."""
 
-    @pytest.mark.asyncio
     async def test_resolves_ipv4(self):
         with patch("pagemap.server.socket.getaddrinfo", _fake_getaddrinfo_factory(["93.184.216.34"])):
             ips = await _resolve_dns("example.com")
         assert ips == ["93.184.216.34"]
 
-    @pytest.mark.asyncio
     async def test_resolves_ipv6(self):
         with patch(
             "pagemap.server.socket.getaddrinfo", _fake_getaddrinfo_factory(["2606:2800:220:1:248:1893:25c8:1946"])
@@ -113,7 +101,6 @@ class TestResolveDns:
             ips = await _resolve_dns("example.com")
         assert ips == ["2606:2800:220:1:248:1893:25c8:1946"]
 
-    @pytest.mark.asyncio
     async def test_resolves_mixed_ipv4_ipv6(self):
         with patch(
             "pagemap.server.socket.getaddrinfo",
@@ -124,7 +111,6 @@ class TestResolveDns:
         assert "93.184.216.34" in ips
         assert "2606:2800:220:1:248:1893:25c8:1946" in ips
 
-    @pytest.mark.asyncio
     async def test_deduplicates_ips(self):
         """getaddrinfo may return duplicate IPs for different socket types."""
         with patch(
@@ -134,7 +120,6 @@ class TestResolveDns:
             ips = await _resolve_dns("example.com")
         assert ips == ["93.184.216.34"]
 
-    @pytest.mark.asyncio
     async def test_gaierror_raises_valueerror(self):
         def _fail(*args, **kw):
             raise socket.gaierror("Name or service not known")
@@ -145,7 +130,6 @@ class TestResolveDns:
         ):
             await _resolve_dns("nonexistent.invalid")
 
-    @pytest.mark.asyncio
     async def test_timeout_raises_valueerror(self):
         """DNS resolution that exceeds timeout raises ValueError."""
         import asyncio
@@ -245,7 +229,6 @@ class TestValidateResolvedIps:
 class TestValidateUrlWithDns:
     """Tests for _validate_url_with_dns combined validation."""
 
-    @pytest.mark.asyncio
     async def test_scheme_blocked_before_dns(self):
         """Invalid scheme is caught without DNS resolution."""
         with patch("pagemap.server._resolve_dns") as mock_dns:
@@ -254,7 +237,6 @@ class TestValidateUrlWithDns:
         assert "scheme" in err.lower()
         mock_dns.assert_not_called()
 
-    @pytest.mark.asyncio
     async def test_ip_literal_skips_dns(self):
         """IP literal URLs skip DNS resolution (already validated by _validate_url)."""
         with patch("pagemap.server._resolve_dns") as mock_dns:
@@ -262,14 +244,12 @@ class TestValidateUrlWithDns:
         assert result is None
         mock_dns.assert_not_called()
 
-    @pytest.mark.asyncio
     async def test_private_ip_literal_blocked_without_dns(self):
         with patch("pagemap.server._resolve_dns") as mock_dns:
             err = await _validate_url_with_dns("http://127.0.0.1/")
         assert err is not None
         mock_dns.assert_not_called()
 
-    @pytest.mark.asyncio
     async def test_domain_resolving_to_private_blocked(self):
         with patch(
             "pagemap.server.socket.getaddrinfo",
@@ -279,7 +259,6 @@ class TestValidateUrlWithDns:
         assert err is not None
         assert "rebinding" in err.lower()
 
-    @pytest.mark.asyncio
     async def test_domain_resolving_to_public_passes(self):
         with patch(
             "pagemap.server.socket.getaddrinfo",
@@ -288,7 +267,6 @@ class TestValidateUrlWithDns:
             result = await _validate_url_with_dns("https://example.com/")
         assert result is None
 
-    @pytest.mark.asyncio
     async def test_dns_timeout_returns_error(self):
         def _fail(*args, **kw):
             raise socket.gaierror("timeout")
@@ -298,7 +276,6 @@ class TestValidateUrlWithDns:
         assert err is not None
         assert "failed" in err.lower()
 
-    @pytest.mark.asyncio
     async def test_octal_ip_skips_dns(self):
         """Octal IP formats are already validated by _validate_url, skip DNS."""
         with patch("pagemap.server._resolve_dns") as mock_dns:
@@ -306,14 +283,12 @@ class TestValidateUrlWithDns:
         assert err is not None  # Blocked as private IP
         mock_dns.assert_not_called()
 
-    @pytest.mark.asyncio
     async def test_hex_ip_skips_dns(self):
         with patch("pagemap.server._resolve_dns") as mock_dns:
             err = await _validate_url_with_dns("http://0x7f000001/")
         assert err is not None
         mock_dns.assert_not_called()
 
-    @pytest.mark.asyncio
     async def test_blocked_host_before_dns(self):
         """Blocked hostnames (localhost etc.) caught before DNS."""
         with patch("pagemap.server._resolve_dns") as mock_dns:
@@ -321,7 +296,6 @@ class TestValidateUrlWithDns:
         assert err is not None
         mock_dns.assert_not_called()
 
-    @pytest.mark.asyncio
     async def test_domain_to_metadata_ip_blocked(self):
         """Domain resolving to cloud metadata IP (169.254.169.254) is blocked."""
         with patch(
@@ -331,7 +305,6 @@ class TestValidateUrlWithDns:
             err = await _validate_url_with_dns("http://metadata-alias.evil.com/")
         assert err is not None
 
-    @pytest.mark.asyncio
     async def test_domain_to_ipv6_loopback_blocked(self):
         with patch(
             "pagemap.server.socket.getaddrinfo",
@@ -347,7 +320,6 @@ class TestValidateUrlWithDns:
 class TestGetPageMapDnsValidation:
     """Integration tests for get_page_map with DNS validation."""
 
-    @pytest.mark.asyncio
     async def test_pre_nav_dns_rebinding_blocked(self):
         """get_page_map blocks URL whose domain resolves to private IP."""
         from pagemap.server import get_page_map
@@ -361,7 +333,6 @@ class TestGetPageMapDnsValidation:
         assert "Error" in result
         assert "rebinding" in result.lower() or "blocked" in result.lower()
 
-    @pytest.mark.asyncio
     async def test_pre_nav_public_domain_proceeds(self):
         """get_page_map allows URL whose domain resolves to public IP."""
         from pagemap.server import get_page_map
@@ -389,7 +360,6 @@ class TestGetPageMapDnsValidation:
         # Should proceed without SSRF block
         assert "Error" not in result or "rebinding" not in result.lower()
 
-    @pytest.mark.asyncio
     async def test_post_nav_redirect_to_private_blocked(self):
         """Post-navigation check catches redirect to domain resolving to private IP."""
         from pagemap.server import get_page_map
@@ -432,7 +402,6 @@ class TestGetPageMapDnsValidation:
 class TestExecuteActionSsrfCheck:
     """Tests for execute_action SSRF check on post-action navigation."""
 
-    @pytest.mark.asyncio
     async def test_click_navigates_to_private_ip_blocked(self):
         """Click that navigates to private IP → blocked, about:blank, page_map cleared."""
         import pagemap.server as srv
@@ -451,7 +420,6 @@ class TestExecuteActionSsrfCheck:
         # Page map should be cleared
         assert srv._state.cache.active is None
 
-    @pytest.mark.asyncio
     async def test_click_navigates_to_metadata_blocked(self):
         """Click navigating to cloud metadata → blocked."""
         import pagemap.server as srv
@@ -467,7 +435,6 @@ class TestExecuteActionSsrfCheck:
         assert "blocked" in data["error"].lower()
         assert srv._state.cache.active is None
 
-    @pytest.mark.asyncio
     async def test_click_navigates_to_dns_rebinding_blocked(self):
         """Click navigating to domain that resolves to private IP → blocked."""
         import pagemap.server as srv
@@ -490,7 +457,6 @@ class TestExecuteActionSsrfCheck:
         mock_session.page.goto.assert_called_once_with("about:blank")
         assert srv._state.cache.active is None
 
-    @pytest.mark.asyncio
     async def test_click_navigates_to_safe_url_passes(self):
         """Click navigating to safe public URL → normal stale ref behavior."""
         import pagemap.server as srv
@@ -513,7 +479,6 @@ class TestExecuteActionSsrfCheck:
         # about:blank NOT called
         mock_session.page.goto.assert_not_called()
 
-    @pytest.mark.asyncio
     async def test_click_same_url_no_ssrf_check(self):
         """Click without navigation → no SSRF check at all."""
         import pagemap.server as srv
@@ -532,7 +497,6 @@ class TestExecuteActionSsrfCheck:
         assert data["change"] != "navigation"
         mock_dns_check.assert_not_called()
 
-    @pytest.mark.asyncio
     async def test_about_blank_goto_fails_gracefully(self):
         """If about:blank navigation fails, error is still returned."""
         import pagemap.server as srv
@@ -549,7 +513,6 @@ class TestExecuteActionSsrfCheck:
         assert "blocked" in data["error"].lower()
         assert srv._state.cache.active is None
 
-    @pytest.mark.asyncio
     async def test_press_key_navigates_to_private_blocked(self):
         """press_key (Enter) that navigates to private IP → blocked."""
         import pagemap.server as srv
@@ -572,7 +535,6 @@ class TestExecuteActionSsrfCheck:
 class TestSsrfRouteGuard:
     """Tests for the browser context route guard (sync URL validation)."""
 
-    @pytest.mark.asyncio
     async def test_route_guard_blocks_document_to_private_ip(self):
         """Route guard blocks document navigation to private IP."""
         from pagemap.browser_session import BrowserSession
@@ -600,7 +562,6 @@ class TestSsrfRouteGuard:
         await handler(mock_route)
         mock_route.abort.assert_called_once_with("blockedbyclient")
 
-    @pytest.mark.asyncio
     async def test_route_guard_allows_document_to_public(self):
         """Route guard allows document navigation to public URL."""
         from pagemap.browser_session import BrowserSession
@@ -623,7 +584,6 @@ class TestSsrfRouteGuard:
         mock_route.continue_.assert_called_once()
         mock_route.abort.assert_not_called()
 
-    @pytest.mark.asyncio
     async def test_route_guard_skips_image_requests(self):
         """Route guard does NOT validate image requests (performance)."""
         from pagemap.browser_session import BrowserSession
@@ -647,7 +607,6 @@ class TestSsrfRouteGuard:
         mock_route.continue_.assert_called_once()
         mock_route.abort.assert_not_called()
 
-    @pytest.mark.asyncio
     async def test_route_guard_skips_stylesheet_requests(self):
         """Route guard does NOT validate stylesheet requests."""
         from pagemap.browser_session import BrowserSession
@@ -669,7 +628,6 @@ class TestSsrfRouteGuard:
         await handler(mock_route)
         mock_route.continue_.assert_called_once()
 
-    @pytest.mark.asyncio
     async def test_route_guard_blocks_subdocument_to_private(self):
         """Route guard blocks iframe (subdocument) to private IP."""
         from pagemap.browser_session import BrowserSession
@@ -691,7 +649,6 @@ class TestSsrfRouteGuard:
         await handler(mock_route)
         mock_route.abort.assert_called_once_with("blockedbyclient")
 
-    @pytest.mark.asyncio
     async def test_route_guard_blocks_metadata_endpoint(self):
         """Route guard blocks navigation to cloud metadata."""
         from pagemap.browser_session import BrowserSession
@@ -713,7 +670,6 @@ class TestSsrfRouteGuard:
         await handler(mock_route)
         mock_route.abort.assert_called_once_with("blockedbyclient")
 
-    @pytest.mark.asyncio
     async def test_route_guard_blocks_localhost(self):
         from pagemap.browser_session import BrowserSession
 
@@ -734,7 +690,6 @@ class TestSsrfRouteGuard:
         await handler(mock_route)
         mock_route.abort.assert_called_once_with("blockedbyclient")
 
-    @pytest.mark.asyncio
     async def test_route_guard_skips_script_requests(self):
         """Route guard does NOT validate script requests."""
         from pagemap.browser_session import BrowserSession
@@ -764,7 +719,6 @@ class TestSsrfRouteGuard:
 class TestRouteGuardInstallation:
     """Test that route guard is installed during session creation."""
 
-    @pytest.mark.asyncio
     async def test_get_session_installs_route_guard(self):
         """_get_session installs route guard on new session."""
         import pagemap.server as srv

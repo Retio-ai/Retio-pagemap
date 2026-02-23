@@ -23,6 +23,7 @@ from pagemap.preprocessing.preprocess import count_tokens, count_tokens_approx
 
 from . import Interactable, PageMap
 from .browser_session import BrowserSession
+from .errors import ResourceExhaustionError
 from .i18n import (
     LOAD_MORE_TERMS,
     NEXT_BUTTON_TERMS,
@@ -60,6 +61,112 @@ _HTML_BODY_SAMPLE_LEN = 30000
 
 DEFAULT_PRUNED_CONTEXT_TOKENS = 1500
 DEFAULT_TOTAL_BUDGET_TOKENS = 5000
+
+# ── Resource exhaustion limits ────────────────────────────────────────
+MAX_DOM_NODES = 50_000  # Reject pages with >50K DOM nodes (memory exhaustion defense)
+MAX_HTML_SIZE_BYTES = 5 * 1024 * 1024  # 5MB limit on page.content() (OOM prevention)
+
+# ── DOM guard + hidden content detection (single evaluate call) ───────
+_DOM_GUARD_AND_HIDDEN_JS = """
+(() => {
+  const all = document.body.querySelectorAll('*');
+  const nodeCount = all.length;
+  let hiddenRemoved = 0;
+  for (let i = all.length - 1; i >= 0; i--) {
+    const el = all[i];
+    const tag = el.tagName.toLowerCase();
+    if (tag === 'script' || tag === 'style' || tag === 'noscript' || tag === 'link' || tag === 'meta') continue;
+    if (!el.parentNode) continue;
+    try {
+      const cs = getComputedStyle(el);
+      if (
+        cs.display === 'none' ||
+        cs.visibility === 'hidden' ||
+        cs.opacity === '0' ||
+        (cs.fontSize === '0px' && el.children.length === 0) ||
+        cs.clipPath === 'inset(100%)' ||
+        /scale\\(0[),\\s]/.test(cs.transform) ||
+        (parseInt(cs.textIndent) <= -9000 && cs.overflow === 'hidden') ||
+        (cs.overflow === 'hidden' && parseInt(cs.height) === 0 && el.children.length === 0) ||
+        (cs.position === 'absolute' && (
+          parseInt(cs.left) < -9000 || parseInt(cs.top) < -9000 ||
+          (parseInt((cs.clip || '').split(',')[0]?.replace('rect(','')) === 0 &&
+           parseInt((cs.clip || '').split(',')[1]) === 0)
+        ))
+      ) {
+        el.remove();
+        hiddenRemoved++;
+      }
+    } catch(e) {}
+  }
+  return { nodeCount, hiddenRemoved };
+})()
+"""
+
+
+def _check_html_size(raw_html: str) -> None:
+    """Reject HTML exceeding 5MB limit. Raises ResourceExhaustionError + emits telemetry."""
+    html_size = len(raw_html.encode("utf-8"))
+    if html_size > MAX_HTML_SIZE_BYTES:
+        try:
+            from .telemetry import emit
+            from .telemetry.events import RESOURCE_GUARD_TRIGGERED
+
+            emit(RESOURCE_GUARD_TRIGGERED, {"guard": "html_size", "value": html_size, "limit": MAX_HTML_SIZE_BYTES})
+        except Exception:  # nosec B110
+            pass
+        raise ResourceExhaustionError(
+            f"HTML size {html_size:,} bytes exceeds {MAX_HTML_SIZE_BYTES:,} byte limit. "
+            "Try a more specific URL or a lighter page."
+        )
+
+
+async def _check_resource_limits(page, raw_html: str) -> str:
+    """HTML size + DOM guard + hidden content JS. Returns (possibly refreshed) HTML.
+
+    Performs:
+    1. HTML size check (raises ResourceExhaustionError if > 5MB)
+    2. DOM node guard via JS evaluate (raises if > 50K nodes)
+    3. Hidden content removal via getComputedStyle
+    4. Re-fetches HTML if hidden elements were removed
+    """
+    _check_html_size(raw_html)
+
+    dom_check: dict | None = None
+    try:
+        dom_check = await page.evaluate(_DOM_GUARD_AND_HIDDEN_JS)
+    except Exception:
+        logger.warning("DOM guard/hidden content check failed, skipping")
+
+    if dom_check is not None:
+        node_count = dom_check.get("nodeCount", 0)
+        if node_count > MAX_DOM_NODES:
+            try:
+                from .telemetry import emit
+                from .telemetry.events import RESOURCE_GUARD_TRIGGERED
+
+                emit(RESOURCE_GUARD_TRIGGERED, {"guard": "dom_nodes", "value": node_count, "limit": MAX_DOM_NODES})
+            except Exception:  # nosec B110
+                pass
+            raise ResourceExhaustionError(
+                f"DOM has {node_count:,} nodes (limit: {MAX_DOM_NODES:,}). "
+                "Page is too complex. Try a more specific URL."
+            )
+        hidden_removed = dom_check.get("hiddenRemoved", 0)
+        if hidden_removed > 0:
+            logger.info("Hidden content removal: %d elements stripped via getComputedStyle", hidden_removed)
+            try:
+                from .telemetry import emit
+                from .telemetry.events import HIDDEN_CONTENT_REMOVED
+
+                emit(HIDDEN_CONTENT_REMOVED, {"hidden_removed": hidden_removed})
+            except Exception:  # nosec B110
+                pass
+            # Re-fetch HTML after hidden element removal
+            raw_html = await page.content()
+
+    return raw_html
+
 
 # ── CJK Token Budget ─────────────────────────────────────────────────
 
@@ -375,6 +482,9 @@ async def build_page_map_live(
     )
     warnings.extend(detect_warnings)
 
+    # ── Resource exhaustion guards ────────────────────────────────────
+    raw_html = await _check_resource_limits(session.page, raw_html)
+
     # Re-classify with raw HTML for meta/DOM signals
     page_type = detect_page_type(page_url, raw_html)
     if template_cache is not None and page_type != "unknown":
@@ -534,6 +644,9 @@ async def build_page_map_from_page(
     )
     warnings.extend(detect_warnings)
 
+    # ── Resource exhaustion guards ────────────────────────────────────
+    raw_html = await _check_resource_limits(page, raw_html)
+
     # Classify with full HTML
     page_type = detect_page_type(page_url, raw_html)
 
@@ -637,6 +750,9 @@ async def rebuild_content_only(
     site_id = _extract_site_id(page_url)
 
     raw_html = await session.get_page_html()
+
+    # ── Resource exhaustion guards (full: HTML + DOM + hidden) ─────
+    raw_html = await _check_resource_limits(session.page, raw_html)
 
     # Classify with full HTML
     page_type = detect_page_type(page_url, raw_html)
@@ -787,6 +903,7 @@ async def rebuild_interactables_only(
     )
 
     raw_html = await session.get_page_html()
+    raw_html = await _check_resource_limits(session.page, raw_html)
     page_type = detect_page_type(page_url, raw_html)
     navigation_hints = _build_navigation_hints(interactables, raw_html, page_type)
 
@@ -1006,6 +1123,9 @@ def build_page_map_offline(
     """
     start = time.monotonic()
 
+    # HTML size guard (no browser — cannot run DOM/hidden JS)
+    _check_html_size(raw_html)
+
     if page_type is None:
         page_type = detect_page_type(url, raw_html)
     if schema_name is None:
@@ -1123,6 +1243,9 @@ async def build_page_map_from_snapshot(
 
     raw_html = raw_html_path.read_text(encoding="utf-8")
 
+    # Pre-load HTML size guard
+    _check_html_size(raw_html)
+
     # Load metadata
     meta = {}
     if meta_path.exists():
@@ -1137,6 +1260,9 @@ async def build_page_map_from_snapshot(
 
     # Load HTML into browser for AX tree
     await session.load_html(raw_html)
+
+    # Post-load resource guards (DOM node count + hidden content removal)
+    raw_html = await _check_resource_limits(session.page, raw_html)
 
     # Detect interactables from loaded page (isolated: failure yields empty list + warning)
     warnings: list[str] = []

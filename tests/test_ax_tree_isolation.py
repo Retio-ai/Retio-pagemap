@@ -12,8 +12,6 @@ from __future__ import annotations
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
-
 from pagemap import Interactable, PageMap
 from pagemap.interactive_detector import detect_all
 from pagemap.serializer import to_agent_prompt, to_json
@@ -41,7 +39,6 @@ def _make_page_map(**overrides) -> PageMap:
 class TestDetectAllAXIsolation:
     """Level 1: AX tree failure inside detect_all() returns [] + warning."""
 
-    @pytest.mark.asyncio
     async def test_cdp_session_creation_failure(self):
         """CDP session creation failure -> empty list + warning."""
         mock_page = MagicMock()
@@ -55,7 +52,6 @@ class TestDetectAllAXIsolation:
         assert "AX tree detection failed" in warnings[0]
         assert "Exception" in warnings[0]
 
-    @pytest.mark.asyncio
     async def test_get_full_ax_tree_protocol_error(self):
         """getFullAXTree CDP protocol error -> empty + warning."""
         mock_cdp = AsyncMock()
@@ -72,7 +68,6 @@ class TestDetectAllAXIsolation:
         assert len(warnings) == 1
         assert "AX tree detection failed" in warnings[0]
 
-    @pytest.mark.asyncio
     async def test_no_warnings_on_success(self):
         """Successful detection returns empty warnings list."""
         mock_cdp = AsyncMock()
@@ -87,7 +82,6 @@ class TestDetectAllAXIsolation:
 
         assert warnings == []
 
-    @pytest.mark.asyncio
     async def test_warning_includes_exception_type(self):
         """Warning message includes the exception class name for diagnostics."""
         mock_page = MagicMock()
@@ -105,7 +99,6 @@ class TestDetectAllAXIsolation:
 class TestBuildPageMapLiveIsolation:
     """Level 2: detect_all() total failure still produces a PageMap."""
 
-    @pytest.mark.asyncio
     async def test_detect_all_crash_still_returns_pagemap(self):
         """Even if detect_all crashes, PageMap with pruned context is returned."""
         from pagemap.page_map_builder import build_page_map_live
@@ -128,7 +121,6 @@ class TestBuildPageMapLiveIsolation:
         assert "detection failed" in page_map.warnings[0].lower()
         assert page_map.pruned_context  # pruned context still present
 
-    @pytest.mark.asyncio
     async def test_detect_all_warning_propagated_to_pagemap(self):
         """AX tree warning from detect_all appears in PageMap.warnings."""
         from pagemap.page_map_builder import build_page_map_live

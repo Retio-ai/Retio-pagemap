@@ -1,0 +1,21 @@
+{
+  "name": "PageMap Development",
+  "image": "mcr.microsoft.com/playwright/python:v1.58.0-noble",
+  "features": {
+    "ghcr.io/astral-sh/setup-uv:1": {}
+  },
+  "postCreateCommand": "uv sync --group dev && playwright install chromium",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "charliermarsh.ruff",
+        "ms-python.debugpy"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": ".venv/bin/python",
+        "python.testing.pytestEnabled": true
+      }
+    }
+  }
+}

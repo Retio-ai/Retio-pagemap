@@ -16,7 +16,6 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
-import pytest
 from playwright.async_api import Error as PlaywrightError
 
 from pagemap import Interactable, PageMap
@@ -138,16 +137,6 @@ def _fp(
     )
 
 
-@pytest.fixture(autouse=True)
-def _reset_state():
-    """Reset global state before each test."""
-    import pagemap.server as srv
-
-    srv._state.cache.invalidate_all()
-    yield
-    srv._state.cache.invalidate_all()
-
-
 # ── TestFillFormConstants ──────────────────────────────────────────
 
 
@@ -248,25 +237,21 @@ class TestFormatFillFormResult:
 class TestFillFormInputValidation:
     """Input validation for fill_form."""
 
-    @pytest.mark.asyncio
     async def test_empty_fields(self):
         result = await fill_form(fields=[])
         assert "empty" in result.lower()
 
-    @pytest.mark.asyncio
     async def test_too_many_fields(self):
         fields = [FormField(ref=1, action="click") for _ in range(21)]
         result = await fill_form(fields=fields)
         assert "Too many fields" in result
         assert "20" in result
 
-    @pytest.mark.asyncio
     async def test_invalid_action(self):
         fields = [FormField(ref=1, action="hover")]
         result = await fill_form(fields=fields)
         assert "invalid action" in result.lower()
 
-    @pytest.mark.asyncio
     async def test_type_missing_value(self):
         fields = [FormField(ref=1, action="type", value=None)]
         import pagemap.server as srv
@@ -275,7 +260,6 @@ class TestFillFormInputValidation:
         result = await fill_form(fields=fields)
         assert "requires a 'value'" in result
 
-    @pytest.mark.asyncio
     async def test_select_missing_value(self):
         fields = [FormField(ref=3, action="select", value=None)]
         import pagemap.server as srv
@@ -284,25 +268,21 @@ class TestFillFormInputValidation:
         result = await fill_form(fields=fields)
         assert "requires a 'value'" in result
 
-    @pytest.mark.asyncio
     async def test_type_value_too_long(self):
         fields = [FormField(ref=1, action="type", value="x" * (MAX_TYPE_VALUE_LENGTH + 1))]
         result = await fill_form(fields=fields)
         assert "too long" in result
 
-    @pytest.mark.asyncio
     async def test_select_value_too_long(self):
         fields = [FormField(ref=3, action="select", value="x" * (MAX_SELECT_VALUE_LENGTH + 1))]
         result = await fill_form(fields=fields)
         assert "too long" in result
 
-    @pytest.mark.asyncio
     async def test_no_page_map(self):
         fields = [FormField(ref=1, action="click")]
         result = await fill_form(fields=fields)
         assert "No active Page Map" in result
 
-    @pytest.mark.asyncio
     async def test_ref_not_found(self):
         import pagemap.server as srv
 
@@ -311,7 +291,6 @@ class TestFillFormInputValidation:
         result = await fill_form(fields=fields)
         assert "ref [999] not found" in result
 
-    @pytest.mark.asyncio
     async def test_affordance_mismatch(self):
         import pagemap.server as srv
 
@@ -329,7 +308,6 @@ class TestFillFormInputValidation:
 class TestFillFormBasic:
     """Basic fill_form operations."""
 
-    @pytest.mark.asyncio
     async def test_single_type(self):
         import pagemap.server as srv
 
@@ -349,7 +327,6 @@ class TestFillFormBasic:
         assert "1/1 fields completed" in result
         assert "typed" in result
 
-    @pytest.mark.asyncio
     async def test_single_select(self):
         import pagemap.server as srv
 
@@ -369,7 +346,6 @@ class TestFillFormBasic:
         assert "1/1 fields completed" in result
         assert "selected" in result
 
-    @pytest.mark.asyncio
     async def test_single_click(self):
         import pagemap.server as srv
 
@@ -389,7 +365,6 @@ class TestFillFormBasic:
         assert "1/1 fields completed" in result
         assert "clicked" in result
 
-    @pytest.mark.asyncio
     async def test_mixed_batch(self):
         import pagemap.server as srv
 
@@ -416,7 +391,6 @@ class TestFillFormBasic:
         assert "typed" in result
         assert "clicked" in result
 
-    @pytest.mark.asyncio
     async def test_click_without_value(self):
         import pagemap.server as srv
 
@@ -435,7 +409,6 @@ class TestFillFormBasic:
 
         assert "1/1 fields completed" in result
 
-    @pytest.mark.asyncio
     async def test_response_format_header(self):
         import pagemap.server as srv
 
@@ -455,7 +428,6 @@ class TestFillFormBasic:
         lines = result.strip().split("\n")
         assert lines[0].startswith("fill_form:")
 
-    @pytest.mark.asyncio
     async def test_css_fallback_noted(self):
         """CSS selector fallback should be noted in result."""
         import pagemap.server as srv
@@ -495,7 +467,6 @@ class TestFillFormBasic:
 class TestFillFormNavigation:
     """Navigation detection during fill_form batch."""
 
-    @pytest.mark.asyncio
     async def test_mid_batch_navigation_stops(self):
         """Navigation after 2nd field → stop, report partial."""
         import pagemap.server as srv
@@ -531,7 +502,6 @@ class TestFillFormNavigation:
         assert "dashboard" in result
         assert srv._state.cache.active is None
 
-    @pytest.mark.asyncio
     async def test_ssrf_navigation_blocked(self):
         import pagemap.server as srv
 
@@ -549,7 +519,6 @@ class TestFillFormNavigation:
         mock_session.page.goto.assert_called_once_with("about:blank")
         assert srv._state.cache.active is None
 
-    @pytest.mark.asyncio
     async def test_last_field_navigation(self):
         """Navigation after last field → full completion + nav warning."""
         import pagemap.server as srv
@@ -578,7 +547,6 @@ class TestFillFormNavigation:
         assert "1/1 fields completed" in result
         assert "navigated" in result.lower()
 
-    @pytest.mark.asyncio
     async def test_partial_completion_report(self):
         """Partial report shows which fields completed before stop."""
         import pagemap.server as srv
@@ -611,7 +579,6 @@ class TestFillFormNavigation:
 class TestFillFormPopup:
     """Popup handling during fill_form."""
 
-    @pytest.mark.asyncio
     async def test_popup_detected_switches(self):
         import pagemap.server as srv
 
@@ -636,7 +603,6 @@ class TestFillFormPopup:
         assert "popup" in result.lower() or "New tab" in result
         assert srv._state.cache.active is None
 
-    @pytest.mark.asyncio
     async def test_popup_ssrf_blocked(self):
         import pagemap.server as srv
 
@@ -666,7 +632,6 @@ class TestFillFormPopup:
 class TestFillFormDomChange:
     """DOM change detection after fill_form batch."""
 
-    @pytest.mark.asyncio
     async def test_major_dom_change(self):
         import pagemap.server as srv
 
@@ -686,7 +651,6 @@ class TestFillFormDomChange:
         assert "get_page_map" in result
         assert srv._state.cache.active is None
 
-    @pytest.mark.asyncio
     async def test_minor_dom_change(self):
         import pagemap.server as srv
 
@@ -707,7 +671,6 @@ class TestFillFormDomChange:
         # Minor change should preserve page map
         assert srv._state.cache.active is page_map
 
-    @pytest.mark.asyncio
     async def test_no_dom_change(self):
         import pagemap.server as srv
 
@@ -738,7 +701,6 @@ class TestFillFormDomChange:
 class TestFillFormErrors:
     """Error handling for fill_form."""
 
-    @pytest.mark.asyncio
     async def test_locator_error_stops(self):
         import pagemap.server as srv
 
@@ -766,7 +728,6 @@ class TestFillFormErrors:
         assert "locator error" in result
         assert "0/2" in result
 
-    @pytest.mark.asyncio
     async def test_playwright_error_stops(self):
         import pagemap.server as srv
 
@@ -789,7 +750,6 @@ class TestFillFormErrors:
         assert "action error" in result
         assert "0/2" in result
 
-    @pytest.mark.asyncio
     async def test_browser_dead(self):
         import pagemap.server as srv
 
@@ -804,7 +764,6 @@ class TestFillFormErrors:
         assert "Browser connection lost" in result
         assert srv._state.cache.active is None
 
-    @pytest.mark.asyncio
     async def test_timeout(self):
         import pagemap.server as srv
 
@@ -827,7 +786,6 @@ class TestFillFormErrors:
         assert "timed out" in result
         assert srv._state.cache.active is None
 
-    @pytest.mark.asyncio
     async def test_partial_result_on_error(self):
         """First field succeeds, second fails → partial report."""
         import pagemap.server as srv
@@ -868,7 +826,6 @@ class TestFillFormErrors:
 class TestFillFormDialogs:
     """Dialog warnings appended to fill_form results."""
 
-    @pytest.mark.asyncio
     async def test_dialog_warning_appended(self):
         import pagemap.server as srv
         from pagemap.browser_session import DialogInfo

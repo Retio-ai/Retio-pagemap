@@ -14,7 +14,6 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
 from playwright.async_api import Error as PlaywrightError
 
 from pagemap import Interactable, PageMap
@@ -61,23 +60,12 @@ def _make_mock_session(go_back_url: str | None = "https://example.com/prev") -> 
     return session
 
 
-@pytest.fixture(autouse=True)
-def _reset_state():
-    """Reset global state before each test."""
-    import pagemap.server as srv
-
-    srv._state.cache.invalidate_all()
-    yield
-    srv._state.cache.invalidate_all()
-
-
 # ── TestNavigateBackBasic ──────────────────────────────────────────
 
 
 class TestNavigateBackBasic:
     """Basic navigate_back functionality."""
 
-    @pytest.mark.asyncio
     async def test_returns_navigated_url(self):
         mock_session = _make_mock_session(go_back_url="https://example.com/prev")
 
@@ -90,7 +78,6 @@ class TestNavigateBackBasic:
         assert "https://example.com/prev" in result
         assert "Navigated back" in result
 
-    @pytest.mark.asyncio
     async def test_invalidates_page_map(self):
         import pagemap.server as srv
 
@@ -105,7 +92,6 @@ class TestNavigateBackBasic:
 
         assert srv._state.cache.active is None
 
-    @pytest.mark.asyncio
     async def test_suggests_get_page_map(self):
         mock_session = _make_mock_session()
 
@@ -117,7 +103,6 @@ class TestNavigateBackBasic:
 
         assert "get_page_map" in result
 
-    @pytest.mark.asyncio
     async def test_constant_defined(self):
         assert NAVIGATE_BACK_TIMEOUT_SECONDS == 30
 
@@ -128,7 +113,6 @@ class TestNavigateBackBasic:
 class TestNavigateBackNoHistory:
     """No history → informational message, page_map preserved."""
 
-    @pytest.mark.asyncio
     async def test_no_history_returns_message(self):
         mock_session = _make_mock_session(go_back_url=None)
 
@@ -137,7 +121,6 @@ class TestNavigateBackNoHistory:
 
         assert "No previous page" in result
 
-    @pytest.mark.asyncio
     async def test_no_history_preserves_page_map(self):
         import pagemap.server as srv
 
@@ -157,7 +140,6 @@ class TestNavigateBackNoHistory:
 class TestNavigateBackSsrf:
     """SSRF post-check on navigated URL."""
 
-    @pytest.mark.asyncio
     async def test_blocked_url_resets_to_blank(self):
         import pagemap.server as srv
 
@@ -171,7 +153,6 @@ class TestNavigateBackSsrf:
         mock_session.page.goto.assert_called_once_with("about:blank")
         assert srv._state.cache.active is None
 
-    @pytest.mark.asyncio
     async def test_private_ip_blocked(self):
         mock_session = _make_mock_session(go_back_url="http://192.168.1.1/admin")
 
@@ -180,7 +161,6 @@ class TestNavigateBackSsrf:
 
         assert "blocked" in result.lower()
 
-    @pytest.mark.asyncio
     async def test_safe_url_allowed(self):
         mock_session = _make_mock_session(go_back_url="https://safe.example.com")
 
@@ -193,7 +173,6 @@ class TestNavigateBackSsrf:
         assert "Navigated back" in result
         assert "safe.example.com" in result
 
-    @pytest.mark.asyncio
     async def test_ssrf_error_includes_reason(self):
         mock_session = _make_mock_session(go_back_url="http://127.0.0.1/admin")
 
@@ -209,7 +188,6 @@ class TestNavigateBackSsrf:
 class TestNavigateBackBrowserDead:
     """Browser death during navigate_back."""
 
-    @pytest.mark.asyncio
     async def test_target_closed(self):
         import pagemap.server as srv
 
@@ -223,7 +201,6 @@ class TestNavigateBackBrowserDead:
         assert "Browser connection lost" in result
         assert srv._state.cache.active is None
 
-    @pytest.mark.asyncio
     async def test_browser_disconnected(self):
         mock_session = _make_mock_session()
         mock_session.go_back = AsyncMock(side_effect=PlaywrightError("Browser disconnected"))
@@ -240,7 +217,6 @@ class TestNavigateBackBrowserDead:
 class TestNavigateBackTimeout:
     """Timeout handling for navigate_back."""
 
-    @pytest.mark.asyncio
     async def test_timeout_returns_error(self):
         import pagemap.server as srv
 
@@ -268,7 +244,6 @@ class TestNavigateBackTimeout:
 class TestNavigateBackDialogWarnings:
     """Dialog warnings included in navigate_back responses."""
 
-    @pytest.mark.asyncio
     async def test_dialog_warning_on_success(self):
         from pagemap.browser_session import DialogInfo
 
@@ -286,7 +261,6 @@ class TestNavigateBackDialogWarnings:
         assert "JS dialog" in result
         assert "Leaving page" in result
 
-    @pytest.mark.asyncio
     async def test_dialog_warning_on_no_history(self):
         from pagemap.browser_session import DialogInfo
 
@@ -309,7 +283,6 @@ class TestNavigateBackDialogWarnings:
 class TestNavigateBackPageMapNone:
     """navigate_back works even when _last_page_map is already None."""
 
-    @pytest.mark.asyncio
     async def test_works_with_no_existing_page_map(self):
         import pagemap.server as srv
 

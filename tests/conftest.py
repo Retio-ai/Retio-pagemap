@@ -33,3 +33,13 @@ def _block_real_browser(request, monkeypatch):
         )
 
     monkeypatch.setattr("pagemap.server._get_session", _no_real_session)
+
+
+@pytest.fixture(autouse=True)
+def _reset_state():
+    """Reset server cache state before and after each test."""
+    import pagemap.server as srv
+
+    srv._state.cache.invalidate_all()
+    yield
+    srv._state.cache.invalidate_all()

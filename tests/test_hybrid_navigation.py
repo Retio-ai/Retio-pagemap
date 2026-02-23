@@ -43,7 +43,6 @@ class TestHybridNavigate:
         session._context.clear_cookies = AsyncMock()
         return session
 
-    @pytest.mark.asyncio
     async def test_networkidle_strategy(self):
         """Legacy networkidle strategy."""
         session = self._make_session(wait_strategy="networkidle")
@@ -54,7 +53,6 @@ class TestHybridNavigate:
         session._page.goto.assert_called_once_with("https://example.com", wait_until="networkidle", timeout=30000)
         assert result.strategy == "networkidle"
 
-    @pytest.mark.asyncio
     async def test_load_strategy(self):
         """Pure load strategy (no networkidle attempt)."""
         session = self._make_session(wait_strategy="load")
@@ -65,7 +63,6 @@ class TestHybridNavigate:
         session._page.goto.assert_called_once_with("https://example.com", wait_until="load", timeout=30000)
         assert result.strategy == "load"
 
-    @pytest.mark.asyncio
     async def test_hybrid_networkidle_achieved(self):
         """Hybrid: networkidle achieved within budget."""
         session = self._make_session(wait_strategy="hybrid")
@@ -77,7 +74,6 @@ class TestHybridNavigate:
         session._page.goto.assert_called_once_with("https://example.com", wait_until="load", timeout=30000)
         assert result.strategy == "networkidle"
 
-    @pytest.mark.asyncio
     async def test_hybrid_networkidle_timeout(self):
         """Hybrid: networkidle budget exceeded → load+settle."""
         session = self._make_session(wait_strategy="hybrid", networkidle_budget_ms=100)
@@ -92,7 +88,6 @@ class TestHybridNavigate:
         result = await session.navigate("https://example.com")
         assert result.strategy == "load+settle"
 
-    @pytest.mark.asyncio
     async def test_hybrid_networkidle_error_non_fatal(self):
         """Hybrid: networkidle completes with non-fatal error → load+settle."""
         session = self._make_session(wait_strategy="hybrid")
@@ -106,7 +101,6 @@ class TestHybridNavigate:
         result = await session.navigate("https://example.com")
         assert result.strategy == "load+settle"
 
-    @pytest.mark.asyncio
     async def test_hybrid_browser_dead_propagates(self):
         """Hybrid: browser death error during networkidle → re-raised."""
         session = self._make_session(wait_strategy="hybrid")

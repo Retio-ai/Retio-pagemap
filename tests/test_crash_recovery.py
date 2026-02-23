@@ -33,7 +33,6 @@ def _make_page_map(url: str = "https://example.com") -> PageMap:
 class TestIsAlive:
     """Tests for BrowserSession.is_alive() 2-stage health check."""
 
-    @pytest.mark.asyncio
     async def test_returns_true_when_healthy(self):
         session = BrowserSession()
         session._browser = MagicMock()
@@ -43,14 +42,12 @@ class TestIsAlive:
 
         assert await session.is_alive() is True
 
-    @pytest.mark.asyncio
     async def test_returns_false_when_browser_is_none(self):
         session = BrowserSession()
         session._browser = None
 
         assert await session.is_alive() is False
 
-    @pytest.mark.asyncio
     async def test_returns_false_when_disconnected(self):
         session = BrowserSession()
         session._browser = MagicMock()
@@ -58,7 +55,6 @@ class TestIsAlive:
 
         assert await session.is_alive() is False
 
-    @pytest.mark.asyncio
     async def test_returns_false_when_page_is_none(self):
         session = BrowserSession()
         session._browser = MagicMock()
@@ -67,7 +63,6 @@ class TestIsAlive:
 
         assert await session.is_alive() is False
 
-    @pytest.mark.asyncio
     async def test_returns_false_on_target_closed(self):
         session = BrowserSession()
         session._browser = MagicMock()
@@ -77,7 +72,6 @@ class TestIsAlive:
 
         assert await session.is_alive() is False
 
-    @pytest.mark.asyncio
     async def test_returns_false_on_connection_error(self):
         session = BrowserSession()
         session._browser = MagicMock()
@@ -87,7 +81,6 @@ class TestIsAlive:
 
         assert await session.is_alive() is False
 
-    @pytest.mark.asyncio
     async def test_returns_false_on_timeout(self):
         session = BrowserSession()
         session._browser = MagicMock()
@@ -101,7 +94,6 @@ class TestIsAlive:
 
         assert await session.is_alive(timeout=0.05) is False
 
-    @pytest.mark.asyncio
     async def test_skips_evaluate_when_disconnected(self):
         session = BrowserSession()
         session._browser = MagicMock()
@@ -120,7 +112,6 @@ class TestIsAlive:
 class TestStopHardening:
     """Tests that stop() suppresses errors from crashed browsers."""
 
-    @pytest.mark.asyncio
     async def test_suppresses_browser_close_error(self):
         session = BrowserSession()
         session._browser = AsyncMock()
@@ -143,7 +134,6 @@ class TestStopHardening:
 class TestGetSessionRecovery:
     """Tests for server._get_session() crash recovery logic."""
 
-    @pytest.mark.asyncio
     async def test_healthy_session_is_reused(self):
         import pagemap.server as srv
 
@@ -164,7 +154,6 @@ class TestGetSessionRecovery:
         srv._state.session = None
         srv._state.cache.invalidate_all()
 
-    @pytest.mark.asyncio
     async def test_dead_session_is_replaced(self):
         import pagemap.server as srv
 
@@ -190,7 +179,6 @@ class TestGetSessionRecovery:
         srv._state.session = None
         srv._state.cache.invalidate_all()
 
-    @pytest.mark.asyncio
     async def test_stop_failure_during_recovery_is_suppressed(self):
         import pagemap.server as srv
 
@@ -214,7 +202,6 @@ class TestGetSessionRecovery:
         srv._state.session = None
         srv._state.cache.invalidate_all()
 
-    @pytest.mark.asyncio
     async def test_recovery_start_failure_propagates(self):
         import pagemap.server as srv
 

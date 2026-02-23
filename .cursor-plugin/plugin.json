@@ -1,0 +1,19 @@
+{
+  "$schema": "https://raw.githubusercontent.com/cursor/plugins/main/schemas/plugin.schema.json",
+  "name": "pagemap",
+  "displayName": "PageMap",
+  "version": "0.6.0",
+  "description": "Browse and interact with any web page at 97% fewer tokens. Extracts interactive elements with ref numbers and compressed page content for AI agents.",
+  "author": {
+    "name": "Retio AI"
+  },
+  "publisher": "Retio AI",
+  "homepage": "https://github.com/Retio-ai/Retio-pagemap",
+  "repository": "https://github.com/Retio-ai/Retio-pagemap",
+  "license": "AGPL-3.0-only",
+  "keywords": ["web-scraping", "browsing", "mcp", "browser-automation", "ai-agent"],
+  "category": "developer-tools",
+  "skills": "skills/**/*.md",
+  "rules": "rules/**/*.mdc",
+  "mcpServers": "mcp.json"
+}

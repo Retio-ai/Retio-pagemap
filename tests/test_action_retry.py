@@ -99,16 +99,6 @@ def _make_mock_session(
     return session
 
 
-@pytest.fixture(autouse=True)
-def _reset_state():
-    """Reset global state before each test."""
-    import pagemap.server as srv
-
-    srv._state.cache.invalidate_all()
-    yield
-    srv._state.cache.invalidate_all()
-
-
 # ── TestIsRetryableError ─────────────────────────────────────────────
 
 
@@ -165,7 +155,6 @@ class TestIsRetryableError:
 class TestRetrySuccessFirstAttempt:
     """First attempt succeeds → no retry, 100% backward compat."""
 
-    @pytest.mark.asyncio
     async def test_click_first_attempt_success(self):
         import pagemap.server as srv
 
@@ -179,7 +168,6 @@ class TestRetrySuccessFirstAttempt:
         assert "Clicked [1]" in data["description"]
         assert "error" not in data
 
-    @pytest.mark.asyncio
     async def test_type_first_attempt_success(self):
         import pagemap.server as srv
 
@@ -193,7 +181,6 @@ class TestRetrySuccessFirstAttempt:
         assert "Typed into [2]" in data["description"]
         assert "error" not in data
 
-    @pytest.mark.asyncio
     async def test_select_first_attempt_success(self):
         import pagemap.server as srv
 
@@ -214,7 +201,6 @@ class TestRetrySuccessFirstAttempt:
 class TestRetryOnTransientFailure:
     """Transient failure → retry → success."""
 
-    @pytest.mark.asyncio
     async def test_type_succeeds_after_one_retry(self):
         import pagemap.server as srv
 
@@ -233,7 +219,6 @@ class TestRetryOnTransientFailure:
         assert "Typed into [2]" in data["description"]
         assert locator.first.fill.call_count == 2
 
-    @pytest.mark.asyncio
     async def test_click_succeeds_on_not_visible(self):
         import pagemap.server as srv
 
@@ -251,7 +236,6 @@ class TestRetryOnTransientFailure:
         assert "Clicked [1]" in data["description"]
         assert locator.first.click.call_count == 2
 
-    @pytest.mark.asyncio
     async def test_click_not_retried_on_timeout(self):
         """Timeout is ambiguous for click → immediate failure."""
         import pagemap.server as srv
@@ -270,7 +254,6 @@ class TestRetryOnTransientFailure:
         assert "Error" in result or "error" in result
         assert locator.first.click.call_count == 1
 
-    @pytest.mark.asyncio
     async def test_retry_re_resolves_locator(self):
         """Locator is re-resolved on each retry (role→CSS switch possible)."""
         import pagemap.server as srv
@@ -288,7 +271,6 @@ class TestRetryOnTransientFailure:
         # get_by_role called twice — once per attempt (re-resolved)
         assert page.get_by_role.call_count == 2
 
-    @pytest.mark.asyncio
     async def test_select_retried_on_not_attached(self):
         import pagemap.server as srv
 
@@ -313,7 +295,6 @@ class TestRetryOnTransientFailure:
 class TestRetryExhausted:
     """All retries fail → sanitized error returned."""
 
-    @pytest.mark.asyncio
     async def test_all_retries_fail(self):
         import pagemap.server as srv
 
@@ -339,7 +320,6 @@ class TestRetryExhausted:
 class TestNonRetryableError:
     """Non-retryable errors fail immediately, no retry."""
 
-    @pytest.mark.asyncio
     async def test_target_closed_not_retried(self):
         import pagemap.server as srv
 
@@ -357,7 +337,6 @@ class TestNonRetryableError:
         assert "error" in data
         assert locator.first.fill.call_count == 1
 
-    @pytest.mark.asyncio
     async def test_unknown_error_not_retried(self):
         import pagemap.server as srv
 
@@ -382,7 +361,6 @@ class TestNonRetryableError:
 class TestPressKeyNotRetried:
     """press_key bypasses retry helper entirely."""
 
-    @pytest.mark.asyncio
     async def test_press_key_no_retry(self):
         import pagemap.server as srv
 
@@ -404,7 +382,6 @@ class TestPressKeyNotRetried:
 class TestUrlCheckBetweenRetries:
     """URL change between retries aborts retry loop."""
 
-    @pytest.mark.asyncio
     async def test_url_changed_aborts_retry(self):
         """Attempt 1 fails + URL changes → retry aborted."""
         import pagemap.server as srv
@@ -428,7 +405,6 @@ class TestUrlCheckBetweenRetries:
         # Only 1 attempt — retry aborted due to URL change
         assert locator.first.fill.call_count == 1
 
-    @pytest.mark.asyncio
     async def test_url_unchanged_continues_retry(self):
         """URL stays the same → retry proceeds normally."""
         import pagemap.server as srv
@@ -478,7 +454,6 @@ def _fake_monotonic(*values):
 class TestWallClockBudget:
     """Wall-clock budget enforcement."""
 
-    @pytest.mark.asyncio
     async def test_budget_exhausted_skips_retry(self):
         """Elapsed > budget → retry skipped."""
         target = Interactable(
@@ -515,7 +490,6 @@ class TestWallClockBudget:
         # Only 1 attempt — budget exhausted before retry
         assert locator.first.fill.call_count == 1
 
-    @pytest.mark.asyncio
     async def test_budget_sufficient_allows_retry(self):
         """Enough budget remaining → retry proceeds."""
         target = Interactable(
@@ -556,7 +530,6 @@ class TestWallClockBudget:
 class TestRetryWithStaleRef:
     """Retry + subsequent navigation combination."""
 
-    @pytest.mark.asyncio
     async def test_success_after_retry_then_navigation(self):
         """Retry succeeds → post-action URL change → JSON change=navigation."""
         import pagemap.server as srv
@@ -587,7 +560,6 @@ class TestRetryWithStaleRef:
 class TestClickDoubleSubmissionSafety:
     """Click vs type: same error, different retry behavior."""
 
-    @pytest.mark.asyncio
     async def test_click_timeout_not_retried(self):
         """TimeoutError on click → immediate failure (not safe to retry)."""
         import pagemap.server as srv
@@ -606,7 +578,6 @@ class TestClickDoubleSubmissionSafety:
         assert "Error" in result or "error" in result
         assert locator.first.click.call_count == 1
 
-    @pytest.mark.asyncio
     async def test_type_timeout_is_retried(self):
         """Same TimeoutError on type → retried (idempotent)."""
         import pagemap.server as srv
@@ -625,7 +596,6 @@ class TestClickDoubleSubmissionSafety:
         assert "Typed into [2]" in data["description"]
         assert locator.first.fill.call_count == 2
 
-    @pytest.mark.asyncio
     async def test_click_intercept_is_retried(self):
         """Intercept on click → retried (pre-dispatch failure)."""
         import pagemap.server as srv

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "retio-pagemap"
-version = "0.5.2"
+version = "0.6.0"
 description = "Structured web page representation for AI agents — 97% HTML token reduction"
 requires-python = ">=3.11"
 license = {text = "AGPL-3.0-only"}
@@ -57,9 +57,16 @@ benchmark = [
 
 [dependency-groups]
 dev = [
-    "pytest>=8.0",
-    "pytest-asyncio>=0.23.0",
+    "pytest>=8.3",
+    "pytest-asyncio>=1.0",
+    "pytest-cov>=6.0",
+    "pytest-xdist>=3.5",
+    "pytest-timeout>=2.3",
+    "pytest-randomly>=3.15",
+    "hypothesis>=6.100",
     "ruff>=0.4.0",
+    "pip-audit>=2.10.0",
+    "bandit>=1.9.0",
 ]
 benchmark = [
     "anthropic>=0.40.0",
@@ -114,7 +121,10 @@ exclude = [
     ".github/",
     ".claude/",
     ".claude-plugin/",
+    ".cursor-plugin/",
     "skills/",
+    "rules/",
+    "mcp.json",
     ".playwright-mcp/",
     ".mcpregistry_*",
     ".env",
@@ -124,8 +134,6 @@ exclude = [
     "README.md",
     "README_DRAFT.md",
     "ROADMAP.md",
-    "BENCHMARK_ROADMAP.md",
-    "PRUNING_ROADMAP.md",
     "BUSINESS_PLAN_DRAFT.md",
     "DIRECTION.md",
     "AGPL_TRANSITION_CHECKLIST.md",
@@ -159,9 +167,50 @@ ignore = [
 [tool.ruff.lint.isort]
 known-first-party = ["pagemap"]
 
+[tool.bandit]
+exclude_dirs = [
+    "tests",
+    "src/pagemap/benchmark",
+    "src/pagemap/data",
+    "src/pagemap/collect.py",
+    "src/pagemap/collect_sim.py",
+    "src/pagemap/collect_scenarios.py",
+    "src/pagemap/validate_axtree.py",
+]
+skips = [
+    "B101",  # assert — internal invariant checks
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+timeout = 30
+addopts = "--strict-markers -ra"
 markers = [
     "allow_real_get_session: opt out of the _block_real_browser safety net",
+]
+
+[tool.coverage.run]
+source = ["pagemap"]
+omit = [
+    "src/pagemap/benchmark/*",
+    "src/pagemap/data/*",
+    "src/pagemap/collect.py",
+    "src/pagemap/collect_sim.py",
+    "src/pagemap/collect_scenarios.py",
+    "src/pagemap/validate_axtree.py",
+    "src/pagemap/__main__.py",
+    "src/pagemap/cli.py",
+]
+
+[tool.coverage.report]
+fail_under = 60
+show_missing = true
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.",
+    "@overload",
+    "raise NotImplementedError",
 ]

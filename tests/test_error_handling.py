@@ -15,7 +15,6 @@ import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
-import pytest
 from playwright.async_api import Error as PlaywrightError
 
 from pagemap import Interactable, PageMap
@@ -97,16 +96,6 @@ def _make_mock_session(
     return session
 
 
-@pytest.fixture(autouse=True)
-def _reset_state():
-    """Reset global state before each test."""
-    import pagemap.server as srv
-
-    srv._state.cache.invalidate_all()
-    yield
-    srv._state.cache.invalidate_all()
-
-
 # ── TestBrowserDeadClassifier ────────────────────────────────────────
 
 
@@ -149,7 +138,6 @@ class TestTargetClosedDuringAction:
     """TargetClosedError during click/type/select/press_key
     → _last_page_map=None + recovery message."""
 
-    @pytest.mark.asyncio
     async def test_click_target_closed(self):
         import pagemap.server as srv
 
@@ -166,7 +154,6 @@ class TestTargetClosedDuringAction:
         assert data["refs_expired"] is True
         assert srv._state.cache.active is None
 
-    @pytest.mark.asyncio
     async def test_type_target_closed(self):
         import pagemap.server as srv
 
@@ -182,7 +169,6 @@ class TestTargetClosedDuringAction:
         assert "Browser connection lost" in data["error"]
         assert srv._state.cache.active is None
 
-    @pytest.mark.asyncio
     async def test_select_target_closed(self):
         import pagemap.server as srv
 
@@ -198,7 +184,6 @@ class TestTargetClosedDuringAction:
         assert "Browser connection lost" in data["error"]
         assert srv._state.cache.active is None
 
-    @pytest.mark.asyncio
     async def test_press_key_target_closed(self):
         import pagemap.server as srv
 
@@ -213,7 +198,6 @@ class TestTargetClosedDuringAction:
         assert "Browser connection lost" in data["error"]
         assert srv._state.cache.active is None
 
-    @pytest.mark.asyncio
     async def test_target_page_context_closed(self):
         """Full Playwright error message variant."""
         import pagemap.server as srv
@@ -237,7 +221,6 @@ class TestTargetClosedDuringAction:
 class TestBrowserDisconnected:
     """Non-Playwright disconnect errors → same browser-dead handling."""
 
-    @pytest.mark.asyncio
     async def test_browser_disconnected_error(self):
         import pagemap.server as srv
 
@@ -253,7 +236,6 @@ class TestBrowserDisconnected:
         assert "Browser connection lost" in data["error"]
         assert srv._state.cache.active is None
 
-    @pytest.mark.asyncio
     async def test_connection_closed_error(self):
         import pagemap.server as srv
 
@@ -276,7 +258,6 @@ class TestBrowserDisconnected:
 class TestOverallTimeout:
     """execute_action overall timeout → _last_page_map=None + timeout message."""
 
-    @pytest.mark.asyncio
     async def test_timeout_on_slow_click(self):
         """Action hangs forever → overall timeout fires."""
         import pagemap.server as srv
@@ -301,7 +282,6 @@ class TestOverallTimeout:
         assert data["refs_expired"] is True
         assert srv._state.cache.active is None
 
-    @pytest.mark.asyncio
     async def test_timeout_on_slow_type(self):
         import pagemap.server as srv
 
@@ -324,7 +304,6 @@ class TestOverallTimeout:
         assert "timed out" in data["error"]
         assert srv._state.cache.active is None
 
-    @pytest.mark.asyncio
     async def test_timeout_includes_seconds_in_message(self):
         """Message includes the actual timeout value."""
         import pagemap.server as srv
@@ -354,7 +333,6 @@ class TestOverallTimeout:
 class TestTimeoutDuringLocator:
     """Playwright 5s timeout during _resolve_locator → retry or error."""
 
-    @pytest.mark.asyncio
     async def test_locator_timeout_triggers_retry(self):
         """Playwright timeout in locator.count() → retried via retry helper."""
         import pagemap.server as srv
@@ -374,7 +352,6 @@ class TestTimeoutDuringLocator:
         assert "Typed into [2]" in data["description"]
         assert locator.first.fill.call_count == 2
 
-    @pytest.mark.asyncio
     async def test_locator_count_timeout_falls_to_css(self):
         """role locator count() raises → fallback to CSS selector."""
         import pagemap.server as srv
@@ -408,7 +385,6 @@ class TestTimeoutDuringLocator:
 class TestSessionRecoveryAfterDeath:
     """After TargetClosedError → next get_page_map should recover."""
 
-    @pytest.mark.asyncio
     async def test_page_map_none_after_target_closed(self):
         """TargetClosed sets _last_page_map=None, subsequent check confirms."""
         import pagemap.server as srv
@@ -429,7 +405,6 @@ class TestSessionRecoveryAfterDeath:
         data = json.loads(result)
         assert "No active Page Map" in data["error"]
 
-    @pytest.mark.asyncio
     async def test_execute_after_timeout_needs_refresh(self):
         """After timeout, next execute_action requires get_page_map refresh."""
         import pagemap.server as srv

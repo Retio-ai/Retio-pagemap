@@ -21,13 +21,16 @@ IMPORTANT: Uses STDIO transport. All logging goes to stderr only.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import ipaddress
 import json
 import logging
+import os
 import re
 import socket
 import sys
 import uuid
+from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from urllib.parse import urlparse
 
@@ -72,6 +75,10 @@ mcp = FastMCP(
 # ── Security constants ───────────────────────────────────────────────
 
 ALLOWED_URL_SCHEMES = {"http", "https"}
+
+# Response size guards (configurable via env vars)
+MAX_RESPONSE_SIZE_BYTES = int(os.environ.get("PAGEMAP_MAX_TEXT_BYTES", 1 * 1024 * 1024))
+MAX_SCREENSHOT_SIZE_BYTES = int(os.environ.get("PAGEMAP_MAX_IMAGE_BYTES", 5 * 1024 * 1024))
 
 # Hostnames that must never be navigated to
 BLOCKED_HOSTS = frozenset(
@@ -544,6 +551,17 @@ async def _validate_url_with_dns(url: str) -> str | None:
 
 # ── Error sanitization ───────────────────────────────────────────────
 
+_RECOVERY_HINTS: dict[str, str] = {
+    "get_page_map": "Try again, or navigate to a different URL.",
+    "get_page_state": "Call get_page_map to re-establish browser connection.",
+    "take_screenshot": "Call get_page_map to verify page state, then retry.",
+    "navigate_back": "Call get_page_map to check current page state.",
+    "scroll_page": "Call get_page_map to refresh page state, then retry.",
+    "fill_form": "Call get_page_map to refresh refs, then retry fill_form.",
+    "wait_for": "Call get_page_map to check current page content.",
+    "batch": "Check the URL and retry, or skip this URL.",
+}
+
 
 def _safe_error(context: str, exc: Exception) -> str:
     """Return a sanitized error message for tool responses.
@@ -551,6 +569,12 @@ def _safe_error(context: str, exc: Exception) -> str:
     Full details are logged to stderr; only a generic message is returned.
     """
     logger.error("%s: %s", context, exc, exc_info=True)
+    try:
+        from .telemetry.events import TOOL_ERROR
+
+        _telem(TOOL_ERROR, {"context": context, "error_type": type(exc).__name__})
+    except Exception:  # nosec B110
+        pass
     # Return the exception class name and a cleaned message without sensitive data
     exc_msg = str(exc)
     # Strip API keys / tokens (sk-ant-..., sk-..., Bearer ..., key=..., etc.)
@@ -574,7 +598,37 @@ def _safe_error(context: str, exc: Exception) -> str:
     # Truncate long messages
     if len(exc_msg) > 200:
         exc_msg = exc_msg[:200] + "..."
+    hint = _RECOVERY_HINTS.get(context, "")
+    if not hint:
+        for prefix in _RECOVERY_HINTS:
+            if context.startswith(prefix):
+                hint = _RECOVERY_HINTS[prefix]
+                break
+    if hint:
+        return f"Error ({context}): {exc_msg}. {hint}"
     return f"Error ({context}): {exc_msg}"
+
+
+def _check_response_size(response: str, *, tool: str) -> str:
+    """Truncate tool response if it exceeds MAX_RESPONSE_SIZE_BYTES."""
+    size = len(response.encode("utf-8"))
+    if size <= MAX_RESPONSE_SIZE_BYTES:
+        return response
+    try:
+        from .telemetry.events import RESPONSE_SIZE_EXCEEDED
+
+        _telem(RESPONSE_SIZE_EXCEEDED, {"tool": tool, "size": size, "limit": MAX_RESPONSE_SIZE_BYTES})
+    except Exception:  # nosec B110
+        pass
+    logger.warning("Response truncated: tool=%s size=%d limit=%d", tool, size, MAX_RESPONSE_SIZE_BYTES)
+    truncated = response.encode("utf-8")[:MAX_RESPONSE_SIZE_BYTES].decode("utf-8", errors="ignore")
+    original_kb = size // 1024
+    shown_kb = MAX_RESPONSE_SIZE_BYTES // 1024
+    return truncated + (
+        f"\n\n[Truncated: response exceeded {shown_kb}KB limit "
+        f"({original_kb}KB original). "
+        f"Call get_page_map on a more specific URL.]"
+    )
 
 
 # ── Retry error classification ───────────────────────────────────────
@@ -620,6 +674,7 @@ class ServerState:
         self._session_lock: asyncio.Lock = asyncio.Lock()
         self.tool_lock: asyncio.Lock = asyncio.Lock()
         # Lock ordering invariant: tool_lock → _session_lock (reverse prohibited)
+        self.session_id: str = uuid.uuid4().hex[:16]
 
     async def get_session(self) -> BrowserSession:
         """Get or create the browser session (lock-protected)."""
@@ -664,6 +719,48 @@ async def _get_session():
     return await _state.get_session()
 
 
+def _telem(event_type: str, payload: dict, *, request_id: str = "") -> None:
+    """Emit a telemetry event. No-op when telemetry is disabled."""
+    from .telemetry import emit
+
+    enriched = {**payload, "session_id": _state.session_id}
+    emit(event_type, enriched, trace_id=request_id)
+
+
+# ── RequestContext ────────────────────────────────────────────────────
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class RequestContext:
+    """Per-request context passed to tool _impl functions.
+
+    STDIO: created by _create_stdio_context() from module _state.
+    HTTP (Phase β): created by SessionManager with per-session state.
+    """
+
+    request_id: str
+    session_id: str
+    client_id: str
+    cache: PageMapCache
+    template_cache: InMemoryTemplateCache
+    get_session: Callable[[], Awaitable[BrowserSession]] = dataclasses.field(repr=False)
+
+
+def _create_stdio_context() -> RequestContext:
+    """Single injection point for STDIO transport.
+
+    Phase β replaces this with session_manager.get_context(session_id).
+    """
+    return RequestContext(
+        request_id=uuid.uuid4().hex[:12],
+        session_id=_state.session_id,
+        client_id="",
+        cache=_state.cache,
+        template_cache=_state.template_cache,
+        get_session=_get_session,
+    )
+
+
 # ── MCP Tools ────────────────────────────────────────────────────────
 
 
@@ -682,34 +779,37 @@ async def get_page_map(url: str | None = None) -> str:
     Args:
         url: URL to navigate to (http/https only). If None, uses current page.
     """
+    ctx = _create_stdio_context()
     # URL validation is fast — do before acquiring lock
     if url is not None:
         error = await _validate_url_with_dns(url)
         if error:
-            request_id = uuid.uuid4().hex[:12]
-            logger.warning("SSRF blocked: request=%s url=%s reason=%s", request_id, url, error)
-            return f"Error: {error}"
+            logger.warning("SSRF blocked: request=%s url=%s reason=%s", ctx.request_id, url, error)
+            return f"Error: {error} Provide a valid http:// or https:// URL."
 
     try:
         async with asyncio.timeout(_TOOL_LOCK_TIMEOUT):
             async with _state.tool_lock:
-                return await _get_page_map_impl(url)
+                return await _get_page_map_impl(url, ctx=ctx)
     except TimeoutError:
         logger.error("Tool lock acquisition timed out for get_page_map")
-        return "Error: Server busy. Please retry."
+        return "Error: Server busy — another tool call is in progress. Wait a moment, then retry."
 
 
-async def _get_page_map_impl(url: str | None = None) -> str:
+async def _get_page_map_impl(url: str | None = None, *, ctx: RequestContext | None = None) -> str:
     import time as _time
 
-    request_id = uuid.uuid4().hex[:12]
+    if ctx is None:
+        ctx = _create_stdio_context()
+
+    request_id = ctx.request_id
 
     logger.info("get_page_map: request=%s url=%s", request_id, url or "(current)")
 
     timer = PipelineTimer()
 
     try:
-        session = await _get_session()
+        session = await ctx.get_session()
 
         from .page_map_builder import (
             DEFAULT_PRUNED_CONTEXT_TOKENS,
@@ -720,9 +820,12 @@ async def _get_page_map_impl(url: str | None = None) -> str:
 
         # Step 1: Navigate if url provided → hard invalidation
         if url is not None:
+            from .telemetry.events import NAVIGATION_START
+
+            _telem(NAVIGATION_START, {"url": url}, request_id=request_id)
             timer.stage("navigation")
             await session.navigate(url)
-            _state.cache.invalidate(InvalidationReason.NAVIGATION)
+            ctx.cache.invalidate(InvalidationReason.NAVIGATION)
 
         # Step 2: Capture current fingerprint (~100ms)
         timer.stage("fingerprint")
@@ -730,7 +833,7 @@ async def _get_page_map_impl(url: str | None = None) -> str:
         fingerprint = await capture_dom_fingerprint(page)
 
         # Step 3: Try cache tiers
-        cache = _state.cache
+        cache = ctx.cache
         active_entry = cache.active_entry
         old_page_map = cache.active
 
@@ -751,16 +854,22 @@ async def _get_page_map_impl(url: str | None = None) -> str:
                 tier = "A"
                 page_map = active_entry.page_map
                 cache.record_hit()
+                from .telemetry.events import CACHE_HIT
+
+                _telem(CACHE_HIT, {"tier": "A"}, request_id=request_id)
             elif fingerprints_structurally_equal(fingerprint, active_entry.fingerprint):
                 # TIER B: Content refresh — structure same, text changed
                 tier = "B"
                 timer.stage("content_refresh")
+                from .telemetry.events import CACHE_REFRESH
+
+                _telem(CACHE_REFRESH, {"tier": "B"}, request_id=request_id)
                 page_map = await asyncio.wait_for(
                     rebuild_content_only(
                         session=session,
                         cached=active_entry.page_map,
                         max_pruned_tokens=DEFAULT_PRUNED_CONTEXT_TOKENS,
-                        template_cache=_state.template_cache,
+                        template_cache=ctx.template_cache,
                         timer=timer,
                     ),
                     timeout=PAGE_MAP_TIMEOUT_SECONDS,
@@ -772,13 +881,16 @@ async def _get_page_map_impl(url: str | None = None) -> str:
         # TIER C: Full rebuild
         if page_map is None:
             timer.stage("build")
+            from .telemetry.events import FULL_BUILD
+
+            _telem(FULL_BUILD, {"tier": "C"}, request_id=request_id)
             page_map = await asyncio.wait_for(
                 build_page_map_live(
                     session=session,
                     url=None,  # already navigated above
                     enable_tier3=True,
                     max_pruned_tokens=DEFAULT_PRUNED_CONTEXT_TOKENS,
-                    template_cache=_state.template_cache,
+                    template_cache=ctx.template_cache,
                     timer=timer,
                 ),
                 timeout=PAGE_MAP_TIMEOUT_SECONDS,
@@ -796,12 +908,27 @@ async def _get_page_map_impl(url: str | None = None) -> str:
                 final_url,
                 post_error,
             )
-            return f"Error: Redirect led to blocked URL — {post_error}"
+            return f"Error: Redirect led to blocked URL — {post_error} Navigate to a different URL using get_page_map."
 
         timer.finalize()
 
         # Store in cache
         cache.store(page_map, fingerprint)
+
+        if tier != "A":
+            from .telemetry.events import PIPELINE_COMPLETED
+
+            _telem(
+                PIPELINE_COMPLETED,
+                {
+                    "tier": tier,
+                    "interactables": page_map.total_interactables,
+                    "pruned_tokens": page_map.pruned_tokens,
+                    "stage_timings": timer.elapsed_per_stage(),
+                    "page_type": getattr(page_map, "page_type", "unknown"),
+                },
+                request_id=request_id,
+            )
 
         # Discard any dialogs that appeared during navigation/page-map build
         session.drain_dialogs()
@@ -811,7 +938,7 @@ async def _get_page_map_impl(url: str | None = None) -> str:
         _tmpl_status = "n/a"
         if page_map.page_type != "unknown":
             _tmpl_key = TemplateKey(extract_template_domain(page_map.url), page_map.page_type)
-            _tmpl_entry = _state.template_cache.peek(_tmpl_key)
+            _tmpl_entry = ctx.template_cache.peek(_tmpl_key)
             if _tmpl_entry is not None:
                 if _tmpl_entry.hit_count > 0:
                     _tmpl_status = f"hit({_tmpl_entry.hit_count})"
@@ -842,7 +969,7 @@ async def _get_page_map_impl(url: str | None = None) -> str:
                     page_map.total_interactables,
                     cache_status,
                 )
-                return diff
+                return _check_response_size(diff, tool="get_page_map")
 
         prompt = to_agent_prompt(page_map, include_meta=True, cache_meta=cache_status)
         logger.info(
@@ -853,7 +980,7 @@ async def _get_page_map_impl(url: str | None = None) -> str:
             page_map.pruned_tokens,
             cache_status,
         )
-        return prompt
+        return _check_response_size(prompt, tool="get_page_map")
 
     except TimeoutError:
         report = timer.timeout_report()
@@ -862,9 +989,12 @@ async def _get_page_map_impl(url: str | None = None) -> str:
             request_id,
             json.dumps(report),
         )
-        _state.cache.invalidate(InvalidationReason.TIMEOUT)
+        ctx.cache.invalidate(InvalidationReason.TIMEOUT)
         stage = report["timed_out_at"]
         hint = report["hint"]
+        from .telemetry.events import PIPELINE_TIMEOUT
+
+        _telem(PIPELINE_TIMEOUT, {"timed_out_at": stage, "hint": hint}, request_id=request_id)
         return f"Error: Page Map build timed out after {PAGE_MAP_TIMEOUT_SECONDS}s (stage: {stage}). {hint}"
     except Exception as e:
         logger.error("get_page_map: request=%s failed", request_id)
@@ -1018,40 +1148,55 @@ async def execute_action(ref: int, action: str = "click", value: str | None = No
     Returns JSON with keys: description, current_url, change (none|minor|major|navigation|new_tab|navigation_blocked),
     refs_expired (bool). Optional: change_details (list), dialogs (list).
     On error: error (str), refs_expired (bool).
+    When refs_expired is true, call get_page_map before retrying to refresh element refs.
 
     Args:
         ref: Element ref number from the Page Map Actions section.
         action: Action type - "click", "hover", "type", "select", or "press_key".
         value: Value for type/select actions (text to type, option to select).
     """
+    ctx = _create_stdio_context()
     try:
         async with asyncio.timeout(_TOOL_LOCK_TIMEOUT):
             async with _state.tool_lock:
-                return await _execute_action_impl(ref, action, value)
+                return await _execute_action_impl(ref, action, value, ctx=ctx)
     except TimeoutError:
         logger.error("Tool lock acquisition timed out for execute_action")
-        return _build_action_error("Server busy. Please retry.")
+        return _build_action_error("Server busy — another tool call is in progress. Wait a moment, then retry.")
 
 
-async def _execute_action_impl(ref: int, action: str = "click", value: str | None = None) -> str:
-    request_id = uuid.uuid4().hex[:12]
+async def _execute_action_impl(
+    ref: int, action: str = "click", value: str | None = None, *, ctx: RequestContext | None = None
+) -> str:
+    if ctx is None:
+        ctx = _create_stdio_context()
+
+    request_id = ctx.request_id
 
     # Validate inputs first (before state checks)
     if action not in VALID_ACTIONS:
-        return _build_action_error(f"Invalid action '{action}'. Allowed: {', '.join(sorted(VALID_ACTIONS))}")
+        return _build_action_error(
+            f"Invalid action '{action}'. Allowed: {', '.join(sorted(VALID_ACTIONS))}. Retry with a valid action."
+        )
 
     # Validate value constraints per action
     if action == "type":
         if value is None:
-            return _build_action_error("'value' parameter required for type action.")
+            return _build_action_error("'value' parameter required for type action. Provide the text to type.")
         if len(value) > MAX_TYPE_VALUE_LENGTH:
-            return _build_action_error(f"type value too long ({len(value)} chars, max {MAX_TYPE_VALUE_LENGTH}).")
+            return _build_action_error(
+                f"type value too long ({len(value)} chars, max {MAX_TYPE_VALUE_LENGTH}). Shorten the value and retry."
+            )
 
     if action == "select":
         if value is None:
-            return _build_action_error("'value' parameter required for select action.")
+            return _build_action_error(
+                "'value' parameter required for select action. Provide the option text to select."
+            )
         if len(value) > MAX_SELECT_VALUE_LENGTH:
-            return _build_action_error(f"select value too long ({len(value)} chars, max {MAX_SELECT_VALUE_LENGTH}).")
+            return _build_action_error(
+                f"select value too long ({len(value)} chars, max {MAX_SELECT_VALUE_LENGTH}). Shorten the value and retry."
+            )
 
     if action == "press_key":
         if value is None:
@@ -1064,7 +1209,7 @@ async def _execute_action_impl(ref: int, action: str = "click", value: str | Non
             )
 
     # State check — read active page map from cache
-    current_page_map = _state.cache.active
+    current_page_map = ctx.cache.active
 
     if current_page_map is None:
         return _build_action_error(
@@ -1081,7 +1226,9 @@ async def _execute_action_impl(ref: int, action: str = "click", value: str | Non
             break
 
     if target is None:
-        return _build_action_error(f"ref [{ref}] not found. Valid refs: 1-{len(current_page_map.interactables)}")
+        return _build_action_error(
+            f"ref [{ref}] not found. Valid refs: 1-{len(current_page_map.interactables)}. Verify the ref number, or call get_page_map to refresh refs."
+        )
 
     # ── Affordance-action compatibility check ──
     allowed = ACTION_AFFORDANCE_COMPAT.get(action)
@@ -1094,10 +1241,17 @@ async def _execute_action_impl(ref: int, action: str = "click", value: str | Non
         )
 
     logger.info("execute_action: request=%s ref=%d action=%s", request_id, ref, action)
+    from .telemetry.events import ACTION_START
+
+    _telem(
+        ACTION_START,
+        {"ref": ref, "action": action, "role": target.role, "affordance": target.affordance},
+        request_id=request_id,
+    )
 
     async def _execute_action_core() -> str:
         """Core execute_action logic, wrapped by asyncio.wait_for."""
-        session = await _get_session()
+        session = await ctx.get_session()
         page = session.page
 
         # ── Pre-action DOM fingerprint ──
@@ -1140,7 +1294,7 @@ async def _execute_action_impl(ref: int, action: str = "click", value: str | Non
             elif action == "select":
                 description = f"Selected option in [{ref}] {target.role}: {target.name}"
             else:
-                return _build_action_error("Unexpected action.")
+                return _build_action_error("Unexpected action. Retry with a valid action.")
 
             if method == "css":
                 description += " (resolved via CSS selector)"
@@ -1166,8 +1320,11 @@ async def _execute_action_impl(ref: int, action: str = "click", value: str | Non
                 )
             else:
                 await session.switch_page(new_page)
-                _state.cache.invalidate(InvalidationReason.NEW_TAB)
+                ctx.cache.invalidate(InvalidationReason.NEW_TAB)
                 dialogs = _collect_dialogs(session)
+                from .telemetry.events import ACTION_RESULT as _AR
+
+                _telem(_AR, {"change": "new_tab", "refs_expired": True}, request_id=request_id)
                 return _build_action_result(
                     description=description,
                     current_url=popup_url,
@@ -1192,14 +1349,14 @@ async def _execute_action_impl(ref: int, action: str = "click", value: str | Non
                 # Navigate away to prevent content access
                 with suppress(Exception):
                     await page.goto("about:blank")
-                _state.cache.invalidate(InvalidationReason.SSRF_BLOCKED)
+                ctx.cache.invalidate(InvalidationReason.SSRF_BLOCKED)
                 return _build_action_error(
                     f"Action caused navigation to blocked URL — {ssrf_error}. "
                     "Page has been reset. Call get_page_map with a safe URL.",
                     refs_expired=True,
                 )
 
-            _state.cache.invalidate(InvalidationReason.NAVIGATION)
+            ctx.cache.invalidate(InvalidationReason.NAVIGATION)
             logger.info(
                 "execute_action: request=%s navigation_detected old=%s new=%s",
                 request_id,
@@ -1207,6 +1364,9 @@ async def _execute_action_impl(ref: int, action: str = "click", value: str | Non
                 new_url,
             )
             dialogs = _collect_dialogs(session)
+            from .telemetry.events import ACTION_RESULT as _AR2
+
+            _telem(_AR2, {"change": "navigation", "refs_expired": True}, request_id=request_id)
             return _build_action_result(
                 description=description,
                 current_url=new_url,
@@ -1225,7 +1385,7 @@ async def _execute_action_impl(ref: int, action: str = "click", value: str | Non
                 if post_fingerprint is not None:
                     verdict = detect_dom_changes(pre_fingerprint, post_fingerprint)
                     if verdict.severity == "major":
-                        _state.cache.invalidate(InvalidationReason.DOM_MAJOR)
+                        ctx.cache.invalidate(InvalidationReason.DOM_MAJOR)
                         reasons_str = "; ".join(verdict.reasons)
                         logger.info(
                             "execute_action: request=%s dom_change=major reasons=%s",
@@ -1235,6 +1395,11 @@ async def _execute_action_impl(ref: int, action: str = "click", value: str | Non
                         change = "major"
                         refs_expired = True
                         change_details.append(f"Page content changed ({reasons_str})")
+                        from .telemetry.events import ACTION_DOM_CHANGE
+
+                        _telem(
+                            ACTION_DOM_CHANGE, {"severity": "major", "reasons": verdict.reasons}, request_id=request_id
+                        )
                     elif verdict.severity == "minor":
                         logger.info(
                             "execute_action: request=%s dom_change=minor reasons=%s",
@@ -1242,7 +1407,15 @@ async def _execute_action_impl(ref: int, action: str = "click", value: str | Non
                             "; ".join(verdict.reasons),
                         )
                         change = "minor"
+                        from .telemetry.events import ACTION_DOM_CHANGE as _ADC
+
+                        _telem(_ADC, {"severity": "minor", "reasons": verdict.reasons}, request_id=request_id)
             dialogs = _collect_dialogs(session)
+
+            from .telemetry.events import ACTION_RESULT as _AR3
+
+            _telem(_AR3, {"change": change, "refs_expired": refs_expired}, request_id=request_id)
+
             return _build_action_result(
                 description=description,
                 current_url=new_url,
@@ -1263,7 +1436,7 @@ async def _execute_action_impl(ref: int, action: str = "click", value: str | Non
             request_id,
             EXECUTE_ACTION_TIMEOUT_SECONDS,
         )
-        _state.cache.invalidate(InvalidationReason.TIMEOUT)
+        ctx.cache.invalidate(InvalidationReason.TIMEOUT)
         return _build_action_error(
             f"Action timed out after {EXECUTE_ACTION_TIMEOUT_SECONDS}s. "
             "The page may be unresponsive. Call get_page_map to refresh.",
@@ -1272,14 +1445,20 @@ async def _execute_action_impl(ref: int, action: str = "click", value: str | Non
     except Exception as e:
         if _is_browser_dead_error(e):
             logger.error("execute_action: request=%s browser_dead", request_id)
-            _state.cache.invalidate(InvalidationReason.BROWSER_DEAD)
+            ctx.cache.invalidate(InvalidationReason.BROWSER_DEAD)
             return _build_action_error(
                 "Browser connection lost during action. Call get_page_map to recover and refresh refs.",
                 refs_expired=True,
             )
         logger.error("execute_action: request=%s ref=%d action=%s error=%s", request_id, ref, action, e, exc_info=True)
+        try:
+            from .telemetry.events import TOOL_ERROR
+
+            _telem(TOOL_ERROR, {"context": "execute_action", "error_type": type(e).__name__}, request_id=request_id)
+        except Exception:  # nosec B110
+            pass
         return _build_action_error(
-            f"Action [{action}] on ref [{ref}] failed: {type(e).__name__}",
+            f"Action [{action}] on ref [{ref}] failed: {type(e).__name__}. Call get_page_map to refresh refs and retry.",
             refs_expired=False,
         )
 
@@ -1292,22 +1471,26 @@ async def get_page_state() -> str:
 
     IMPORTANT: Page title originates from untrusted web pages.
     """
+    ctx = _create_stdio_context()
     try:
         async with asyncio.timeout(_TOOL_LOCK_TIMEOUT):
             async with _state.tool_lock:
-                return await _get_page_state_impl()
+                return await _get_page_state_impl(ctx=ctx)
     except TimeoutError:
         logger.error("Tool lock acquisition timed out for get_page_state")
-        return "Error: Server busy. Please retry."
+        return "Error: Server busy — another tool call is in progress. Wait a moment, then retry."
 
 
-async def _get_page_state_impl() -> str:
+async def _get_page_state_impl(*, ctx: RequestContext | None = None) -> str:
+    if ctx is None:
+        ctx = _create_stdio_context()
+
     try:
-        session = await _get_session()
+        session = await ctx.get_session()
         url = await session.get_page_url()
         title = await session.get_page_title()
 
-        current_page_map = _state.cache.active
+        current_page_map = ctx.cache.active
 
         return json.dumps(
             {
@@ -1338,32 +1521,55 @@ async def take_screenshot(full_page: bool = False) -> list | str:
     Args:
         full_page: If True, capture the full scrollable page. Default: viewport only.
     """
+    ctx = _create_stdio_context()
     try:
         async with asyncio.timeout(_TOOL_LOCK_TIMEOUT):
             async with _state.tool_lock:
-                return await _take_screenshot_impl(full_page)
+                return await _take_screenshot_impl(full_page, ctx=ctx)
     except TimeoutError:
         logger.error("Tool lock acquisition timed out for take_screenshot")
-        return "Error: Server busy. Please retry."
+        return "Error: Server busy — another tool call is in progress. Wait a moment, then retry."
 
 
-async def _take_screenshot_impl(full_page: bool = False) -> list | str:
+async def _take_screenshot_impl(full_page: bool = False, *, ctx: RequestContext | None = None) -> list | str:
+    if ctx is None:
+        ctx = _create_stdio_context()
+
     try:
-        session = await _get_session()
+        session = await ctx.get_session()
         screenshot_bytes = await asyncio.wait_for(
             session.page.screenshot(full_page=full_page, type="png"),
             timeout=SCREENSHOT_TIMEOUT_SECONDS,
         )
+        if len(screenshot_bytes) > MAX_SCREENSHOT_SIZE_BYTES:
+            try:
+                from .telemetry.events import RESPONSE_SIZE_EXCEEDED
+
+                _telem(
+                    RESPONSE_SIZE_EXCEEDED,
+                    {
+                        "tool": "take_screenshot",
+                        "size": len(screenshot_bytes),
+                        "limit": MAX_SCREENSHOT_SIZE_BYTES,
+                    },
+                )
+            except Exception:  # nosec B110
+                pass
+            return (
+                f"Error: Screenshot too large ({len(screenshot_bytes):,} bytes, "
+                f"limit {MAX_SCREENSHOT_SIZE_BYTES:,}). "
+                "Use full_page=False for a smaller capture."
+            )
         dialog_warning = _format_dialog_warnings(session.drain_dialogs())
         return [
             McpImage(data=screenshot_bytes, format="png"),
             f"Screenshot captured ({len(screenshot_bytes)} bytes){dialog_warning}",
         ]
     except TimeoutError:
-        return f"Error: Screenshot timed out after {SCREENSHOT_TIMEOUT_SECONDS}s."
+        return f"Error: Screenshot timed out after {SCREENSHOT_TIMEOUT_SECONDS}s. The page may be unresponsive. Call get_page_map to check page state."
     except Exception as e:
         if _is_browser_dead_error(e):
-            _state.cache.invalidate(InvalidationReason.BROWSER_DEAD)
+            ctx.cache.invalidate(InvalidationReason.BROWSER_DEAD)
             return "Error: Browser connection lost. Call get_page_map to recover."
         return _safe_error("take_screenshot", e)
 
@@ -1379,18 +1585,22 @@ async def navigate_back() -> str:
 
     Invalidates current Page Map refs on success. Call get_page_map to get fresh refs.
     """
+    ctx = _create_stdio_context()
     try:
         async with asyncio.timeout(_TOOL_LOCK_TIMEOUT):
             async with _state.tool_lock:
-                return await _navigate_back_impl()
+                return await _navigate_back_impl(ctx=ctx)
     except TimeoutError:
         logger.error("Tool lock acquisition timed out for navigate_back")
-        return "Error: Server busy. Please retry."
+        return "Error: Server busy — another tool call is in progress. Wait a moment, then retry."
 
 
-async def _navigate_back_impl() -> str:
+async def _navigate_back_impl(*, ctx: RequestContext | None = None) -> str:
+    if ctx is None:
+        ctx = _create_stdio_context()
+
     try:
-        session = await _get_session()
+        session = await ctx.get_session()
         new_url = await asyncio.wait_for(
             session.go_back(),
             timeout=NAVIGATE_BACK_TIMEOUT_SECONDS,
@@ -1406,13 +1616,13 @@ async def _navigate_back_impl() -> str:
             logger.warning("SSRF navigate_back blocked: url=%s reason=%s", new_url, ssrf_error)
             with suppress(Exception):
                 await session.page.goto("about:blank")
-            _state.cache.invalidate(InvalidationReason.SSRF_BLOCKED)
+            ctx.cache.invalidate(InvalidationReason.SSRF_BLOCKED)
             return (
                 f"Error: Back navigation led to blocked URL — {ssrf_error}\n"
                 "Page has been reset. Call get_page_map with a safe URL."
             )
 
-        _state.cache.invalidate(InvalidationReason.NAVIGATION)
+        ctx.cache.invalidate(InvalidationReason.NAVIGATION)
 
         dialog_warning = _format_dialog_warnings(session.drain_dialogs())
         return (
@@ -1421,14 +1631,14 @@ async def _navigate_back_impl() -> str:
         )
 
     except TimeoutError:
-        _state.cache.invalidate(InvalidationReason.TIMEOUT)
+        ctx.cache.invalidate(InvalidationReason.TIMEOUT)
         return (
             f"Error: navigate_back timed out after {NAVIGATE_BACK_TIMEOUT_SECONDS}s. "
             "Page state is uncertain. Call get_page_map to refresh."
         )
     except Exception as e:
         if _is_browser_dead_error(e):
-            _state.cache.invalidate(InvalidationReason.BROWSER_DEAD)
+            ctx.cache.invalidate(InvalidationReason.BROWSER_DEAD)
             return "Error: Browser connection lost. Call get_page_map to recover."
         return _safe_error("navigate_back", e)
 
@@ -1452,16 +1662,20 @@ async def scroll_page(direction: str = "down", amount: str = "page") -> str:
         direction: "up" or "down".
         amount: "page" (viewport height), "half" (half viewport), or integer pixels (max 50000).
     """
+    ctx = _create_stdio_context()
     try:
         async with asyncio.timeout(_TOOL_LOCK_TIMEOUT):
             async with _state.tool_lock:
-                return await _scroll_page_impl(direction, amount)
+                return await _scroll_page_impl(direction, amount, ctx=ctx)
     except TimeoutError:
         logger.error("Tool lock acquisition timed out for scroll_page")
-        return "Error: Server busy. Please retry."
+        return "Error: Server busy — another tool call is in progress. Wait a moment, then retry."
 
 
-async def _scroll_page_impl(direction: str = "down", amount: str = "page") -> str:
+async def _scroll_page_impl(direction: str = "down", amount: str = "page", *, ctx: RequestContext | None = None) -> str:
+    if ctx is None:
+        ctx = _create_stdio_context()
+
     # Input validation
     direction = direction.lower().strip()
     if direction not in VALID_SCROLL_DIRECTIONS:
@@ -1481,7 +1695,7 @@ async def _scroll_page_impl(direction: str = "down", amount: str = "page") -> st
         pixels = None
 
     try:
-        session = await _get_session()
+        session = await ctx.get_session()
 
         # Get viewport height for page/half calculations
         if pixels is None:
@@ -1505,7 +1719,7 @@ async def _scroll_page_impl(direction: str = "down", amount: str = "page") -> st
         )
 
         # Soft invalidate — fingerprint will validate on next get_page_map
-        _state.cache.invalidate(InvalidationReason.SCROLL)
+        ctx.cache.invalidate(InvalidationReason.SCROLL)
 
         # Build response
         scroll_height = result_pos["scrollHeight"]
@@ -1513,6 +1727,10 @@ async def _scroll_page_impl(direction: str = "down", amount: str = "page") -> st
         scroll_y = result_pos["scrollY"]
         max_scroll = max(scroll_height - viewport_height, 1)
         scroll_percent = min(round(scroll_y / max_scroll * 100), 100)
+
+        from .telemetry.events import SCROLL as _SCROLL_EV
+
+        _telem(_SCROLL_EV, {"direction": direction, "pixels": pixels, "scroll_percent": scroll_percent})
         at_top = scroll_y <= 0
         at_bottom = scroll_y >= scroll_height - viewport_height - 1
 
@@ -1541,14 +1759,14 @@ async def _scroll_page_impl(direction: str = "down", amount: str = "page") -> st
         )
 
     except TimeoutError:
-        _state.cache.invalidate(InvalidationReason.TIMEOUT)
+        ctx.cache.invalidate(InvalidationReason.TIMEOUT)
         return (
             f"Error: scroll_page timed out after {SCROLL_TIMEOUT_SECONDS}s. "
             "Page state is uncertain. Call get_page_map to refresh."
         )
     except Exception as e:
         if _is_browser_dead_error(e):
-            _state.cache.invalidate(InvalidationReason.BROWSER_DEAD)
+            ctx.cache.invalidate(InvalidationReason.BROWSER_DEAD)
             return "Error: Browser connection lost. Call get_page_map to recover."
         return _safe_error("scroll_page", e)
 
@@ -1573,17 +1791,21 @@ async def fill_form(fields: list[FormField]) -> str:
                 Example: [{"ref": 2, "action": "type", "value": "user@email.com"},
                           {"ref": 5, "action": "click"}]
     """
+    ctx = _create_stdio_context()
     try:
         async with asyncio.timeout(_TOOL_LOCK_TIMEOUT):
             async with _state.tool_lock:
-                return await _fill_form_impl(fields)
+                return await _fill_form_impl(fields, ctx=ctx)
     except TimeoutError:
         logger.error("Tool lock acquisition timed out for fill_form")
-        return "Error: Server busy. Please retry."
+        return "Error: Server busy — another tool call is in progress. Wait a moment, then retry."
 
 
-async def _fill_form_impl(fields: list[FormField]) -> str:
-    request_id = uuid.uuid4().hex[:12]
+async def _fill_form_impl(fields: list[FormField], *, ctx: RequestContext | None = None) -> str:
+    if ctx is None:
+        ctx = _create_stdio_context()
+
+    request_id = ctx.request_id
 
     # ── Input validation ──
     if not fields:
@@ -1610,7 +1832,7 @@ async def _fill_form_impl(fields: list[FormField]) -> str:
                 return f"Error: Field {i} value too long ({len(f.value)} chars, max {MAX_SELECT_VALUE_LENGTH})."
 
     # ── Page map check + ref resolution ──
-    current_page_map = _state.cache.active
+    current_page_map = ctx.cache.active
 
     if current_page_map is None:
         return "Error: No active Page Map. Call get_page_map first to load current page refs."
@@ -1640,7 +1862,7 @@ async def _fill_form_impl(fields: list[FormField]) -> str:
 
     async def _fill_form_core() -> str:
         """Core fill_form logic, wrapped by asyncio.wait_for."""
-        session = await _get_session()
+        session = await ctx.get_session()
         page = session.page
 
         # Pre-batch DOM fingerprint
@@ -1723,7 +1945,7 @@ async def _fill_form_impl(fields: list[FormField]) -> str:
                     )
                 else:
                     await session.switch_page(new_page)
-                    _state.cache.invalidate(InvalidationReason.NEW_TAB)
+                    ctx.cache.invalidate(InvalidationReason.NEW_TAB)
                     return _format_fill_form_result(
                         completed,
                         completed_count,
@@ -1750,7 +1972,7 @@ async def _fill_form_impl(fields: list[FormField]) -> str:
                     )
                     with suppress(Exception):
                         await page.goto("about:blank")
-                    _state.cache.invalidate(InvalidationReason.SSRF_BLOCKED)
+                    ctx.cache.invalidate(InvalidationReason.SSRF_BLOCKED)
                     return _format_fill_form_result(
                         completed,
                         completed_count,
@@ -1760,7 +1982,7 @@ async def _fill_form_impl(fields: list[FormField]) -> str:
                         session=session,
                     )
 
-                _state.cache.invalidate(InvalidationReason.NAVIGATION)
+                ctx.cache.invalidate(InvalidationReason.NAVIGATION)
                 return _format_fill_form_result(
                     completed,
                     completed_count,
@@ -1777,13 +1999,21 @@ async def _fill_form_impl(fields: list[FormField]) -> str:
             if post_fingerprint is not None:
                 verdict = detect_dom_changes(pre_fingerprint, post_fingerprint)
                 if verdict.severity == "major":
-                    _state.cache.invalidate(InvalidationReason.DOM_MAJOR)
+                    ctx.cache.invalidate(InvalidationReason.DOM_MAJOR)
                     reasons_str = "; ".join(verdict.reasons)
                     dom_warning = (
                         f"\n⚠ Page content changed ({reasons_str}). Refs are now expired. Call get_page_map to refresh."
                     )
+                    from .telemetry.events import FILL_FORM_DOM_CHANGE
+
+                    _telem(
+                        FILL_FORM_DOM_CHANGE, {"severity": "major", "reasons": verdict.reasons}, request_id=request_id
+                    )
                 elif verdict.severity == "minor":
                     dom_warning = "\n⚠ Page content updated. Consider calling get_page_map if interactions fail."
+                    from .telemetry.events import FILL_FORM_DOM_CHANGE as _FFDC
+
+                    _telem(_FFDC, {"severity": "minor", "reasons": verdict.reasons}, request_id=request_id)
 
         result = _format_fill_form_result(
             completed,
@@ -1807,12 +2037,12 @@ async def _fill_form_impl(fields: list[FormField]) -> str:
             request_id,
             FILL_FORM_TIMEOUT_SECONDS,
         )
-        _state.cache.invalidate(InvalidationReason.TIMEOUT)
+        ctx.cache.invalidate(InvalidationReason.TIMEOUT)
         return f"Error: fill_form timed out after {FILL_FORM_TIMEOUT_SECONDS}s. Call get_page_map to refresh."
     except Exception as e:
         if _is_browser_dead_error(e):
             logger.error("fill_form: request=%s browser_dead", request_id)
-            _state.cache.invalidate(InvalidationReason.BROWSER_DEAD)
+            ctx.cache.invalidate(InvalidationReason.BROWSER_DEAD)
             return "Error: Browser connection lost during fill_form. Call get_page_map to recover."
         return _safe_error("fill_form", e)
 
@@ -1838,21 +2068,27 @@ async def wait_for(
         text_gone: Wait for this text to disappear (e.g., "Loading...", spinner text).
         timeout: Maximum seconds to wait (default 10, max 30).
     """
+    ctx = _create_stdio_context()
     try:
         async with asyncio.timeout(_TOOL_LOCK_TIMEOUT):
             async with _state.tool_lock:
-                return await _wait_for_impl(text, text_gone, timeout)
+                return await _wait_for_impl(text, text_gone, timeout, ctx=ctx)
     except TimeoutError:
         logger.error("Tool lock acquisition timed out for wait_for")
-        return "Error: Server busy. Please retry."
+        return "Error: Server busy — another tool call is in progress. Wait a moment, then retry."
 
 
 async def _wait_for_impl(
     text: str | None = None,
     text_gone: str | None = None,
     timeout: float = 10.0,
+    *,
+    ctx: RequestContext | None = None,
 ) -> str:
     import time
+
+    if ctx is None:
+        ctx = _create_stdio_context()
 
     # ── Input validation ──
     if text is not None and text_gone is not None:
@@ -1879,7 +2115,7 @@ async def _wait_for_impl(
     display_text = _truncate(target_text, 80)
 
     async def _wait_for_core() -> str:
-        session = await _get_session()
+        session = await ctx.get_session()
         page = session.page
 
         if mode == "appear":
@@ -1896,6 +2132,9 @@ async def _wait_for_impl(
                 await page.wait_for_function(js_expr, target_text, timeout=timeout_ms)
             except PlaywrightError as e:
                 if "timeout" in str(e).lower():
+                    from .telemetry.events import WAIT_FOR_RESULT as _WFR_T
+
+                    _telem(_WFR_T, {"elapsed": timeout, "success": False, "mode": "appear"})
                     dialog_warning = _format_dialog_warnings(session.drain_dialogs())
                     return (
                         f'Timeout: Text "{display_text}" did not appear within {timeout}s.\n'
@@ -1905,7 +2144,10 @@ async def _wait_for_impl(
                 raise
 
             elapsed = time.monotonic() - t0
-            _state.cache.invalidate(InvalidationReason.WAIT_FOR)
+            ctx.cache.invalidate(InvalidationReason.WAIT_FOR)
+            from .telemetry.events import WAIT_FOR_RESULT
+
+            _telem(WAIT_FOR_RESULT, {"elapsed": round(elapsed, 2), "success": True, "mode": "appear"})
 
             dialog_warning = _format_dialog_warnings(session.drain_dialogs())
             return (
@@ -1927,6 +2169,9 @@ async def _wait_for_impl(
                 await page.wait_for_function(js_expr, target_text, timeout=timeout_ms)
             except PlaywrightError as e:
                 if "timeout" in str(e).lower():
+                    from .telemetry.events import WAIT_FOR_RESULT as _WFR_G
+
+                    _telem(_WFR_G, {"elapsed": timeout, "success": False, "mode": "gone"})
                     dialog_warning = _format_dialog_warnings(session.drain_dialogs())
                     return (
                         f'Timeout: Text "{display_text}" still visible after {timeout}s.\n'
@@ -1935,7 +2180,10 @@ async def _wait_for_impl(
                 raise
 
             elapsed = time.monotonic() - t0
-            _state.cache.invalidate(InvalidationReason.WAIT_FOR)
+            ctx.cache.invalidate(InvalidationReason.WAIT_FOR)
+            from .telemetry.events import WAIT_FOR_RESULT as _WFR_GS
+
+            _telem(_WFR_GS, {"elapsed": round(elapsed, 2), "success": True, "mode": "gone"})
 
             dialog_warning = _format_dialog_warnings(session.drain_dialogs())
             return (
@@ -1950,7 +2198,7 @@ async def _wait_for_impl(
         )
     except TimeoutError:
         logger.error("wait_for: overall_timeout after %ds", WAIT_FOR_OVERALL_TIMEOUT_SECONDS)
-        _state.cache.invalidate(InvalidationReason.TIMEOUT)
+        ctx.cache.invalidate(InvalidationReason.TIMEOUT)
         return (
             f"Error: wait_for overall timeout after {WAIT_FOR_OVERALL_TIMEOUT_SECONDS}s. "
             "Call get_page_map to check page state."
@@ -1958,7 +2206,7 @@ async def _wait_for_impl(
     except Exception as e:
         if _is_browser_dead_error(e):
             logger.error("wait_for: browser_dead")
-            _state.cache.invalidate(InvalidationReason.BROWSER_DEAD)
+            ctx.cache.invalidate(InvalidationReason.BROWSER_DEAD)
             return "Error: Browser connection lost. Call get_page_map to recover."
         return _safe_error("wait_for", e)
 
@@ -1983,19 +2231,23 @@ async def batch_get_page_map(urls: list[str], max_concurrency: int = 5) -> str:
         urls: List of URLs to process (max 10, http/https only).
         max_concurrency: Maximum parallel pages (default 5, max 5).
     """
+    ctx = _create_stdio_context()
     try:
         async with asyncio.timeout(_TOOL_LOCK_TIMEOUT):
             async with _state.tool_lock:
-                return await _batch_get_page_map_impl(urls, max_concurrency)
+                return await _batch_get_page_map_impl(urls, max_concurrency, ctx=ctx)
     except TimeoutError:
         logger.error("Tool lock acquisition timed out for batch_get_page_map")
-        return "Error: Server busy. Please retry."
+        return "Error: Server busy — another tool call is in progress. Wait a moment, then retry."
 
 
-async def _batch_get_page_map_impl(urls: list[str], max_concurrency: int) -> str:
+async def _batch_get_page_map_impl(urls: list[str], max_concurrency: int, *, ctx: RequestContext | None = None) -> str:
     import time as _time
 
-    request_id = uuid.uuid4().hex[:12]
+    if ctx is None:
+        ctx = _create_stdio_context()
+
+    request_id = ctx.request_id
     start = _time.monotonic()
 
     # Input validation
@@ -2030,6 +2282,9 @@ async def _batch_get_page_map_impl(urls: list[str], max_concurrency: int) -> str
         len(urls),
         len(valid_urls),
     )
+    from .telemetry.events import BATCH_START
+
+    _telem(BATCH_START, {"urls_count": len(urls), "valid_count": len(valid_urls)}, request_id=request_id)
 
     # All URLs blocked — return pre-errors without creating a session
     if not valid_urls:
@@ -2051,7 +2306,7 @@ async def _batch_get_page_map_impl(urls: list[str], max_concurrency: int) -> str
     from .page_map_builder import build_page_map_from_page
     from .serializer import to_agent_prompt
 
-    session = await _get_session()
+    session = await ctx.get_session()
     effective_concurrency = min(max_concurrency, BATCH_MAX_CONCURRENCY)
     semaphore = asyncio.Semaphore(effective_concurrency)
 
@@ -2067,7 +2322,7 @@ async def _batch_get_page_map_impl(urls: list[str], max_concurrency: int) -> str
                 page_map = await asyncio.wait_for(
                     build_page_map_from_page(
                         page,
-                        template_cache=_state.template_cache,
+                        template_cache=ctx.template_cache,
                     ),
                     timeout=BATCH_PER_URL_TIMEOUT_SECONDS,
                 )
@@ -2079,7 +2334,7 @@ async def _batch_get_page_map_impl(urls: list[str], max_concurrency: int) -> str
 
                 # Store in LRU only (don't overwrite active)
                 fingerprint = await capture_dom_fingerprint(page)
-                _state.cache.store_in_lru_only(page_map, fingerprint)
+                ctx.cache.store_in_lru_only(page_map, fingerprint)
 
                 return url, False, to_agent_prompt(page_map, include_meta=True)
 
@@ -2109,10 +2364,13 @@ async def _batch_get_page_map_impl(urls: list[str], max_concurrency: int) -> str
         results.append({"url": u, "status": "error", "error": err})
 
     # Add processed results
+    from .telemetry.events import BATCH_URL_RESULT
+
     success_count = 0
     for r in raw_results:
         if isinstance(r, BaseException):
             results.append({"url": "unknown", "status": "error", "error": str(r)})
+            _telem(BATCH_URL_RESULT, {"url": "unknown", "success": False}, request_id=request_id)
         else:
             url, is_error, result = r
             if is_error:
@@ -2120,10 +2378,18 @@ async def _batch_get_page_map_impl(urls: list[str], max_concurrency: int) -> str
             else:
                 results.append({"url": url, "status": "ok", "page_map": result})
                 success_count += 1
+            _telem(BATCH_URL_RESULT, {"url": url, "success": not is_error}, request_id=request_id)
 
     elapsed_ms = round((_time.monotonic() - start) * 1000)
+    from .telemetry.events import BATCH_COMPLETE
 
-    return json.dumps(
+    _telem(
+        BATCH_COMPLETE,
+        {"elapsed_ms": elapsed_ms, "success": success_count, "failed": len(results) - success_count},
+        request_id=request_id,
+    )
+
+    result_json = json.dumps(
         {
             "results": results,
             "summary": {
@@ -2135,6 +2401,7 @@ async def _batch_get_page_map_impl(urls: list[str], max_concurrency: int) -> str
         },
         ensure_ascii=False,
     )
+    return _check_response_size(result_json, tool="batch_get_page_map")
 
 
 # ── fill_form helpers ─────────────────────────────────────────────
@@ -2179,12 +2446,11 @@ def _format_fill_form_result(
     return "\n".join(lines)
 
 
-def _parse_server_args(argv: list[str] | None = None) -> bool:
-    """Parse --allow-local from CLI args and PAGEMAP_ALLOW_LOCAL env var.
+def _parse_server_args(argv: list[str] | None = None) -> tuple[bool, bool]:
+    """Parse CLI args and env vars for server configuration.
 
-    Uses parse_known_args to ignore unrecognized flags (e.g. 'serve' from
-    cli.py). Uses add_help=False to prevent stdout pollution on -h (MCP
-    stdio transport uses stdout for JSON-RPC).
+    Returns:
+        (allow_local, telemetry_enabled) tuple.
     """
     import argparse
     import os
@@ -2199,10 +2465,21 @@ def _parse_server_args(argv: list[str] | None = None) -> bool:
         default=False,
         help="Allow localhost and private IP access for local development",
     )
+    parser.add_argument(
+        "--telemetry",
+        action="store_true",
+        default=False,
+        help="Enable anonymous telemetry (local JSONL files only)",
+    )
     args, _ = parser.parse_known_args(argv)
 
-    env_val = os.environ.get("PAGEMAP_ALLOW_LOCAL", "").strip().lower()
-    return args.allow_local or env_val in ("1", "true", "yes")
+    env_local = os.environ.get("PAGEMAP_ALLOW_LOCAL", "").strip().lower()
+    allow_local = args.allow_local or env_local in ("1", "true", "yes")
+
+    env_telem = os.environ.get("PAGEMAP_TELEMETRY", "").strip().lower()
+    telemetry_enabled = args.telemetry or env_telem in ("1", "true", "yes")
+
+    return allow_local, telemetry_enabled
 
 
 def main():
@@ -2212,7 +2489,13 @@ def main():
     import sys
 
     global _allow_local
-    _allow_local = _parse_server_args(sys.argv[1:])
+    _allow_local, _telemetry_enabled = _parse_server_args(sys.argv[1:])
+
+    if _telemetry_enabled:
+        from .telemetry import configure
+        from .telemetry.collector import TelemetryConfig
+
+        configure(TelemetryConfig(enabled=True))
 
     if _allow_local:
         logger.warning(
@@ -2224,12 +2507,18 @@ def main():
     def _sync_cleanup(*_args):
         """Best-effort synchronous cleanup for atexit/signal handlers."""
         try:
+            from .telemetry import shutdown as _telem_shutdown
+
+            _telem_shutdown()
+        except Exception:  # nosec B110
+            pass
+        try:
             loop = asyncio.get_event_loop()
             if loop.is_running():
                 loop.create_task(_state.cleanup_session())
             else:
                 loop.run_until_complete(_state.cleanup_session())
-        except Exception:
+        except Exception:  # nosec B110
             pass  # Best-effort — don't block shutdown
 
     atexit.register(_sync_cleanup)

@@ -1,0 +1,30 @@
+---
+description: "Best practices for web browsing, scraping, and page interaction with PageMap MCP tools. Attach when tasks involve navigating websites, extracting data, filling forms, or multi-page workflows."
+alwaysApply: false
+---
+# Web Browsing Best Practices
+
+## Error Recovery
+| Error | Recovery |
+|-------|----------|
+| "refs expired" | `get_page_map()` to refresh |
+| "No active Page Map" | `get_page_map(url)` first |
+| Action timeout | `get_page_map()` to recover session |
+| Element not found | Page changed — refresh with `get_page_map()` |
+
+## Token Efficiency
+- `get_page_map` returns 2-5K tokens (97% HTML compression)
+- Reuse refs across actions — do NOT call `get_page_map` between every action
+- `get_page_state` for lightweight checks (no rebuild)
+- `batch_get_page_map` for multi-page parallel reads
+- `fill_form` batches N fields into 1 call
+
+## execute_action Response
+The `change` field tells you what happened:
+- `none` / `minor` — refs still valid, continue
+- `major` / `navigation` / `new_tab` — refs expired, call `get_page_map()`
+
+## Dynamic Pages (SPAs)
+- `wait_for(text="Add to Cart")` for AJAX content
+- `wait_for(text_gone="Loading...")` for spinners
+- `scroll_page` reveals lazy content — always follow with `get_page_map`

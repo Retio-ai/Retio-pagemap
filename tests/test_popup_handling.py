@@ -11,8 +11,6 @@ from __future__ import annotations
 import json
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
-import pytest
-
 from pagemap import Interactable, PageMap
 from pagemap.browser_session import BrowserSession
 from pagemap.server import execute_action
@@ -75,20 +73,10 @@ def _make_mock_new_page(url: str = "https://newsite.com", closed: bool = False) 
     return new_page
 
 
-@pytest.fixture(autouse=True)
-def _reset_state():
-    import pagemap.server as srv
-
-    srv._state.cache.invalidate_all()
-    yield
-    srv._state.cache.invalidate_all()
-
-
 # ── TestBrowserSessionPopupTracking ──────────────────────────────────
 
 
 class TestBrowserSessionPopupTracking:
-    @pytest.mark.asyncio
     async def test_on_new_page_stores_page(self):
         session = BrowserSession.__new__(BrowserSession)
         session._pending_new_page = None
@@ -114,7 +102,6 @@ class TestBrowserSessionPopupTracking:
 
         assert session.consume_new_page() is None
 
-    @pytest.mark.asyncio
     async def test_multiple_popups_latest_wins(self):
         session = BrowserSession.__new__(BrowserSession)
         session._pending_new_page = None
@@ -127,7 +114,6 @@ class TestBrowserSessionPopupTracking:
 
         assert session._pending_new_page is page2
 
-    @pytest.mark.asyncio
     async def test_multiple_popups_closes_unclaimed(self):
         session = BrowserSession.__new__(BrowserSession)
         session._pending_new_page = None
@@ -140,7 +126,6 @@ class TestBrowserSessionPopupTracking:
 
         page1.close.assert_awaited_once()
 
-    @pytest.mark.asyncio
     async def test_unclaimed_already_closed_not_reclosed(self):
         session = BrowserSession.__new__(BrowserSession)
         session._pending_new_page = None
@@ -153,7 +138,6 @@ class TestBrowserSessionPopupTracking:
 
         page1.close.assert_not_awaited()
 
-    @pytest.mark.asyncio
     async def test_switch_page_updates_reference(self):
         session = BrowserSession.__new__(BrowserSession)
         old_page = _make_mock_new_page("https://old.com")
@@ -165,7 +149,6 @@ class TestBrowserSessionPopupTracking:
 
         assert session._page is new_page
 
-    @pytest.mark.asyncio
     async def test_switch_page_detaches_cdp(self):
         session = BrowserSession.__new__(BrowserSession)
         old_page = _make_mock_new_page("https://old.com")
@@ -179,7 +162,6 @@ class TestBrowserSessionPopupTracking:
         cdp.detach.assert_awaited_once()
         assert session._cdp_session is None
 
-    @pytest.mark.asyncio
     async def test_switch_page_closes_old(self):
         session = BrowserSession.__new__(BrowserSession)
         old_page = _make_mock_new_page("https://old.com")
@@ -191,7 +173,6 @@ class TestBrowserSessionPopupTracking:
 
         old_page.close.assert_awaited_once()
 
-    @pytest.mark.asyncio
     async def test_switch_page_old_already_closed(self):
         session = BrowserSession.__new__(BrowserSession)
         old_page = _make_mock_new_page("https://old.com", closed=True)
@@ -203,7 +184,6 @@ class TestBrowserSessionPopupTracking:
 
         old_page.close.assert_not_awaited()
 
-    @pytest.mark.asyncio
     async def test_switch_page_none_old(self):
         """switch_page with no previous page should not error."""
         session = BrowserSession.__new__(BrowserSession)
@@ -244,7 +224,6 @@ def _build_mock_chain():
 
 
 class TestPageHandlerRegistration:
-    @pytest.mark.asyncio
     async def test_page_handler_registered_on_context(self):
         mock_pw_cm, _, _, mock_context, _ = _build_mock_chain()
 
@@ -262,7 +241,6 @@ class TestPageHandlerRegistration:
 
 
 class TestPopupInExecuteAction:
-    @pytest.mark.asyncio
     async def test_click_popup_switches_and_reports(self):
         import pagemap.server as srv
 
@@ -284,7 +262,6 @@ class TestPopupInExecuteAction:
         mock_session.switch_page.assert_awaited_once_with(new_page)
         assert srv._state.cache.active is None
 
-    @pytest.mark.asyncio
     async def test_popup_ssrf_blocked_closes_and_warns(self):
         import pagemap.server as srv
 
@@ -309,7 +286,6 @@ class TestPopupInExecuteAction:
         new_page.close.assert_awaited_once()
         mock_session.switch_page.assert_not_awaited()
 
-    @pytest.mark.asyncio
     async def test_popup_closed_immediately_ignored(self):
         """Popup that closed before we check → skip popup logic."""
         import pagemap.server as srv
@@ -327,7 +303,6 @@ class TestPopupInExecuteAction:
         assert "change_details" not in data or not any("New tab" in d for d in data.get("change_details", []))
         mock_session.switch_page.assert_not_awaited()
 
-    @pytest.mark.asyncio
     async def test_popup_load_timeout_still_switches(self):
         """Popup that times out on load_state still switches."""
         import pagemap.server as srv
@@ -348,7 +323,6 @@ class TestPopupInExecuteAction:
         assert data["change"] == "new_tab"
         mock_session.switch_page.assert_awaited_once()
 
-    @pytest.mark.asyncio
     async def test_no_popup_preserves_existing_behavior(self):
         """No popup → normal click flow."""
         import pagemap.server as srv
@@ -365,7 +339,6 @@ class TestPopupInExecuteAction:
         assert data["change"] != "new_tab"
         mock_session.switch_page.assert_not_awaited()
 
-    @pytest.mark.asyncio
     async def test_popup_invalidates_page_map(self):
         import pagemap.server as srv
 
@@ -382,7 +355,6 @@ class TestPopupInExecuteAction:
 
         assert srv._state.cache.active is None
 
-    @pytest.mark.asyncio
     async def test_popup_with_dialog(self):
         """Popup + dialog → both reported in JSON."""
         import pagemap.server as srv

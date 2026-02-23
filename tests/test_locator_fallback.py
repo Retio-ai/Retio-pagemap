@@ -146,23 +146,12 @@ def _make_mock_session(
     return session
 
 
-@pytest.fixture(autouse=True)
-def _reset_state():
-    """Reset global state before each test."""
-    import pagemap.server as srv
-
-    srv._state.cache.invalidate_all()
-    yield
-    srv._state.cache.invalidate_all()
-
-
 # ── TestResolveLocatorUnit ───────────────────────────────────────────
 
 
 class TestResolveLocatorUnit:
     """Unit tests for _resolve_locator(page, target) helper."""
 
-    @pytest.mark.asyncio
     async def test_single_role_match_returns_role(self):
         """count=1 via get_by_role → returns role locator."""
         role_locator = AsyncMock()
@@ -187,7 +176,6 @@ class TestResolveLocatorUnit:
         assert locator is role_locator
         page.get_by_role.assert_called_once_with("button", name="Submit", exact=True)
 
-    @pytest.mark.asyncio
     async def test_zero_role_falls_to_css(self):
         """count=0 via get_by_role + selector available → CSS locator."""
         role_locator = AsyncMock()
@@ -216,7 +204,6 @@ class TestResolveLocatorUnit:
         assert locator is css_locator
         page.locator.assert_called_once_with("#submit-btn")
 
-    @pytest.mark.asyncio
     async def test_multiple_role_falls_to_css(self):
         """count=3 via get_by_role + selector available → CSS locator."""
         role_locator = AsyncMock()
@@ -244,7 +231,6 @@ class TestResolveLocatorUnit:
         assert strategy == "css"
         page.locator.assert_called_once_with("#row-1 .delete-btn")
 
-    @pytest.mark.asyncio
     async def test_multiple_role_no_css_returns_role_with_warning(self):
         """count=3, no selector → returns role locator (degraded)."""
         role_locator = AsyncMock()
@@ -268,7 +254,6 @@ class TestResolveLocatorUnit:
         # page.locator should NOT be called (no selector)
         page.locator.assert_not_called()
 
-    @pytest.mark.asyncio
     async def test_all_fail_raises_valueerror(self):
         """count=0, no selector → ValueError."""
         role_locator = AsyncMock()
@@ -289,7 +274,6 @@ class TestResolveLocatorUnit:
         with pytest.raises(ValueError, match="Could not locate"):
             await _resolve_locator(page, target)
 
-    @pytest.mark.asyncio
     async def test_empty_name_skips_role_goes_to_css(self):
         """Empty name → skip get_by_role entirely, use CSS."""
         css_locator = AsyncMock()
@@ -320,7 +304,6 @@ class TestResolveLocatorUnit:
 class TestFallbackHappyPath:
     """get_by_role succeeds → normal path, CSS not attempted."""
 
-    @pytest.mark.asyncio
     async def test_click_role_success(self):
         import pagemap.server as srv
 
@@ -336,7 +319,6 @@ class TestFallbackHappyPath:
         assert "CSS selector" not in data["description"]
         mock_session.page.locator.assert_not_called()
 
-    @pytest.mark.asyncio
     async def test_type_role_success(self):
         import pagemap.server as srv
 
@@ -351,7 +333,6 @@ class TestFallbackHappyPath:
         assert "CSS selector" not in data["description"]
         mock_session.page.locator.assert_not_called()
 
-    @pytest.mark.asyncio
     async def test_select_role_success(self):
         import pagemap.server as srv
 
@@ -373,7 +354,6 @@ class TestFallbackHappyPath:
 class TestFallbackToCSS:
     """get_by_role count=0, CSS selector succeeds → fallback works."""
 
-    @pytest.mark.asyncio
     async def test_click_falls_back_to_css(self):
         import pagemap.server as srv
 
@@ -388,7 +368,6 @@ class TestFallbackToCSS:
         assert "CSS selector" in data["description"]
         mock_session.page.locator.assert_called_once_with("#submit-btn")
 
-    @pytest.mark.asyncio
     async def test_type_falls_back_to_css(self):
         import pagemap.server as srv
 
@@ -403,7 +382,6 @@ class TestFallbackToCSS:
         assert "CSS selector" in data["description"]
         mock_session.page.locator.assert_called_once_with("input.search-box")
 
-    @pytest.mark.asyncio
     async def test_select_falls_back_to_css(self):
         import pagemap.server as srv
 
@@ -425,7 +403,6 @@ class TestFallbackToCSS:
 class TestDuplicateResolution:
     """Multiple elements with same role+name resolved via CSS selector."""
 
-    @pytest.mark.asyncio
     async def test_duplicate_buttons_first_uses_css(self):
         """Two 'Delete' buttons → ref 4 uses its specific CSS selector."""
         import pagemap.server as srv
@@ -441,7 +418,6 @@ class TestDuplicateResolution:
         assert "CSS selector" in data["description"]
         mock_session.page.locator.assert_called_once_with("#item-1 > button.delete")
 
-    @pytest.mark.asyncio
     async def test_duplicate_buttons_second_uses_css(self):
         """Two 'Delete' buttons → ref 5 uses its specific CSS selector."""
         import pagemap.server as srv
@@ -457,7 +433,6 @@ class TestDuplicateResolution:
         assert "CSS selector" in data["description"]
         mock_session.page.locator.assert_called_once_with("#item-2 > button.delete")
 
-    @pytest.mark.asyncio
     async def test_result_includes_css_note(self):
         """Fallback to CSS → result includes note."""
         import pagemap.server as srv
@@ -471,7 +446,6 @@ class TestDuplicateResolution:
         data = json.loads(result)
         assert "CSS selector" in data["description"]
 
-    @pytest.mark.asyncio
     async def test_no_css_note_on_role_match(self):
         """Direct role match → no CSS note in result."""
         import pagemap.server as srv
@@ -492,7 +466,6 @@ class TestDuplicateResolution:
 class TestAllFail:
     """Both get_by_role and CSS selector fail → descriptive error."""
 
-    @pytest.mark.asyncio
     async def test_both_fail_returns_error(self):
         import pagemap.server as srv
 
@@ -505,7 +478,6 @@ class TestAllFail:
         data = json.loads(result)
         assert "error" in data
 
-    @pytest.mark.asyncio
     async def test_error_suggests_refresh(self):
         import pagemap.server as srv
 
@@ -518,7 +490,6 @@ class TestAllFail:
         data = json.loads(result)
         assert "get_page_map" in data["error"]
 
-    @pytest.mark.asyncio
     async def test_no_selector_skips_css_fallback(self):
         """When selector is empty, page.locator is never called."""
         import pagemap.server as srv
@@ -549,7 +520,6 @@ class TestBackwardCompat:
         )
         assert item.selector == ""
 
-    @pytest.mark.asyncio
     async def test_execute_action_works_without_selector(self):
         """PageMap from pre-Phase-2 code works normally."""
         import pagemap.server as srv
@@ -564,7 +534,6 @@ class TestBackwardCompat:
         assert "Clicked [1]" in data["description"]
         assert "error" not in data
 
-    @pytest.mark.asyncio
     async def test_press_key_unaffected(self):
         """press_key action ignores selector field entirely."""
         import pagemap.server as srv

@@ -14,7 +14,6 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
 from mcp.server.fastmcp import Image as McpImage
 from playwright.async_api import Error as PlaywrightError
 
@@ -55,23 +54,12 @@ def _make_mock_session() -> MagicMock:
     return session
 
 
-@pytest.fixture(autouse=True)
-def _reset_state():
-    """Reset global state before each test."""
-    import pagemap.server as srv
-
-    srv._state.cache.invalidate_all()
-    yield
-    srv._state.cache.invalidate_all()
-
-
 # ── TestScreenshotBasic ──────────────────────────────────────────────
 
 
 class TestScreenshotBasic:
     """Basic screenshot functionality."""
 
-    @pytest.mark.asyncio
     async def test_returns_list_with_image_and_text(self):
         mock_session = _make_mock_session()
 
@@ -83,7 +71,6 @@ class TestScreenshotBasic:
         assert isinstance(result[0], McpImage)
         assert isinstance(result[1], str)
 
-    @pytest.mark.asyncio
     async def test_image_has_png_data(self):
         mock_session = _make_mock_session()
 
@@ -94,7 +81,6 @@ class TestScreenshotBasic:
         assert img.data == _FAKE_PNG
         assert img._format == "png"
 
-    @pytest.mark.asyncio
     async def test_text_includes_byte_count(self):
         mock_session = _make_mock_session()
 
@@ -104,7 +90,6 @@ class TestScreenshotBasic:
         assert f"{len(_FAKE_PNG)} bytes" in result[1]
         assert "Screenshot captured" in result[1]
 
-    @pytest.mark.asyncio
     async def test_default_viewport_screenshot(self):
         """Default: full_page=False → viewport screenshot."""
         mock_session = _make_mock_session()
@@ -114,7 +99,6 @@ class TestScreenshotBasic:
 
         mock_session.page.screenshot.assert_called_once_with(full_page=False, type="png")
 
-    @pytest.mark.asyncio
     async def test_constant_defined(self):
         assert SCREENSHOT_TIMEOUT_SECONDS == 15
 
@@ -125,7 +109,6 @@ class TestScreenshotBasic:
 class TestScreenshotNoPageMapRequired:
     """Screenshot works without an active PageMap."""
 
-    @pytest.mark.asyncio
     async def test_works_with_no_page_map(self):
         import pagemap.server as srv
 
@@ -138,7 +121,6 @@ class TestScreenshotNoPageMapRequired:
         assert isinstance(result, list)
         assert "Screenshot captured" in result[1]
 
-    @pytest.mark.asyncio
     async def test_does_not_invalidate_existing_page_map(self):
         """Screenshot should not touch _last_page_map."""
         import pagemap.server as srv
@@ -159,7 +141,6 @@ class TestScreenshotNoPageMapRequired:
 class TestScreenshotFullPage:
     """full_page parameter forwarding."""
 
-    @pytest.mark.asyncio
     async def test_full_page_true(self):
         mock_session = _make_mock_session()
 
@@ -168,7 +149,6 @@ class TestScreenshotFullPage:
 
         mock_session.page.screenshot.assert_called_once_with(full_page=True, type="png")
 
-    @pytest.mark.asyncio
     async def test_full_page_false(self):
         mock_session = _make_mock_session()
 
@@ -184,7 +164,6 @@ class TestScreenshotFullPage:
 class TestScreenshotBrowserDead:
     """Browser death during screenshot."""
 
-    @pytest.mark.asyncio
     async def test_target_closed_returns_error(self):
         import pagemap.server as srv
 
@@ -200,7 +179,6 @@ class TestScreenshotBrowserDead:
         assert "Browser connection lost" in result
         assert srv._state.cache.active is None
 
-    @pytest.mark.asyncio
     async def test_browser_disconnected_returns_error(self):
         mock_session = _make_mock_session()
         mock_session.page.screenshot = AsyncMock(side_effect=PlaywrightError("Browser disconnected"))
@@ -218,7 +196,6 @@ class TestScreenshotBrowserDead:
 class TestScreenshotTimeout:
     """Timeout handling for screenshot."""
 
-    @pytest.mark.asyncio
     async def test_timeout_returns_error_string(self):
         mock_session = _make_mock_session()
 
@@ -243,7 +220,6 @@ class TestScreenshotTimeout:
 class TestScreenshotDialogWarnings:
     """Dialog warnings are included in screenshot responses."""
 
-    @pytest.mark.asyncio
     async def test_dialog_warning_appended(self):
         from pagemap.browser_session import DialogInfo
 

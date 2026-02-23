@@ -17,7 +17,6 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
 from playwright.async_api import Error as PlaywrightError
 
 from pagemap import Interactable, PageMap
@@ -68,16 +67,6 @@ def _make_mock_session() -> MagicMock:
     return session
 
 
-@pytest.fixture(autouse=True)
-def _reset_state():
-    """Reset global state before each test."""
-    import pagemap.server as srv
-
-    srv._state.cache.invalidate_all()
-    yield
-    srv._state.cache.invalidate_all()
-
-
 # ── TestWaitForConstants ──────────────────────────────────────────
 
 
@@ -107,32 +96,26 @@ class TestWaitForConstants:
 class TestWaitForInputValidation:
     """Input validation for wait_for."""
 
-    @pytest.mark.asyncio
     async def test_both_none(self):
         result = await wait_for(text=None, text_gone=None)
         assert "Specify either" in result
 
-    @pytest.mark.asyncio
     async def test_both_specified(self):
         result = await wait_for(text="hello", text_gone="bye")
         assert "not both" in result
 
-    @pytest.mark.asyncio
     async def test_empty_text(self):
         result = await wait_for(text="")
         assert "empty" in result.lower()
 
-    @pytest.mark.asyncio
     async def test_empty_text_gone(self):
         result = await wait_for(text_gone="")
         assert "empty" in result.lower()
 
-    @pytest.mark.asyncio
     async def test_text_too_long(self):
         result = await wait_for(text="x" * 501)
         assert "too long" in result.lower()
 
-    @pytest.mark.asyncio
     async def test_negative_timeout_clamped(self):
         """Negative timeout should be clamped to 0, not error."""
         mock_session = _make_mock_session()
@@ -143,7 +126,6 @@ class TestWaitForInputValidation:
 
         assert "already visible" in result
 
-    @pytest.mark.asyncio
     async def test_max_timeout_clamped(self):
         """Timeout > 30 should be clamped to 30."""
         mock_session = _make_mock_session()
@@ -162,7 +144,6 @@ class TestWaitForInputValidation:
 class TestWaitForTextAppear:
     """Text appear mode."""
 
-    @pytest.mark.asyncio
     async def test_already_visible(self):
         mock_session = _make_mock_session()
         mock_session.page.evaluate = AsyncMock(return_value=True)
@@ -172,7 +153,6 @@ class TestWaitForTextAppear:
 
         assert "already visible" in result
 
-    @pytest.mark.asyncio
     async def test_appears_after_wait(self):
         mock_session = _make_mock_session()
         mock_session.page.evaluate = AsyncMock(return_value=False)
@@ -184,7 +164,6 @@ class TestWaitForTextAppear:
         assert "appeared after" in result
         assert "get_page_map" in result
 
-    @pytest.mark.asyncio
     async def test_appear_timeout(self):
         mock_session = _make_mock_session()
         mock_session.page.evaluate = AsyncMock(return_value=False)
@@ -196,7 +175,6 @@ class TestWaitForTextAppear:
         assert "did not appear" in result
         assert "10" in result
 
-    @pytest.mark.asyncio
     async def test_appear_includes_elapsed(self):
         mock_session = _make_mock_session()
         mock_session.page.evaluate = AsyncMock(return_value=False)
@@ -216,7 +194,6 @@ class TestWaitForTextAppear:
 class TestWaitForTextGone:
     """Text gone (disappear) mode."""
 
-    @pytest.mark.asyncio
     async def test_already_gone(self):
         mock_session = _make_mock_session()
         mock_session.page.evaluate = AsyncMock(return_value=True)
@@ -226,7 +203,6 @@ class TestWaitForTextGone:
 
         assert "already gone" in result
 
-    @pytest.mark.asyncio
     async def test_disappears_after_wait(self):
         mock_session = _make_mock_session()
         mock_session.page.evaluate = AsyncMock(return_value=False)
@@ -238,7 +214,6 @@ class TestWaitForTextGone:
         assert "disappeared after" in result
         assert "get_page_map" in result
 
-    @pytest.mark.asyncio
     async def test_gone_timeout(self):
         mock_session = _make_mock_session()
         mock_session.page.evaluate = AsyncMock(return_value=False)
@@ -250,7 +225,6 @@ class TestWaitForTextGone:
         assert "still visible" in result
         assert "10" in result
 
-    @pytest.mark.asyncio
     async def test_gone_includes_elapsed(self):
         mock_session = _make_mock_session()
         mock_session.page.evaluate = AsyncMock(return_value=False)
@@ -268,7 +242,6 @@ class TestWaitForTextGone:
 class TestWaitForPageMap:
     """Page map invalidation behavior."""
 
-    @pytest.mark.asyncio
     async def test_appear_found_invalidates(self):
         import pagemap.server as srv
 
@@ -282,7 +255,6 @@ class TestWaitForPageMap:
 
         assert srv._state.cache.active is None
 
-    @pytest.mark.asyncio
     async def test_gone_found_invalidates(self):
         import pagemap.server as srv
 
@@ -296,7 +268,6 @@ class TestWaitForPageMap:
 
         assert srv._state.cache.active is None
 
-    @pytest.mark.asyncio
     async def test_timeout_preserves_page_map(self):
         import pagemap.server as srv
 
@@ -311,7 +282,6 @@ class TestWaitForPageMap:
 
         assert srv._state.cache.active is page_map
 
-    @pytest.mark.asyncio
     async def test_already_visible_preserves_page_map(self):
         import pagemap.server as srv
 
@@ -325,7 +295,6 @@ class TestWaitForPageMap:
 
         assert srv._state.cache.active is page_map
 
-    @pytest.mark.asyncio
     async def test_already_gone_preserves_page_map(self):
         import pagemap.server as srv
 
@@ -346,7 +315,6 @@ class TestWaitForPageMap:
 class TestWaitForErrors:
     """Error handling for wait_for."""
 
-    @pytest.mark.asyncio
     async def test_browser_dead(self):
         import pagemap.server as srv
 
@@ -360,7 +328,6 @@ class TestWaitForErrors:
         assert "Browser connection lost" in result
         assert srv._state.cache.active is None
 
-    @pytest.mark.asyncio
     async def test_overall_timeout(self):
         import pagemap.server as srv
 
@@ -381,7 +348,6 @@ class TestWaitForErrors:
         assert "overall timeout" in result.lower() or "timed out" in result.lower()
         assert srv._state.cache.active is None
 
-    @pytest.mark.asyncio
     async def test_non_timeout_playwright_error(self):
         mock_session = _make_mock_session()
         mock_session.page.evaluate = AsyncMock(return_value=False)
@@ -392,7 +358,6 @@ class TestWaitForErrors:
 
         assert "Error" in result
 
-    @pytest.mark.asyncio
     async def test_evaluate_failure(self):
         mock_session = _make_mock_session()
         mock_session.page.evaluate = AsyncMock(side_effect=PlaywrightError("Execution context destroyed"))
@@ -409,7 +374,6 @@ class TestWaitForErrors:
 class TestWaitForSecurity:
     """Security tests for wait_for."""
 
-    @pytest.mark.asyncio
     async def test_special_chars_in_text(self):
         """Quotes and special chars should not break JS execution."""
         mock_session = _make_mock_session()
@@ -420,7 +384,6 @@ class TestWaitForSecurity:
 
         assert "already visible" in result
 
-    @pytest.mark.asyncio
     async def test_js_injection_attempt(self):
         """JS injection in text should be treated as literal text, not code."""
         mock_session = _make_mock_session()
@@ -431,7 +394,6 @@ class TestWaitForSecurity:
 
         assert "Error" not in result or "already visible" in result
 
-    @pytest.mark.asyncio
     async def test_unicode_text(self):
         mock_session = _make_mock_session()
         mock_session.page.evaluate = AsyncMock(return_value=True)
@@ -441,7 +403,6 @@ class TestWaitForSecurity:
 
         assert "already visible" in result
 
-    @pytest.mark.asyncio
     async def test_newline_in_text(self):
         mock_session = _make_mock_session()
         mock_session.page.evaluate = AsyncMock(return_value=True)
@@ -458,7 +419,6 @@ class TestWaitForSecurity:
 class TestWaitForDialogs:
     """Dialog warnings in wait_for responses."""
 
-    @pytest.mark.asyncio
     async def test_dialog_on_success(self):
         from pagemap.browser_session import DialogInfo
 
@@ -475,7 +435,6 @@ class TestWaitForDialogs:
         assert "JS dialog" in result
         assert "Done!" in result
 
-    @pytest.mark.asyncio
     async def test_dialog_on_timeout(self):
         from pagemap.browser_session import DialogInfo
 
@@ -492,7 +451,6 @@ class TestWaitForDialogs:
         assert "JS dialog" in result
         assert "Leave?" in result
 
-    @pytest.mark.asyncio
     async def test_dialog_on_already_visible(self):
         from pagemap.browser_session import DialogInfo
 
@@ -516,7 +474,6 @@ class TestWaitForDialogs:
 class TestWaitForNoPageMapRequired:
     """wait_for works without an existing page_map."""
 
-    @pytest.mark.asyncio
     async def test_works_without_page_map(self):
         import pagemap.server as srv
 

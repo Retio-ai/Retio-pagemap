@@ -1,0 +1,8 @@
+services:
+  pagemap:
+    build:
+      context: .
+      args:
+        PAGEMAP_VERSION: "0.5.2"
+    image: retio1001/pagemap:latest
+    stdin_open: true

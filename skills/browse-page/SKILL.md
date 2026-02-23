@@ -1,3 +1,8 @@
+---
+name: browse-page
+description: "Browse, read, and interact with web pages using PageMap MCP tools. Covers navigation, element interaction, form filling, and page state management."
+---
+
 # Browse Page with PageMap
 
 Use the PageMap MCP server to browse, read, and interact with web pages. PageMap compresses ~100K-token HTML into a 2-5K-token structured map while preserving every actionable element.

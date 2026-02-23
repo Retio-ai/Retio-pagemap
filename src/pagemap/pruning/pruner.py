@@ -594,4 +594,18 @@ def prune_chunks(
         reason_removed.most_common(),
     )
 
+    from pagemap.telemetry import emit
+    from pagemap.telemetry.events import PRUNE_DECISIONS
+
+    emit(
+        PRUNE_DECISIONS,
+        {
+            "kept": kept,
+            "removed": total - kept,
+            "schema_name": schema_name,
+            "kept_reasons": dict(reason_kept),
+            "removed_reasons": dict(reason_removed),
+        },
+    )
+
     return results

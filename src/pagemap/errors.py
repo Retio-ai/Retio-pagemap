@@ -29,3 +29,7 @@ class SanitizationError(PageMapError):
 
 class PageMapBuildError(PageMapError):
     """PageMap construction failed (orchestrator-level)."""
+
+
+class ResourceExhaustionError(PageMapError):
+    """Page exceeds resource limits (DOM nodes, HTML size, etc.)."""

@@ -337,7 +337,6 @@ class TestBrowserLaunchArgs:
         """Extract kwargs passed to browser.new_context()."""
         return self.mock_browser.new_context.call_args.kwargs
 
-    @pytest.mark.asyncio
     async def test_popup_blocking_arg_removed(self):
         """--block-new-web-contents must NOT be present (popups handled by context.on('page'))."""
         with patch("pagemap.browser_session.async_playwright", return_value=self.mock_pw_cm):
@@ -345,14 +344,12 @@ class TestBrowserLaunchArgs:
             await session.start()
         assert "--block-new-web-contents" not in self._get_launch_args()
 
-    @pytest.mark.asyncio
     async def test_webrtc_ip_leak_prevention(self):
         with patch("pagemap.browser_session.async_playwright", return_value=self.mock_pw_cm):
             session = BrowserSession()
             await session.start()
         assert "--force-webrtc-ip-handling-policy=disable_non_proxied_udp" in self._get_launch_args()
 
-    @pytest.mark.asyncio
     async def test_disable_features_single_flag(self):
         """--disable-features must be a single arg to avoid last-wins behavior."""
         with patch("pagemap.browser_session.async_playwright", return_value=self.mock_pw_cm):
@@ -364,14 +361,12 @@ class TestBrowserLaunchArgs:
         assert "ServiceWorker" in disable_features[0]
         assert "WebRtcHideLocalIpsWithMdns" in disable_features[0]
 
-    @pytest.mark.asyncio
     async def test_deny_permission_prompts(self):
         with patch("pagemap.browser_session.async_playwright", return_value=self.mock_pw_cm):
             session = BrowserSession()
             await session.start()
         assert "--deny-permission-prompts" in self._get_launch_args()
 
-    @pytest.mark.asyncio
     async def test_telemetry_suppression_args(self):
         with patch("pagemap.browser_session.async_playwright", return_value=self.mock_pw_cm):
             session = BrowserSession()
@@ -386,14 +381,12 @@ class TestBrowserLaunchArgs:
         ):
             assert flag in args, f"Missing telemetry suppression flag: {flag}"
 
-    @pytest.mark.asyncio
     async def test_external_intent_blocking(self):
         with patch("pagemap.browser_session.async_playwright", return_value=self.mock_pw_cm):
             session = BrowserSession()
             await session.start()
         assert "--disable-external-intent-requests" in self._get_launch_args()
 
-    @pytest.mark.asyncio
     async def test_dialog_suppression_args(self):
         with patch("pagemap.browser_session.async_playwright", return_value=self.mock_pw_cm):
             session = BrowserSession()
@@ -402,7 +395,6 @@ class TestBrowserLaunchArgs:
         assert "--noerrdialogs" in args
         assert "--disable-prompt-on-repost" in args
 
-    @pytest.mark.asyncio
     async def test_no_sandbox_not_present(self):
         """--no-sandbox is a security downgrade and must never be included."""
         with patch("pagemap.browser_session.async_playwright", return_value=self.mock_pw_cm):
@@ -410,21 +402,18 @@ class TestBrowserLaunchArgs:
             await session.start()
         assert "--no-sandbox" not in self._get_launch_args()
 
-    @pytest.mark.asyncio
     async def test_context_service_workers_blocked(self):
         with patch("pagemap.browser_session.async_playwright", return_value=self.mock_pw_cm):
             session = BrowserSession()
             await session.start()
         assert self._get_context_kwargs()["service_workers"] == "block"
 
-    @pytest.mark.asyncio
     async def test_context_permissions_empty(self):
         with patch("pagemap.browser_session.async_playwright", return_value=self.mock_pw_cm):
             session = BrowserSession()
             await session.start()
         assert self._get_context_kwargs()["permissions"] == []
 
-    @pytest.mark.asyncio
     async def test_context_downloads_disabled(self):
         with patch("pagemap.browser_session.async_playwright", return_value=self.mock_pw_cm):
             session = BrowserSession()
@@ -456,7 +445,6 @@ class TestSchemeBlockRoute:
         route.request.url = url
         return route
 
-    @pytest.mark.asyncio
     async def test_blocks_chrome_scheme(self, handler):
         session, ctx = handler
         h = await self._extract_handler(session, ctx)
@@ -464,7 +452,6 @@ class TestSchemeBlockRoute:
         await h(route)
         route.abort.assert_called_once_with("blockedbyclient")
 
-    @pytest.mark.asyncio
     async def test_blocks_devtools_scheme(self, handler):
         session, ctx = handler
         h = await self._extract_handler(session, ctx)
@@ -472,7 +459,6 @@ class TestSchemeBlockRoute:
         await h(route)
         route.abort.assert_called_once_with("blockedbyclient")
 
-    @pytest.mark.asyncio
     async def test_blocks_chrome_extension_scheme(self, handler):
         session, ctx = handler
         h = await self._extract_handler(session, ctx)
@@ -480,7 +466,6 @@ class TestSchemeBlockRoute:
         await h(route)
         route.abort.assert_called_once_with("blockedbyclient")
 
-    @pytest.mark.asyncio
     async def test_blocks_file_scheme(self, handler):
         session, ctx = handler
         h = await self._extract_handler(session, ctx)
@@ -488,7 +473,6 @@ class TestSchemeBlockRoute:
         await h(route)
         route.abort.assert_called_once_with("blockedbyclient")
 
-    @pytest.mark.asyncio
     async def test_blocks_view_source_scheme(self, handler):
         session, ctx = handler
         h = await self._extract_handler(session, ctx)
@@ -496,7 +480,6 @@ class TestSchemeBlockRoute:
         await h(route)
         route.abort.assert_called_once_with("blockedbyclient")
 
-    @pytest.mark.asyncio
     async def test_blocks_blob_scheme(self, handler):
         session, ctx = handler
         h = await self._extract_handler(session, ctx)
@@ -504,7 +487,6 @@ class TestSchemeBlockRoute:
         await h(route)
         route.abort.assert_called_once_with("blockedbyclient")
 
-    @pytest.mark.asyncio
     async def test_blocks_data_scheme(self, handler):
         session, ctx = handler
         h = await self._extract_handler(session, ctx)
@@ -512,7 +494,6 @@ class TestSchemeBlockRoute:
         await h(route)
         route.abort.assert_called_once_with("blockedbyclient")
 
-    @pytest.mark.asyncio
     async def test_blocks_about_newtab(self, handler):
         session, ctx = handler
         h = await self._extract_handler(session, ctx)
@@ -520,7 +501,6 @@ class TestSchemeBlockRoute:
         await h(route)
         route.abort.assert_called_once_with("blockedbyclient")
 
-    @pytest.mark.asyncio
     async def test_blocks_about_srcdoc(self, handler):
         session, ctx = handler
         h = await self._extract_handler(session, ctx)
@@ -528,7 +508,6 @@ class TestSchemeBlockRoute:
         await h(route)
         route.abort.assert_called_once_with("blockedbyclient")
 
-    @pytest.mark.asyncio
     async def test_allows_about_blank(self, handler):
         """about:blank must pass — used by SSRF reset in server.py."""
         session, ctx = handler
@@ -538,7 +517,6 @@ class TestSchemeBlockRoute:
         route.continue_.assert_called_once()
         route.abort.assert_not_called()
 
-    @pytest.mark.asyncio
     async def test_allows_https(self, handler):
         session, ctx = handler
         h = await self._extract_handler(session, ctx)
@@ -547,7 +525,6 @@ class TestSchemeBlockRoute:
         route.continue_.assert_called_once()
         route.abort.assert_not_called()
 
-    @pytest.mark.asyncio
     async def test_allows_http(self, handler):
         session, ctx = handler
         h = await self._extract_handler(session, ctx)
@@ -556,7 +533,6 @@ class TestSchemeBlockRoute:
         route.continue_.assert_called_once()
         route.abort.assert_not_called()
 
-    @pytest.mark.asyncio
     async def test_registered_on_context_not_page(self, handler):
         """Route must be installed at context level, not page level."""
         session, ctx = handler
@@ -580,7 +556,6 @@ class TestContextHandlerRegistration:
     def _setup(self):
         self.mock_pw_cm, self.mock_chromium, self.mock_browser, self.mock_context, self.mock_page = _build_mock_chain()
 
-    @pytest.mark.asyncio
     async def test_dialog_and_page_handlers_registered(self):
         with patch("pagemap.browser_session.async_playwright", return_value=self.mock_pw_cm):
             session = BrowserSession()
@@ -591,7 +566,6 @@ class TestContextHandlerRegistration:
         assert "dialog" in event_names
         assert "page" in event_names
 
-    @pytest.mark.asyncio
     async def test_dialog_handler_is_session_method(self):
         with patch("pagemap.browser_session.async_playwright", return_value=self.mock_pw_cm):
             session = BrowserSession()
@@ -601,7 +575,6 @@ class TestContextHandlerRegistration:
         dialog_calls = [c for c in on_calls if c[0][0] == "dialog"]
         assert dialog_calls[0][0][1] == session._on_dialog
 
-    @pytest.mark.asyncio
     async def test_page_handler_is_session_method(self):
         with patch("pagemap.browser_session.async_playwright", return_value=self.mock_pw_cm):
             session = BrowserSession()
@@ -618,7 +591,6 @@ class TestContextHandlerRegistration:
 class TestGoBackMethod:
     """Tests for BrowserSession.go_back() method."""
 
-    @pytest.mark.asyncio
     async def test_go_back_returns_url_on_success(self):
         session = BrowserSession.__new__(BrowserSession)
         session.config = BrowserConfig()
@@ -632,7 +604,6 @@ class TestGoBackMethod:
         assert result == "https://example.com/prev"
         mock_page.go_back.assert_called_once_with(wait_until="load", timeout=30000)
 
-    @pytest.mark.asyncio
     async def test_go_back_returns_none_on_no_history(self):
         session = BrowserSession.__new__(BrowserSession)
         session.config = BrowserConfig()
@@ -643,7 +614,6 @@ class TestGoBackMethod:
         result = await session.go_back()
         assert result is None
 
-    @pytest.mark.asyncio
     async def test_go_back_custom_params(self):
         session = BrowserSession.__new__(BrowserSession)
         session.config = BrowserConfig()
@@ -660,7 +630,6 @@ class TestGoBackMethod:
 class TestScrollMethods:
     """Tests for BrowserSession.scroll() and get_scroll_position()."""
 
-    @pytest.mark.asyncio
     async def test_get_scroll_position_calls_evaluate(self):
         session = BrowserSession.__new__(BrowserSession)
         mock_page = AsyncMock()
@@ -678,7 +647,6 @@ class TestScrollMethods:
         result = await session.get_scroll_position()
         assert result == expected
 
-    @pytest.mark.asyncio
     async def test_scroll_calls_evaluate_with_params(self):
         session = BrowserSession.__new__(BrowserSession)
         session.config = BrowserConfig()
@@ -695,7 +663,6 @@ class TestScrollMethods:
         assert first_call[0][0] == "([dx, dy]) => window.scrollBy(dx, dy)"
         assert first_call[0][1] == [0, 800]
 
-    @pytest.mark.asyncio
     async def test_scroll_uses_dom_settle(self):
         """Verify scroll uses wait_for_dom_settle instead of fixed timeout."""
         session = BrowserSession.__new__(BrowserSession)
@@ -711,7 +678,6 @@ class TestScrollMethods:
         settle_call = mock_page.evaluate.call_args_list[1]
         assert settle_call[0][1] == [200, 1500]  # quiet_ms=200, max_ms=1500
 
-    @pytest.mark.asyncio
     async def test_scroll_parameterized_not_fstring(self):
         """Verify scroll uses parameterized evaluate (security: no f-string injection)."""
         session = BrowserSession.__new__(BrowserSession)
@@ -742,7 +708,6 @@ class TestAutoInstallChromium:
         yield
         _bs_module._chromium_install_attempted = False
 
-    @pytest.mark.asyncio
     async def test_subprocess_called_correctly(self):
         """Verify the correct playwright install command is invoked."""
         import sys
@@ -765,7 +730,6 @@ class TestAutoInstallChromium:
             stderr=asyncio.subprocess.PIPE,
         )
 
-    @pytest.mark.asyncio
     async def test_only_runs_once(self):
         """Second call should return False without running subprocess."""
         mock_proc = AsyncMock()
@@ -780,7 +744,6 @@ class TestAutoInstallChromium:
         assert second is False
         assert mock_exec.call_count == 1
 
-    @pytest.mark.asyncio
     async def test_returns_false_on_nonzero_rc(self):
         """Non-zero return code should yield False."""
         mock_proc = AsyncMock()
@@ -792,7 +755,6 @@ class TestAutoInstallChromium:
 
         assert result is False
 
-    @pytest.mark.asyncio
     async def test_returns_false_on_timeout(self):
         """TimeoutError should be caught and return False."""
         with patch(
@@ -803,7 +765,6 @@ class TestAutoInstallChromium:
 
         assert result is False
 
-    @pytest.mark.asyncio
     async def test_start_triggers_auto_install_on_missing_chromium(self):
         """start() should auto-install and retry launch when executable missing."""
         mock_pw_cm, mock_chromium, mock_browser, mock_context, mock_page = _build_mock_chain()
@@ -830,7 +791,6 @@ class TestAutoInstallChromium:
         # chromium.launch called twice: fail then succeed
         assert mock_chromium.launch.call_count == 2
 
-    @pytest.mark.asyncio
     async def test_start_raises_on_install_failure(self):
         """start() should raise RuntimeError when auto-install fails."""
         mock_pw_cm, mock_chromium, mock_browser, mock_context, mock_page = _build_mock_chain()
@@ -851,7 +811,6 @@ class TestAutoInstallChromium:
             with pytest.raises(RuntimeError, match="auto-install failed"):
                 await session.start()
 
-    @pytest.mark.asyncio
     async def test_start_propagates_non_chromium_error(self):
         """start() should not intercept errors unrelated to missing chromium."""
         mock_pw_cm, mock_chromium, mock_browser, mock_context, mock_page = _build_mock_chain()

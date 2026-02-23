@@ -413,13 +413,21 @@ def preprocess(raw_html: str) -> tuple[list[HtmlChunk], lxml.html.HtmlElement]:
         raise PruningError("Empty HTML input")
 
     meta_chunks: list[HtmlChunk] = []
-    meta_chunks.extend(_extract_json_ld(raw_html))
-    meta_chunks.extend(_extract_og_meta(raw_html))
-    meta_chunks.extend(_extract_rsc_data(raw_html))
+    json_ld = _extract_json_ld(raw_html)
+    og = _extract_og_meta(raw_html)
+    rsc = _extract_rsc_data(raw_html)
+    meta_chunks.extend(json_ld)
+    meta_chunks.extend(og)
+    meta_chunks.extend(rsc)
 
     cleaned = _clean_html_pass1(raw_html)
     if not cleaned:
         raise PruningError("HTML empty after Pass 1 cleaning")
+
+    from pagemap.telemetry import emit
+    from pagemap.telemetry.events import PREPROCESS_COMPLETE
+
+    emit(PREPROCESS_COMPLETE, {"json_ld_count": len(json_ld), "og_count": len(og), "rsc_count": len(rsc)})
 
     try:
         parser = lxml.html.HTMLParser(recover=True, encoding="utf-8")

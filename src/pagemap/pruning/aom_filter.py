@@ -78,6 +78,8 @@ _CONTENT_PATTERNS = [
 # Pre-compiled patterns for inline style checks (Phase 6.3b)
 _DISPLAY_NONE_RE = re.compile(r"display\s*:\s*none", re.IGNORECASE)
 _VISIBILITY_HIDDEN_RE = re.compile(r"visibility\s*:\s*hidden", re.IGNORECASE)
+_OPACITY_ZERO_RE = re.compile(r"opacity\s*:\s*0(?:\.0+)?(?:\s*[;!]|\s*$)", re.IGNORECASE)
+_FONT_SIZE_ZERO_RE = re.compile(r"font-size\s*:\s*0(?:\.0+)?(?:px|em|rem|%)?(?:\s*[;!]|\s*$)", re.IGNORECASE)
 
 # Price pattern for Product schema noise override (Phase 3.3)
 _PRICE_IN_NOISE_RE = re.compile(r"(?:₩|원|\$|€|£|¥)\s*[\d,]+|\d{2,3}(?:,\d{3})+", re.IGNORECASE)
@@ -221,13 +223,17 @@ def _compute_weight(
     if el.get("aria-hidden") == "true":
         return 0.0, "aria-hidden"
 
-    # 4. Inline style checks
+    # 4. Inline style checks (hidden content = prompt injection vector)
     style = el.get("style", "")
     if style:
         if _DISPLAY_NONE_RE.search(style):
             return 0.0, "display-none"
         if _VISIBILITY_HIDDEN_RE.search(style):
             return 0.0, "visibility-hidden"
+        if _OPACITY_ZERO_RE.search(style):
+            return 0.0, "opacity-zero"
+        if _FONT_SIZE_ZERO_RE.search(style):
+            return 0.0, "font-size-zero"
 
     # 5. Class/ID noise patterns + content patterns
     noise_count = _count_noise_matches(el)
@@ -320,6 +326,19 @@ def aom_filter(
         stats.total_nodes,
         stats.removal_reasons,
     )
+
+    from pagemap.telemetry import emit
+    from pagemap.telemetry.events import AOM_FILTER_COMPLETE
+
+    emit(
+        AOM_FILTER_COMPLETE,
+        {
+            "total_nodes": stats.total_nodes,
+            "removed_nodes": stats.removed_nodes,
+            "removal_reasons": dict(stats.removal_reasons),
+        },
+    )
+
     return stats
 
 

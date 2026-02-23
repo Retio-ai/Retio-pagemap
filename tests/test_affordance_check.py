@@ -10,8 +10,6 @@ from __future__ import annotations
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
-
 from pagemap import Interactable, PageMap
 from pagemap.server import (
     ACTION_AFFORDANCE_COMPAT,
@@ -65,23 +63,12 @@ def _make_mock_session(current_url: str = "https://example.com") -> MagicMock:
     return session
 
 
-@pytest.fixture(autouse=True)
-def _reset_state():
-    """Reset global state before each test."""
-    import pagemap.server as srv
-
-    srv._state.cache.invalidate_all()
-    yield
-    srv._state.cache.invalidate_all()
-
-
 # ── TestAffordanceMismatchBlocked ────────────────────────────────────
 
 
 class TestAffordanceMismatchBlocked:
     """Actions that SHOULD be blocked due to affordance mismatch."""
 
-    @pytest.mark.asyncio
     async def test_type_on_button_blocked(self):
         import pagemap.server as srv
 
@@ -93,7 +80,6 @@ class TestAffordanceMismatchBlocked:
         assert "[1]" in data["error"]
         assert "affordance=click" in data["error"]
 
-    @pytest.mark.asyncio
     async def test_type_on_link_blocked(self):
         import pagemap.server as srv
 
@@ -104,7 +90,6 @@ class TestAffordanceMismatchBlocked:
         assert "Cannot type" in data["error"]
         assert "[2]" in data["error"]
 
-    @pytest.mark.asyncio
     async def test_type_on_checkbox_blocked(self):
         import pagemap.server as srv
 
@@ -116,7 +101,6 @@ class TestAffordanceMismatchBlocked:
         assert "[7]" in data["error"]
         assert "affordance=click" in data["error"]
 
-    @pytest.mark.asyncio
     async def test_type_on_combobox_blocked(self):
         import pagemap.server as srv
 
@@ -128,7 +112,6 @@ class TestAffordanceMismatchBlocked:
         assert "[5]" in data["error"]
         assert "affordance=select" in data["error"]
 
-    @pytest.mark.asyncio
     async def test_type_on_listbox_blocked(self):
         import pagemap.server as srv
 
@@ -140,7 +123,6 @@ class TestAffordanceMismatchBlocked:
         assert "[6]" in data["error"]
         assert "affordance=select" in data["error"]
 
-    @pytest.mark.asyncio
     async def test_select_on_button_blocked(self):
         import pagemap.server as srv
 
@@ -152,7 +134,6 @@ class TestAffordanceMismatchBlocked:
         assert "[1]" in data["error"]
         assert "affordance=click" in data["error"]
 
-    @pytest.mark.asyncio
     async def test_select_on_link_blocked(self):
         import pagemap.server as srv
 
@@ -163,7 +144,6 @@ class TestAffordanceMismatchBlocked:
         assert "Cannot select" in data["error"]
         assert "[2]" in data["error"]
 
-    @pytest.mark.asyncio
     async def test_select_on_textbox_blocked(self):
         import pagemap.server as srv
 
@@ -175,7 +155,6 @@ class TestAffordanceMismatchBlocked:
         assert "[3]" in data["error"]
         assert "affordance=type" in data["error"]
 
-    @pytest.mark.asyncio
     async def test_select_on_searchbox_blocked(self):
         import pagemap.server as srv
 
@@ -194,7 +173,6 @@ class TestAffordanceMismatchBlocked:
 class TestAffordanceCompatibleAllowed:
     """Actions that SHOULD be allowed through (compatible affordances)."""
 
-    @pytest.mark.asyncio
     async def test_click_on_button_allowed(self):
         import pagemap.server as srv
 
@@ -208,7 +186,6 @@ class TestAffordanceCompatibleAllowed:
         assert "Clicked [1]" in data["description"]
         assert "error" not in data
 
-    @pytest.mark.asyncio
     async def test_click_on_textbox_allowed(self):
         """click is universal — works on type-affordance elements too."""
         import pagemap.server as srv
@@ -223,7 +200,6 @@ class TestAffordanceCompatibleAllowed:
         assert "Clicked [3]" in data["description"]
         assert "error" not in data
 
-    @pytest.mark.asyncio
     async def test_click_on_combobox_allowed(self):
         """click is universal — works on select-affordance elements too."""
         import pagemap.server as srv
@@ -238,7 +214,6 @@ class TestAffordanceCompatibleAllowed:
         assert "Clicked [5]" in data["description"]
         assert "error" not in data
 
-    @pytest.mark.asyncio
     async def test_type_on_textbox_allowed(self):
         import pagemap.server as srv
 
@@ -252,7 +227,6 @@ class TestAffordanceCompatibleAllowed:
         assert "Typed into [3]" in data["description"]
         assert "error" not in data
 
-    @pytest.mark.asyncio
     async def test_type_on_searchbox_allowed(self):
         import pagemap.server as srv
 
@@ -266,7 +240,6 @@ class TestAffordanceCompatibleAllowed:
         assert "Typed into [4]" in data["description"]
         assert "error" not in data
 
-    @pytest.mark.asyncio
     async def test_select_on_combobox_allowed(self):
         import pagemap.server as srv
 
@@ -280,7 +253,6 @@ class TestAffordanceCompatibleAllowed:
         assert "Selected option in [5]" in data["description"]
         assert "error" not in data
 
-    @pytest.mark.asyncio
     async def test_select_on_listbox_allowed(self):
         import pagemap.server as srv
 
@@ -294,7 +266,6 @@ class TestAffordanceCompatibleAllowed:
         assert "Selected option in [6]" in data["description"]
         assert "error" not in data
 
-    @pytest.mark.asyncio
     async def test_press_key_skips_affordance_check(self):
         """press_key is a global keyboard action — no affordance check."""
         import pagemap.server as srv
@@ -316,7 +287,6 @@ class TestAffordanceCompatibleAllowed:
 class TestAffordanceErrorMessageFormat:
     """Verify error message structure contains all required information."""
 
-    @pytest.mark.asyncio
     async def test_error_is_json_with_error_key(self):
         import pagemap.server as srv
 
@@ -325,7 +295,6 @@ class TestAffordanceErrorMessageFormat:
         data = json.loads(result)
         assert "error" in data
 
-    @pytest.mark.asyncio
     async def test_error_contains_ref_number(self):
         import pagemap.server as srv
 
@@ -334,7 +303,6 @@ class TestAffordanceErrorMessageFormat:
         data = json.loads(result)
         assert "[1]" in data["error"]
 
-    @pytest.mark.asyncio
     async def test_error_contains_element_role(self):
         import pagemap.server as srv
 
@@ -343,7 +311,6 @@ class TestAffordanceErrorMessageFormat:
         data = json.loads(result)
         assert "button" in data["error"]
 
-    @pytest.mark.asyncio
     async def test_error_contains_element_name(self):
         import pagemap.server as srv
 
@@ -352,7 +319,6 @@ class TestAffordanceErrorMessageFormat:
         data = json.loads(result)
         assert "Submit" in data["error"]
 
-    @pytest.mark.asyncio
     async def test_error_contains_affordance(self):
         import pagemap.server as srv
 
@@ -361,7 +327,6 @@ class TestAffordanceErrorMessageFormat:
         data = json.loads(result)
         assert "affordance=click" in data["error"]
 
-    @pytest.mark.asyncio
     async def test_error_contains_suggestion(self):
         import pagemap.server as srv
 
@@ -393,7 +358,6 @@ class TestAffordanceConstants:
         for action in VALID_ACTIONS:
             assert action in ACTION_AFFORDANCE_COMPAT, f"{action} missing from ACTION_AFFORDANCE_COMPAT"
 
-    @pytest.mark.asyncio
     async def test_mismatch_returns_early_no_playwright_call(self):
         """Affordance mismatch returns before reaching Playwright dispatch."""
         import pagemap.server as srv

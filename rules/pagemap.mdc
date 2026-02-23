@@ -1,0 +1,27 @@
+---
+description: "PageMap MCP tool usage patterns for web browsing and interaction"
+alwaysApply: true
+---
+# PageMap Workflow
+
+## Pattern
+1. `get_page_map(url)` — read Actions section for `[ref]` numbers
+2. `execute_action(ref, action)` or `fill_form(fields)` — interact by ref
+3. If page changes — call `get_page_map()` again (no URL = refresh current page)
+
+## Tool Selection
+| Need | Tool |
+|------|------|
+| Read page content + interactive elements | `get_page_map` |
+| Quick URL/title check | `get_page_state` |
+| Compare multiple URLs | `batch_get_page_map` (parallel, max 10) |
+| Wait for dynamic content | `wait_for(text="...")` |
+| Reveal hidden/lazy content | `scroll_page` then `get_page_map` |
+| Visual confirmation | `take_screenshot` |
+| Go back | `navigate_back` then `get_page_map` |
+
+## Critical Rules
+- Refs expire on any page change — always refresh after navigation
+- Use `fill_form` for 2+ fields (1 call vs N)
+- After `scroll_page` — must call `get_page_map` to get new refs
+- Action types: `click`, `type` (needs value), `select` (needs value), `hover`

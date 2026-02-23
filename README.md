@@ -12,6 +12,7 @@ Compresses ~100K-token HTML into a 2-5K-token structured map while preserving ev
 [![PyPI](https://img.shields.io/pypi/v/retio-pagemap)](https://pypi.org/project/retio-pagemap/)
 [![Python](https://img.shields.io/pypi/pyversions/retio-pagemap)](https://pypi.org/project/retio-pagemap/)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
+[![Docker](https://img.shields.io/docker/v/retio1001/pagemap?label=Docker)](https://hub.docker.com/r/retio1001/pagemap)
 [![Awesome MCP Servers](https://img.shields.io/badge/Awesome-MCP%20Servers-fc60a8?logo=awesomelists&logoColor=white)](https://github.com/punkpeye/awesome-mcp-servers)
 
 ---
@@ -62,7 +63,11 @@ claude plugin add pagemap
 
 ### Cursor
 
-Add to your project's `.cursor/mcp.json`:
+**From Marketplace (recommended):**
+
+Search "PageMap" in Cursor Marketplace, or run `/add-plugin pagemap`.
+
+**Manual setup** — add to `.cursor/mcp.json`:
 
 ```json
 {
@@ -132,6 +137,25 @@ Add to `~/.codeium/windsurf/mcp_config.json`:
     "pagemap": {
       "command": "uvx",
       "args": ["retio-pagemap"]
+    }
+  }
+}
+```
+
+### Docker
+
+```bash
+docker run -i retio1001/pagemap
+```
+
+MCP client config:
+
+```json
+{
+  "mcpServers": {
+    "pagemap": {
+      "command": "docker",
+      "args": ["run", "-i", "retio1001/pagemap"]
     }
   }
 }
@@ -280,6 +304,8 @@ PageMap treats all web content as **untrusted input**:
 
 - **SSRF Defense** — 4-layer protection: scheme whitelist, DNS rebinding defense, private IP blocking, post-redirect DNS revalidation, context-level route guard
 - **Browser Hardening** — WebRTC IP leak prevention, ServiceWorker blocking, internal protocol blocking (`view-source:`, `blob:`, `data:`), Markdown injection defense
+- **Resource Guards** — DOM node limit (50K), HTML size limit (5MB), response size limit (text 1MB, screenshot 5MB). Configurable via env vars (`PAGEMAP_MAX_TEXT_BYTES`, `PAGEMAP_MAX_IMAGE_BYTES`)
+- **Hidden Content Detection** — 2-layer defense against SEO spam and cloaking: JS `getComputedStyle()` removal + AOM inline style pattern matching (`opacity:0`, `font-size:0`, off-screen elements)
 - **Prompt Injection Defense** — nonce-based content boundaries, role-prefix stripping, Unicode control char removal
 - **Action Sandboxing** — whitelisted actions only, dangerous key combos blocked, affordance-action compatibility pre-check
 - **Input Validation** — value length limits, timeout enforcement, error sanitization
@@ -401,6 +427,20 @@ page_map = build_page_map_offline(html, url="https://example.com/product/123")
 ## Community
 
 Have a question or idea? Join the conversation in [GitHub Discussions](https://github.com/Retio-ai/Retio-pagemap/discussions).
+
+## Development
+
+[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/Retio-ai/Retio-pagemap?quickstart=1)
+
+```bash
+git clone https://github.com/Retio-ai/Retio-pagemap.git
+cd Retio-pagemap
+uv sync --group dev
+playwright install chromium
+uv run pytest --tb=short -q
+```
+
+Or open in GitHub Codespaces / VS Code Devcontainers for a pre-configured environment with all dependencies.
 
 ## Pricing
 

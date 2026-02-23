@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock
 
-import pytest
 from playwright.async_api import Error as PlaywrightError
 
 from pagemap.dom_change_detector import (
@@ -207,7 +206,6 @@ class TestDetectDomChanges:
 class TestCaptureDomFingerprint:
     """Tests for capture_dom_fingerprint with mocked page."""
 
-    @pytest.mark.asyncio
     async def test_normal_result(self):
         """Normal JS result → DomFingerprint."""
         page = AsyncMock()
@@ -228,7 +226,6 @@ class TestCaptureDomFingerprint:
         assert fp.interactive_counts == {"button": 3, "link": 2}
         assert fp.body_child_count == 10
 
-    @pytest.mark.asyncio
     async def test_evaluate_raises_exception(self):
         """evaluate raises Exception → None."""
         page = AsyncMock()
@@ -236,7 +233,6 @@ class TestCaptureDomFingerprint:
         fp = await capture_dom_fingerprint(page)
         assert fp is None
 
-    @pytest.mark.asyncio
     async def test_evaluate_raises_playwright_error(self):
         """evaluate raises PlaywrightError → None."""
         page = AsyncMock()
@@ -244,7 +240,6 @@ class TestCaptureDomFingerprint:
         fp = await capture_dom_fingerprint(page)
         assert fp is None
 
-    @pytest.mark.asyncio
     async def test_evaluate_returns_none(self):
         """evaluate returns None → None."""
         page = AsyncMock()
@@ -252,7 +247,6 @@ class TestCaptureDomFingerprint:
         fp = await capture_dom_fingerprint(page)
         assert fp is None
 
-    @pytest.mark.asyncio
     async def test_evaluate_returns_non_dict(self):
         """evaluate returns non-dict (string) → None."""
         page = AsyncMock()
@@ -260,7 +254,6 @@ class TestCaptureDomFingerprint:
         fp = await capture_dom_fingerprint(page)
         assert fp is None
 
-    @pytest.mark.asyncio
     async def test_missing_fields_uses_defaults(self):
         """Missing fields in dict → defaults applied."""
         page = AsyncMock()
@@ -274,7 +267,6 @@ class TestCaptureDomFingerprint:
         assert fp.title == ""
         assert fp.content_hash is None
 
-    @pytest.mark.asyncio
     async def test_content_hash_captured(self):
         """contentHash from JS → content_hash field."""
         page = AsyncMock()

@@ -13,7 +13,6 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
 from playwright.async_api import Error as PlaywrightError
 
 from pagemap import Interactable, PageMap
@@ -86,16 +85,6 @@ def _make_mock_session(
     return session
 
 
-@pytest.fixture(autouse=True)
-def _reset_state():
-    """Reset global state before each test."""
-    import pagemap.server as srv
-
-    srv._state.cache.invalidate_all()
-    yield
-    srv._state.cache.invalidate_all()
-
-
 # ── TestScrollConstants ──────────────────────────────────────────────
 
 
@@ -118,32 +107,26 @@ class TestScrollConstants:
 class TestScrollInputValidation:
     """Input validation for scroll_page."""
 
-    @pytest.mark.asyncio
     async def test_invalid_direction(self):
         result = await scroll_page(direction="left")
         assert "Invalid direction" in result
 
-    @pytest.mark.asyncio
     async def test_invalid_direction_right(self):
         result = await scroll_page(direction="right")
         assert "Invalid direction" in result
 
-    @pytest.mark.asyncio
     async def test_invalid_amount(self):
         result = await scroll_page(amount="lots")
         assert "Invalid amount" in result
 
-    @pytest.mark.asyncio
     async def test_negative_pixels(self):
         result = await scroll_page(amount="-100")
         assert "non-negative" in result
 
-    @pytest.mark.asyncio
     async def test_overflow_pixels(self):
         result = await scroll_page(amount="100000")
         assert "too large" in result
 
-    @pytest.mark.asyncio
     async def test_max_allowed_pixels(self):
         """50000 is the max — should NOT error on validation."""
         mock_session = _make_mock_session()
@@ -153,7 +136,6 @@ class TestScrollInputValidation:
 
         assert "Error" not in result or "Invalid" not in result
 
-    @pytest.mark.asyncio
     async def test_zero_pixels_allowed(self):
         """0 pixels is valid (no-op scroll)."""
         mock_session = _make_mock_session(scroll_result=_scroll_position(scroll_y=0))
@@ -170,7 +152,6 @@ class TestScrollInputValidation:
 class TestScrollBasic:
     """Basic scroll operations."""
 
-    @pytest.mark.asyncio
     async def test_scroll_down_page(self):
         mock_session = _make_mock_session(
             initial_pos=_scroll_position(client_height=800),
@@ -183,7 +164,6 @@ class TestScrollBasic:
         assert "Scrolled down by 800px" in result
         mock_session.scroll.assert_called_once_with(delta_y=800)
 
-    @pytest.mark.asyncio
     async def test_scroll_down_half(self):
         mock_session = _make_mock_session(
             initial_pos=_scroll_position(client_height=800),
@@ -196,7 +176,6 @@ class TestScrollBasic:
         assert "Scrolled down by 400px" in result
         mock_session.scroll.assert_called_once_with(delta_y=400)
 
-    @pytest.mark.asyncio
     async def test_scroll_down_pixels(self):
         mock_session = _make_mock_session(
             scroll_result=_scroll_position(scroll_y=300),
@@ -208,7 +187,6 @@ class TestScrollBasic:
         assert "Scrolled down by 300px" in result
         mock_session.scroll.assert_called_once_with(delta_y=300)
 
-    @pytest.mark.asyncio
     async def test_scroll_up_page(self):
         mock_session = _make_mock_session(
             initial_pos=_scroll_position(client_height=800, scroll_y=800),
@@ -221,7 +199,6 @@ class TestScrollBasic:
         assert "Scrolled up by 800px" in result
         mock_session.scroll.assert_called_once_with(delta_y=-800)
 
-    @pytest.mark.asyncio
     async def test_scroll_up_pixels(self):
         mock_session = _make_mock_session(
             scroll_result=_scroll_position(scroll_y=200),
@@ -233,7 +210,6 @@ class TestScrollBasic:
         assert "Scrolled up by 500px" in result
         mock_session.scroll.assert_called_once_with(delta_y=-500)
 
-    @pytest.mark.asyncio
     async def test_direction_case_insensitive(self):
         mock_session = _make_mock_session()
 
@@ -242,7 +218,6 @@ class TestScrollBasic:
 
         assert "Scrolled down" in result
 
-    @pytest.mark.asyncio
     async def test_direction_whitespace_trimmed(self):
         mock_session = _make_mock_session()
 
@@ -251,7 +226,6 @@ class TestScrollBasic:
 
         assert "Scrolled down" in result
 
-    @pytest.mark.asyncio
     async def test_amount_case_insensitive(self):
         """'Page' and 'HALF' should work as 'page' and 'half'."""
         mock_session = _make_mock_session()
@@ -273,7 +247,6 @@ class TestScrollBasic:
 class TestScrollInvalidation:
     """Verify page_map invalidation after scroll."""
 
-    @pytest.mark.asyncio
     async def test_scroll_clears_page_map(self):
         import pagemap.server as srv
 
@@ -285,7 +258,6 @@ class TestScrollInvalidation:
 
         assert srv._state.cache.active is None
 
-    @pytest.mark.asyncio
     async def test_scroll_suggests_get_page_map(self):
         mock_session = _make_mock_session()
 
@@ -301,7 +273,6 @@ class TestScrollInvalidation:
 class TestScrollPosition:
     """Verify scroll position metadata in response."""
 
-    @pytest.mark.asyncio
     async def test_includes_scroll_metadata(self):
         mock_session = _make_mock_session(
             scroll_result=_scroll_position(scroll_y=800, scroll_height=5000, client_height=800),
@@ -314,7 +285,6 @@ class TestScrollPosition:
         assert '"scrollHeight": 5000' in result
         assert '"viewportHeight": 800' in result
 
-    @pytest.mark.asyncio
     async def test_scroll_percent_calculated(self):
         mock_session = _make_mock_session(
             scroll_result=_scroll_position(scroll_y=2100, scroll_height=5000, client_height=800),
@@ -325,7 +295,6 @@ class TestScrollPosition:
 
         assert '"scrollPercent": 50' in result
 
-    @pytest.mark.asyncio
     async def test_at_bottom_hint(self):
         mock_session = _make_mock_session(
             scroll_result=_scroll_position(scroll_y=4200, scroll_height=5000, client_height=800),
@@ -337,7 +306,6 @@ class TestScrollPosition:
         assert "bottom of the page" in result
         assert '"atBottom": true' in result
 
-    @pytest.mark.asyncio
     async def test_at_top_hint(self):
         mock_session = _make_mock_session(
             scroll_result=_scroll_position(scroll_y=0, scroll_height=5000, client_height=800),
@@ -349,7 +317,6 @@ class TestScrollPosition:
         assert "top of the page" in result
         assert '"atTop": true' in result
 
-    @pytest.mark.asyncio
     async def test_middle_position_no_hint(self):
         mock_session = _make_mock_session(
             scroll_result=_scroll_position(scroll_y=1000, scroll_height=5000, client_height=800),
@@ -370,7 +337,6 @@ class TestScrollPosition:
 class TestScrollErrors:
     """Error handling for scroll_page."""
 
-    @pytest.mark.asyncio
     async def test_browser_dead(self):
         import pagemap.server as srv
 
@@ -384,7 +350,6 @@ class TestScrollErrors:
         assert "Browser connection lost" in result
         assert srv._state.cache.active is None
 
-    @pytest.mark.asyncio
     async def test_timeout(self):
         import pagemap.server as srv
 
@@ -405,7 +370,6 @@ class TestScrollErrors:
         assert "timed out" in result
         assert srv._state.cache.active is None
 
-    @pytest.mark.asyncio
     async def test_dialog_warnings(self):
         from pagemap.browser_session import DialogInfo
 
@@ -427,7 +391,6 @@ class TestScrollErrors:
 class TestScrollBrowserSession:
     """Tests for BrowserSession.scroll() and get_scroll_position()."""
 
-    @pytest.mark.asyncio
     async def test_scroll_method_exists(self):
         from pagemap.browser_session import BrowserSession
 
