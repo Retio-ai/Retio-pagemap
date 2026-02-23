@@ -1,5 +1,5 @@
 # Stage 1: uv로 패키지 설치
-FROM python:3.13-slim-bookworm AS builder
+FROM python:3.14-slim-bookworm AS builder
 ARG PAGEMAP_VERSION=0.5.2
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 RUN uv venv /opt/pagemap && \
@@ -7,7 +7,7 @@ RUN uv venv /opt/pagemap && \
         "retio-pagemap==${PAGEMAP_VERSION}"
 
 # Stage 2: Chromium 사전 설치 + 비root
-FROM python:3.13-slim-bookworm
+FROM python:3.14-slim-bookworm
 COPY --from=builder /opt/pagemap /opt/pagemap
 ENV PATH="/opt/pagemap/bin:$PATH"
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers
