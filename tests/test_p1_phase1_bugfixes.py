@@ -236,7 +236,7 @@ class TestURLValidation:
     def test_blocked_schemes(self, src: str):
         """Dangerous URL schemes should be filtered out."""
         html = f'<img src="{src}" />'
-        result = extract_product_images(html)
+        result, _ = extract_product_images(html)
         assert len(result) == 0
 
     @pytest.mark.parametrize(
@@ -252,14 +252,14 @@ class TestURLValidation:
     def test_allowed_urls(self, src: str):
         """Safe URLs should pass through."""
         html = f'<img src="{src}" />'
-        result = extract_product_images(html)
+        result, _ = extract_product_images(html)
         assert len(result) >= 1
 
     def test_long_url_blocked(self):
         """URLs exceeding 2048 chars should be blocked."""
         long_url = "https://example.com/" + "a" * 2100
         html = f'<img src="{long_url}" />'
-        result = extract_product_images(html)
+        result, _ = extract_product_images(html)
         assert len(result) == 0
 
 
@@ -305,3 +305,565 @@ class TestRecursionDepthLimit:
         with caplog.at_level(logging.WARNING, logger="pagemap.pruning.preprocessor"):
             self._parse_and_decompose(html, max_depth=10)
         assert any("Max decomposition depth" in r.message for r in caplog.records)
+
+
+# ── QR-03 Image Filtering ────────────────────────────────────────────
+
+
+class TestImageFilteringQR03:
+    """QR-03: Image filtering — negative filters, size, semantics, <picture>, dedup."""
+
+    # -- Negative filter: new exclude keywords --
+
+    @pytest.mark.parametrize(
+        "keyword",
+        [
+            "wordmark",
+            "tagline",
+            "copyright",
+            "favicon",
+            "badge",
+            "shackle",
+            "disambig",
+            "padlock",
+            "protection-shackle",
+            "beacon",
+            "separator",
+            "divider",
+        ],
+    )
+    def test_new_exclude_keywords(self, keyword: str):
+        """New exclude keywords should be filtered out."""
+        html = f'<img src="https://example.com/{keyword}-image.png" />'
+        result, _ = extract_product_images(html)
+        assert len(result) == 0, f"Expected {keyword} to be excluded"
+
+    def test_protection_in_product_url_not_excluded(self):
+        """Legitimate product URL with 'protection' should NOT be excluded."""
+        html = '<img src="https://example.com/screen-protection-case.jpg" alt="Case" />'
+        result, _ = extract_product_images(html)
+        assert len(result) == 1
+
+    @pytest.mark.parametrize(
+        "domain",
+        [
+            "scorecardresearch.com",
+            "doubleclick.net",
+            "google-analytics.com",
+            "facebook.com/tr",
+            "bat.bing.com",
+            "amazon-adsystem.com",
+        ],
+    )
+    def test_tracking_domains_excluded(self, domain: str):
+        """Known tracking domains should be filtered out."""
+        html = f'<img src="https://{domain}/pixel.gif" />'
+        result, _ = extract_product_images(html)
+        assert len(result) == 0, f"Expected {domain} to be excluded"
+
+    def test_shields_io_badge_excluded(self):
+        """shields.io badges should be filtered out."""
+        html = '<img src="https://img.shields.io/badge/build-passing-green.svg" />'
+        result, _ = extract_product_images(html)
+        assert len(result) == 0
+
+    # -- Size filter: URL path --
+
+    @pytest.mark.parametrize("px", [20, 40, 50])
+    def test_url_path_small_size_excluded(self, px: int):
+        """URL path with small px size should be filtered out."""
+        html = f'<img src="https://upload.wikimedia.org/wikipedia/commons/thumb/{px}px-icon.png" />'
+        result, _ = extract_product_images(html)
+        assert len(result) == 0, f"Expected {px}px to be excluded"
+
+    def test_url_path_large_size_passes(self):
+        """URL path with 100px or larger should pass."""
+        html = '<img src="https://upload.wikimedia.org/wikipedia/commons/thumb/100px-photo.jpg" />'
+        result, _ = extract_product_images(html)
+        assert len(result) == 1
+
+    # -- Size filter: HTML attributes --
+
+    def test_1x1_pixel_by_attrs_excluded(self):
+        """1x1 pixel tracking image via HTML attributes should be filtered."""
+        html = '<img src="https://example.com/track.gif" width="1" height="1" />'
+        result, _ = extract_product_images(html)
+        assert len(result) == 0
+
+    def test_small_width_attr_excluded(self):
+        """width=20 image should be filtered."""
+        html = '<img src="https://example.com/small.png" width="20" />'
+        result, _ = extract_product_images(html)
+        assert len(result) == 0
+
+    def test_normal_size_attr_passes(self):
+        """width=200 image should pass."""
+        html = '<img src="https://example.com/content.jpg" width="200" height="150" />'
+        result, _ = extract_product_images(html)
+        assert len(result) == 1
+
+    # -- Semantic filter: decorative images (2026 best practice) --
+
+    def test_role_presentation_excluded(self):
+        """role='presentation' marks decorative image → exclude."""
+        html = '<img src="https://example.com/decor.png" role="presentation" />'
+        result, _ = extract_product_images(html)
+        assert len(result) == 0
+
+    def test_role_none_excluded(self):
+        """role='none' marks decorative image → exclude."""
+        html = '<img src="https://example.com/decor.png" role="none" />'
+        result, _ = extract_product_images(html)
+        assert len(result) == 0
+
+    def test_aria_hidden_excluded(self):
+        """aria-hidden='true' marks decorative image → exclude."""
+        html = '<img src="https://example.com/decor.png" aria-hidden="true" />'
+        result, _ = extract_product_images(html)
+        assert len(result) == 0
+
+    def test_empty_alt_excluded(self):
+        """alt='' (empty alt) marks decorative image → exclude."""
+        html = '<img src="https://example.com/decor.png" alt="" />'
+        result, _ = extract_product_images(html)
+        assert len(result) == 0
+
+    def test_nonempty_alt_passes(self):
+        """alt='Product photo' should NOT be excluded."""
+        html = '<img src="https://example.com/product.jpg" alt="Product photo" />'
+        result, _ = extract_product_images(html)
+        assert len(result) == 1
+
+    def test_fetchpriority_high_boosts(self):
+        """fetchpriority='high' should boost image to top priority."""
+        html = (
+            '<img src="https://example.com/secondary.jpg" alt="Secondary" />'
+            '<img src="https://example.com/hero.jpg" alt="Hero" fetchpriority="high" />'
+        )
+        result, _ = extract_product_images(html)
+        assert len(result) == 2
+        # Hero should be first despite appearing second in DOM
+        assert result[0] == "https://example.com/hero.jpg"
+
+    # -- <picture> support (2026 critical) --
+
+    def test_picture_source_srcset_extracted(self):
+        """<picture><source srcset> should extract the URL."""
+        html = """
+        <picture>
+            <source srcset="https://example.com/large.jpg 1200w, https://example.com/small.jpg 400w" type="image/jpeg" />
+            <img src="https://example.com/fallback.jpg" alt="Product" />
+        </picture>
+        """
+        result, _ = extract_product_images(html)
+        # Should include the largest source (1200w) and the fallback
+        assert "https://example.com/large.jpg" in result
+
+    def test_picture_fallback_img_included(self):
+        """<picture> fallback <img> should also be included."""
+        html = """
+        <picture>
+            <source srcset="https://example.com/large.webp 1200w" type="image/webp" />
+            <img src="https://example.com/fallback.jpg" alt="Product" />
+        </picture>
+        """
+        result, _ = extract_product_images(html)
+        assert "https://example.com/fallback.jpg" in result
+
+    def test_picture_x_descriptor_picks_highest(self):
+        """<picture> srcset with x descriptors should pick the highest density."""
+        html = """
+        <picture>
+            <source srcset="https://example.com/photo-1x.jpg 1x, https://example.com/photo-3x.jpg 3x, https://example.com/photo-2x.jpg 2x" />
+            <img src="https://example.com/fallback.jpg" alt="Photo" />
+        </picture>
+        """
+        result, _ = extract_product_images(html)
+        assert "https://example.com/photo-3x.jpg" in result
+
+    def test_picture_decorative_fallback_skipped(self):
+        """<picture> fallback <img alt=""> should be skipped (decorative)."""
+        html = """
+        <picture>
+            <source srcset="https://example.com/hero.webp 1200w" type="image/webp" />
+            <img src="https://example.com/hero-fallback.jpg" alt="" />
+        </picture>
+        """
+        result, _ = extract_product_images(html)
+        # Source URL should be extracted, but decorative fallback should be skipped
+        assert "https://example.com/hero.webp" in result
+        assert "https://example.com/hero-fallback.jpg" not in result
+
+    def test_no_picture_regular_img_works(self):
+        """Regular <img> without <picture> should still work."""
+        html = '<img src="https://example.com/product.jpg" alt="Product" />'
+        result, _ = extract_product_images(html)
+        assert result == ["https://example.com/product.jpg"]
+
+    # -- URL deduplication --
+
+    def test_imwidth_dedup(self):
+        """H&M-style imwidth variants should deduplicate to one (largest)."""
+        widths = [256, 384, 528, 768, 1080, 1536, 2160]
+        imgs = "\n".join(f'<img src="https://image.hm.com/product.jpg?imwidth={w}" />' for w in widths)
+        result, _ = extract_product_images(imgs)
+        assert len(result) == 1
+        assert "imwidth=2160" in result[0]
+
+    def test_different_images_not_deduped(self):
+        """Different base URLs should NOT be deduplicated."""
+        html = """
+        <img src="https://cdn.example.com/product-a.jpg?w=800" />
+        <img src="https://cdn.example.com/product-b.jpg?w=800" />
+        """
+        result, _ = extract_product_images(html)
+        assert len(result) == 2
+
+    def test_dedup_keeps_largest_variant(self):
+        """Dedup should keep the variant with the largest size param."""
+        html = """
+        <img src="https://cdn.example.com/photo.jpg?w=200" />
+        <img src="https://cdn.example.com/photo.jpg?w=1200" />
+        <img src="https://cdn.example.com/photo.jpg?w=600" />
+        """
+        result, _ = extract_product_images(html)
+        assert len(result) == 1
+        assert "w=1200" in result[0]
+
+    def test_dedup_merges_hint_flags(self):
+        """Dedup should OR-merge hint flags across variants."""
+        html = """
+        <img src="https://cdn.example.com/product-gallery.jpg?w=200" class="gallery" alt="Product" />
+        <img src="https://cdn.example.com/product-gallery.jpg?w=1200" alt="Photo" />
+        """
+        result, _ = extract_product_images(html)
+        assert len(result) == 1
+        assert "w=1200" in result[0]
+        # The hint from the smaller variant (gallery class) should be preserved
+        # Verify indirectly: if a non-hint image exists, the hinted one should come first
+        html2 = (
+            '<img src="https://cdn.example.com/random-photo.jpg" alt="Random" />'
+            '<img src="https://cdn.example.com/product-gallery.jpg?w=200" class="gallery" alt="Product" />'
+            '<img src="https://cdn.example.com/product-gallery.jpg?w=1200" alt="Photo" />'
+        )
+        result2, _ = extract_product_images(html2)
+        assert len(result2) == 2
+        # product-gallery should be first (has merged hint from gallery class)
+        assert "product-gallery" in result2[0]
+
+    # -- Integration scenarios --
+
+    def test_wikipedia_scenario(self):
+        """Wikipedia: wordmark + shackle + 20px icon excluded, content image kept."""
+        html = """
+        <img src="https://en.wikipedia.org/static/images/wordmark.svg" />
+        <img src="https://upload.wikimedia.org/wikipedia/commons/a/a9/Shackle.svg" />
+        <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/20px-disambig.png" />
+        <img src="https://upload.wikimedia.org/wikipedia/commons/3/3a/WLF_collage.jpg" alt="Collage" />
+        """
+        result, _ = extract_product_images(html)
+        assert len(result) == 1
+        assert "WLF_collage" in result[0]
+
+    def test_hm_dedup_scenario(self):
+        """H&M: 10 imwidth variants of same image → 1 result (largest)."""
+        base = "https://image.hm.com/assets/hm/12/34/product.jpg"
+        imgs = "\n".join(
+            f'<img src="{base}?imwidth={w}" />' for w in [256, 384, 528, 768, 800, 1080, 1200, 1536, 1800, 2160]
+        )
+        result, _ = extract_product_images(imgs)
+        assert len(result) == 1
+        assert "imwidth=2160" in result[0]
+
+    # -- Regression tests: existing filters still work --
+
+    @pytest.mark.parametrize(
+        "keyword",
+        ["icon", "logo", "banner", "sprite", "spacer", "blank"],
+    )
+    def test_existing_exclude_patterns_still_work(self, keyword: str):
+        """Original exclude patterns should still filter."""
+        html = f'<img src="https://example.com/{keyword}.png" />'
+        result, _ = extract_product_images(html)
+        assert len(result) == 0
+
+    def test_existing_tracking_ad_patterns(self):
+        """ad_ and tracking patterns still filtered."""
+        html = """
+        <img src="https://example.com/ad_banner.jpg" />
+        <img src="https://example.com/tracking.gif" />
+        <img src="https://example.com/pixel.gif" />
+        """
+        result, _ = extract_product_images(html)
+        assert len(result) == 0
+
+    @pytest.mark.parametrize(
+        "src",
+        [
+            "javascript:alert(1)",
+            "vbscript:msgbox(1)",
+            "data:image/gif;base64,R0lGODlh",
+            "blob:https://example.com/uuid",
+            "file:///etc/passwd",
+        ],
+    )
+    def test_security_scheme_regression(self, src: str):
+        """Dangerous URL schemes should still be blocked."""
+        html = f'<img src="{src}" />'
+        result, _ = extract_product_images(html)
+        assert len(result) == 0
+
+    def test_long_url_regression(self):
+        """URLs exceeding 2048 chars should still be blocked."""
+        long_url = "https://example.com/" + "a" * 2100
+        html = f'<img src="{long_url}" />'
+        result, _ = extract_product_images(html)
+        assert len(result) == 0
+
+    def test_product_hint_still_prioritized(self):
+        """Product-hint images should still be sorted first."""
+        html = """
+        <img src="https://example.com/random.jpg" alt="random" />
+        <img src="https://example.com/product-main.jpg" class="gallery" alt="Product" />
+        """
+        result, _ = extract_product_images(html)
+        assert len(result) == 2
+        assert "product-main" in result[0] or "gallery" in result[0]
+
+    # -- Amazon scenario --
+
+    def test_amazon_scenario(self):
+        """Amazon: flyout/CTA excluded, m.media-amazon.com product image kept."""
+        html = """
+        <img src="https://images-na.ssl-images-amazon.com/images/G/01/flyout_72dpi.png" />
+        <img src="https://images-na.ssl-images-amazon.com/images/G/01/YourPrimePIV_fallback_CTA.jpg" />
+        <img src="https://m.media-amazon.com/images/I/81NGS0K9MkL._AC_SL1500_.jpg" alt="AirPods" />
+        """
+        result, _ = extract_product_images(html)
+        assert len(result) == 1
+        assert "m.media-amazon.com" in result[0]
+        assert not any("flyout" in u for u in result)
+        assert not any("CTA" in u for u in result)
+
+    # -- <figure> context boost --
+
+    def test_figure_context_boosts_priority(self):
+        """<figure>-contained images should get automatic hint boost."""
+        html = """
+        <img src="https://example.com/random-photo.jpg" alt="Random" />
+        <figure>
+            <img src="https://example.com/editorial.jpg" alt="Editorial" />
+            <figcaption>An editorial image</figcaption>
+        </figure>
+        """
+        result, _ = extract_product_images(html)
+        assert len(result) == 2
+        # Figure image should be sorted first (has hint boost)
+        assert "editorial" in result[0]
+
+    # -- loading="eager" boost --
+
+    def test_loading_eager_boosts_priority(self):
+        """loading='eager' images should be prioritized."""
+        html = """
+        <img src="https://example.com/secondary.jpg" alt="Secondary" />
+        <img src="https://example.com/hero.jpg" alt="Hero" loading="eager" />
+        """
+        result, _ = extract_product_images(html)
+        assert len(result) == 2
+        # Eager-loaded image should be first (has hint boost)
+        assert "hero" in result[0]
+
+    # -- SVG filtering --
+
+    def test_svg_without_hint_excluded(self):
+        """Generic .svg files should be excluded."""
+        html = '<img src="https://example.com/decorative-element.svg" alt="Decor" />'
+        result, _ = extract_product_images(html)
+        assert len(result) == 0
+
+    def test_svg_with_product_hint_kept(self):
+        """SVG from product-hint domain (e.g. wikimedia) should be kept."""
+        html = '<img src="https://upload.wikimedia.org/wikipedia/commons/infographic.svg" alt="Info" />'
+        result, _ = extract_product_images(html)
+        assert len(result) == 1
+
+    # -- CDN product hints --
+
+    def test_cdn_product_hints_prioritized(self):
+        """Major CDN domains should be recognized as product hints."""
+        html = """
+        <img src="https://example.com/unknown.jpg" alt="Unknown" />
+        <img src="https://m.media-amazon.com/images/I/product.jpg" alt="Amazon" />
+        <img src="https://thumbnail7.coupangcdn.com/product.jpg" alt="Coupang" />
+        <img src="https://image.msscdn.net/goods.jpg" alt="Musinsa" />
+        """
+        result, _ = extract_product_images(html)
+        # CDN images should be prioritized over generic unknown image
+        assert "m.media-amazon.com" in result[0] or "coupang" in result[0] or "msscdn" in result[0]
+
+    # -- srcset size validation --
+
+    def test_srcset_all_small_excluded(self):
+        """Images where all srcset variants are < 100w should be excluded."""
+        html = '<img src="https://example.com/tiny.jpg" srcset="https://example.com/tiny.jpg 50w, https://example.com/tiny2.jpg 80w" alt="Tiny" />'
+        result, _ = extract_product_images(html)
+        assert len(result) == 0
+
+    def test_srcset_one_large_kept(self):
+        """Images where at least one srcset variant >= 100w should be kept."""
+        html = '<img src="https://example.com/photo.jpg" srcset="https://example.com/s.jpg 50w, https://example.com/l.jpg 800w" alt="Photo" />'
+        result, _ = extract_product_images(html)
+        assert len(result) >= 1
+
+    # -- Refined primary hint --
+
+    def test_refined_primary_hint_no_false_positive(self):
+        """'primary-color.png' should NOT match product hint (too broad)."""
+        html = '<img src="https://example.com/primary-color.png" alt="Color" />'
+        result, _ = extract_product_images(html)
+        # Should still be in results (not excluded) but NOT have hint boost
+        # We test indirectly: if another image without hint exists, order matters
+        html2 = """
+        <img src="https://example.com/primary-color.png" alt="Color" />
+        <img src="https://example.com/product-gallery.jpg" alt="Product" />
+        """
+        result2, _ = extract_product_images(html2)
+        assert len(result2) == 2
+        # product-gallery has the hint, should be first
+        assert "product-gallery" in result2[0]
+
+    def test_refined_primary_image_hint_matches(self):
+        """'primary-image.jpg' should match the refined product hint."""
+        html = """
+        <img src="https://example.com/random.jpg" alt="Random" />
+        <img src="https://example.com/primary-image.jpg" alt="Main" />
+        """
+        result, _ = extract_product_images(html)
+        assert len(result) == 2
+        # primary-image should be prioritized
+        assert "primary-image" in result[0]
+
+
+class TestMetadataImageMerge:
+    """Tests for _merge_structured_images in page_map_builder."""
+
+    def test_jsonld_image_prepended(self):
+        """Structured data image should be prepended to list."""
+        from pagemap.page_map_builder import _merge_structured_images
+
+        html_images = ["https://cdn.example.com/a.jpg", "https://cdn.example.com/b.jpg"]
+        metadata = {"image_url": "https://cdn.example.com/structured.jpg"}
+        result, merged = _merge_structured_images(html_images, metadata)
+        assert merged is True
+        assert result[0] == "https://cdn.example.com/structured.jpg"
+        assert len(result) == 3
+
+    def test_jsonld_image_dedup_exact(self):
+        """Exact duplicate should not be added again."""
+        from pagemap.page_map_builder import _merge_structured_images
+
+        html_images = ["https://cdn.example.com/photo.jpg"]
+        metadata = {"image_url": "https://cdn.example.com/photo.jpg"}
+        result, merged = _merge_structured_images(html_images, metadata)
+        assert merged is False
+        assert len(result) == 1
+
+    def test_jsonld_image_dedup_canonical(self):
+        """Resize variant of existing image should be deduped."""
+        from pagemap.page_map_builder import _merge_structured_images
+
+        html_images = ["https://cdn.example.com/photo.jpg?w=800"]
+        metadata = {"image_url": "https://cdn.example.com/photo.jpg?w=1200"}
+        result, merged = _merge_structured_images(html_images, metadata)
+        assert merged is False
+        assert len(result) == 1
+
+    def test_no_metadata_image(self):
+        """No image_url in metadata → original list unchanged."""
+        from pagemap.page_map_builder import _merge_structured_images
+
+        html_images = ["https://cdn.example.com/a.jpg"]
+        metadata = {"title": "Test"}
+        result, merged = _merge_structured_images(html_images, metadata)
+        assert merged is False
+        assert result == ["https://cdn.example.com/a.jpg"]
+
+    def test_cap_at_ten(self):
+        """Result should never exceed 10 images."""
+        from pagemap.page_map_builder import _merge_structured_images
+
+        html_images = [f"https://cdn.example.com/{i}.jpg" for i in range(10)]
+        metadata = {"image_url": "https://cdn.example.com/extra.jpg"}
+        result, merged = _merge_structured_images(html_images, metadata)
+        assert merged is True
+        assert len(result) == 10
+        assert result[0] == "https://cdn.example.com/extra.jpg"
+
+    def test_excluded_metadata_image_rejected(self):
+        """Metadata image matching exclude patterns should be rejected."""
+        from pagemap.page_map_builder import _merge_structured_images
+
+        html_images = ["https://cdn.example.com/a.jpg"]
+        metadata = {"image_url": "https://cdn.example.com/logo-main.png"}
+        result, merged = _merge_structured_images(html_images, metadata)
+        assert merged is False
+        assert len(result) == 1
+
+    def test_unsafe_scheme_rejected(self):
+        """Metadata image with unsafe scheme should be rejected."""
+        from pagemap.page_map_builder import _merge_structured_images
+
+        html_images = ["https://cdn.example.com/a.jpg"]
+        metadata = {"image_url": "javascript:alert(1)"}
+        result, merged = _merge_structured_images(html_images, metadata)
+        assert merged is False
+
+    def test_long_url_rejected(self):
+        """Metadata image with excessively long URL should be rejected."""
+        from pagemap.page_map_builder import _merge_structured_images
+
+        html_images = ["https://cdn.example.com/a.jpg"]
+        metadata = {"image_url": "https://cdn.example.com/" + "x" * 2100}
+        result, merged = _merge_structured_images(html_images, metadata)
+        assert merged is False
+
+
+class TestImageFilterTelemetry:
+    """Tests for image filter telemetry stats returned by extract_product_images."""
+
+    def test_stats_returned(self):
+        """extract_product_images should return filter stats dict."""
+        html = '<img src="https://example.com/product.jpg" alt="Product" />'
+        result, stats = extract_product_images(html)
+        assert isinstance(stats, dict)
+        assert "total_candidates" in stats
+        assert "after_decorative_filter" in stats
+        assert "after_size_attrs_filter" in stats
+        assert "after_all_filters" in stats
+        assert "after_picture_merge" in stats
+        assert "after_dedup" in stats
+        assert "final_count" in stats
+        assert "structured_image_merged" in stats
+
+    def test_stats_counts_correct(self):
+        """Filter stats should reflect actual filtering behavior."""
+        html = """
+        <img src="https://example.com/product.jpg" alt="Product" />
+        <img src="https://example.com/decor.png" alt="" />
+        <img src="https://example.com/logo.png" alt="Logo" />
+        <img src="https://example.com/content.jpg" alt="Content" />
+        """
+        result, stats = extract_product_images(html)
+        # 4 img tags total
+        assert stats["total_candidates"] == 4
+        # 1 decorative (alt="") should be filtered
+        assert stats["after_decorative_filter"] == 3
+        # no size attrs to filter
+        assert stats["after_size_attrs_filter"] == 3
+        # logo.png excluded by pattern → after_all_filters = 2
+        assert stats["after_all_filters"] == 2
+        # Final count should match result length
+        assert stats["final_count"] == len(result)
+        # structured_image_merged defaults to False
+        assert stats["structured_image_merged"] is False

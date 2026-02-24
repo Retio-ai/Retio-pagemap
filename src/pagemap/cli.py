@@ -35,15 +35,21 @@ def _require_cli_deps() -> None:
         sys.exit(1)
 
 
-def _validate_output_path(path_str: str | None) -> Path | None:
-    """Validate and return an output path, or None if not specified."""
+def _validate_output_path(path_str: str | None) -> tuple[Path | None, bool]:
+    """Validate and return an output path with file-mode flag.
+
+    Returns:
+        (path, is_file_mode): path is None if not specified.
+        is_file_mode is True when path has a suffix (e.g., out.json).
+    """
     if not path_str:
-        return None
+        return None, False
     p = Path(path_str)
-    parent = p.parent if p.suffix else p
+    is_file = bool(p.suffix)
+    parent = p.parent if is_file else p
     if not parent.exists():
         parent.mkdir(parents=True, exist_ok=True)
-    return p
+    return p, is_file
 
 
 def _has_internal() -> bool:
@@ -122,7 +128,7 @@ def cmd_validate(args: argparse.Namespace) -> None:
     print_validation_report(results)
 
     if args.save:
-        save_path = _validate_output_path(args.save)
+        save_path, _ = _validate_output_path(args.save)
         save_data = [
             {
                 "url": r.url,
@@ -138,28 +144,103 @@ def cmd_validate(args: argparse.Namespace) -> None:
 
 def cmd_build(args: argparse.Namespace) -> None:
     """Build Page Maps from URLs or snapshots."""
-    output_dir = _validate_output_path(args.output) or Path(__file__).parent / "data"
-    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path, is_file_mode = _validate_output_path(args.output)
+    fmt = getattr(args, "format", None)
+
+    # --format sends output to stdout; --output saves to file/dir
+    if fmt and output_path:
+        print("Error: --format and --output are mutually exclusive.", file=sys.stderr)
+        sys.exit(1)
+
+    if not fmt and not is_file_mode:
+        output_dir = output_path or Path(__file__).parent / "data"
+        output_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        output_dir = None
 
     snapshot_dir = Path(args.snapshot_dir) if getattr(args, "snapshot_dir", None) else None
 
     if args.url:
-        asyncio.run(_build_live(args.url, output_dir))
+        try:
+            asyncio.run(
+                _build_live(
+                    args.url,
+                    output_dir=output_dir,
+                    output_file=output_path if is_file_mode else None,
+                    fmt=fmt,
+                )
+            )
+        except KeyboardInterrupt:
+            raise
+        except Exception as e:
+            from .problem_details import from_exception
+
+            problem = from_exception(e, tool_context="build")
+            print(problem.to_cli_text(), file=sys.stderr)
+            sys.exit(1)
     elif args.snapshots:
+        if output_dir is None:
+            output_dir = Path(__file__).parent / "data"
+            output_dir.mkdir(parents=True, exist_ok=True)
         asyncio.run(_build_from_snapshots(output_dir, snapshot_dir=snapshot_dir))
-    else:
+    elif getattr(args, "offline", False):
+        if output_dir is None:
+            output_dir = Path(__file__).parent / "data"
+            output_dir.mkdir(parents=True, exist_ok=True)
         _build_offline(output_dir)
+    else:
+        # #9b: --url is required for build
+        print(
+            "Error: --url is required for the build command.\n\n"
+            "Examples:\n"
+            "  python -m pagemap.cli build --url https://example.com\n"
+            "  python -m pagemap.cli build --url https://example.com --format json\n"
+            "  python -m pagemap.cli build --url https://example.com --output result.json\n",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
 
-async def _build_live(url: str, output_dir: Path) -> None:
+async def _build_live(
+    url: str,
+    output_dir: Path | None = None,
+    output_file: Path | None = None,
+    fmt: str | None = None,
+) -> None:
     """Build Page Map from live URL."""
+    from ._progress import print_step, status_spinner
     from .browser_session import BrowserSession
     from .page_map_builder import build_page_map_live
     from .serializer import to_agent_prompt, to_json
 
-    async with BrowserSession() as session:
-        page_map = await build_page_map_live(session, url)
+    with status_spinner(f"Building Page Map for {url}..."):
+        async with BrowserSession() as session:
+            page_map = await build_page_map_live(session, url)
 
+    if fmt:
+        # --format: output to stdout, status to stderr
+        if fmt == "json":
+            print(to_json(page_map))
+        elif fmt == "markdown":
+            print(to_agent_prompt(page_map, include_meta=True))
+        else:  # text
+            print(to_agent_prompt(page_map, include_meta=False))
+        print_step(f"Interactables: {page_map.total_interactables}")
+        print_step(f"Pruned tokens: {page_map.pruned_tokens}")
+        print_step(f"Generation: {page_map.generation_ms:.0f}ms")
+    elif output_file:
+        # --output file mode: single file
+        if output_file.suffix == ".json":
+            output_file.write_text(to_json(page_map), encoding="utf-8")
+        else:
+            output_file.write_text(to_agent_prompt(page_map, include_meta=True), encoding="utf-8")
+        print(f"Page Map saved to {output_file}")
+        print(f"\nInteractables: {page_map.total_interactables}")
+        print(f"Pruned tokens: {page_map.pruned_tokens}")
+        print(f"Generation: {page_map.generation_ms:.0f}ms")
+    else:
+        # --output dir mode (default)
+        assert output_dir is not None
         json_path = output_dir / "live_page_map.json"
         json_path.write_text(to_json(page_map), encoding="utf-8")
 
@@ -233,8 +314,11 @@ async def _build_from_snapshots(output_dir: Path, snapshot_dir: Path | None = No
                         ]
                     )
                 except Exception as e:
-                    print(f"  ERROR {site_id}/{page_id}: {e}")
-                    results.append([site_id, page_id, "-", "-", "-", f"ERROR: {e}"])
+                    from .problem_details import sanitize_detail
+
+                    safe_msg = sanitize_detail(str(e))
+                    print(f"  ERROR {site_id}/{page_id}: {safe_msg}", file=sys.stderr)
+                    results.append([site_id, page_id, "-", "-", "-", f"ERROR: {safe_msg}"])
 
     headers = ["Site", "Page", "Interactables", "Pruned Tok", "Total Tok", "Time"]
     print(tabulate(results, headers=headers, tablefmt="simple"))
@@ -331,8 +415,11 @@ def _build_offline(output_dir: Path) -> None:
                     ]
                 )
             except Exception as e:
-                print(f"  ERROR {site_id}/{page_id}: {e}")
-                results.append([site_id, page_id, "-", "-", "-", f"ERROR: {e}"])
+                from .problem_details import sanitize_detail
+
+                safe_msg = sanitize_detail(str(e))
+                print(f"  ERROR {site_id}/{page_id}: {safe_msg}", file=sys.stderr)
+                results.append([site_id, page_id, "-", "-", "-", f"ERROR: {safe_msg}"])
 
     headers = ["Site", "Page", "Interactables", "Pruned Tok", "Total Tok", "Time"]
     print(tabulate(results, headers=headers, tablefmt="simple"))
@@ -477,7 +564,7 @@ def cmd_convert(args: argparse.Namespace) -> None:
         tools = [args.tool]
 
     # Determine output directory
-    output_dir = _validate_output_path(args.output)
+    output_dir, _ = _validate_output_path(args.output)
 
     print(f"Converting with tools: {tools}")
     print(f"Snapshot dir: {snapshot_dir}")
@@ -772,11 +859,36 @@ def main() -> None:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # Always available
-    p_build = subparsers.add_parser("build", help="Build Page Maps")
-    p_build.add_argument("--url", type=str)
+    _build_epilog = """\
+examples:
+  %(prog)s build --url https://example.com               Build from live URL
+  %(prog)s build --url https://example.com --format json  Output JSON to stdout
+  %(prog)s build --url https://example.com -o result.json Save to single file
+  %(prog)s build --url https://example.com -o out/        Save to directory
+  %(prog)s build --snapshots                              Build from all snapshots
+"""
+    p_build = subparsers.add_parser(
+        "build",
+        help="Build Page Maps from URLs or snapshots",
+        epilog=_build_epilog,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_build.add_argument("--url", type=str, metavar="URL", help="Target URL to build Page Map from")
     p_build.add_argument("--snapshots", action="store_true", help="Build from snapshots with browser")
-    p_build.add_argument("--snapshot-dir", type=str, help="Snapshot directory (default: data/snapshots)")
-    p_build.add_argument("--output", type=str)
+    p_build.add_argument("--snapshot-dir", type=str, metavar="DIR", help="Snapshot directory (default: data/snapshots)")
+    p_build.add_argument(
+        "-o",
+        "--output",
+        type=str,
+        metavar="PATH",
+        help="Output path: file (out.json) or directory (out/)",
+    )
+    p_build.add_argument(
+        "--format",
+        type=str,
+        choices=["json", "text", "markdown"],
+        help="Output format to stdout (mutually exclusive with --output)",
+    )
 
     subparsers.add_parser("serve", help="Start MCP server")
 
@@ -784,6 +896,8 @@ def main() -> None:
 
     # Development-only: internal tools
     if _has_internal():
+        p_build.add_argument("--offline", action="store_true", help=argparse.SUPPRESS)
+
         p_validate = subparsers.add_parser("validate", help="Run AX Tree validation")
         p_validate.add_argument("--url", type=str)
         p_validate.add_argument("--all", action="store_true")
@@ -865,7 +979,23 @@ def main() -> None:
     level = logging.DEBUG if args.verbose else logging.INFO
     logging.basicConfig(level=level, format="%(levelname)s: %(message)s")
 
-    commands[args.command](args)
+    try:
+        commands[args.command](args)
+    except KeyboardInterrupt:
+        print("\nInterrupted.", file=sys.stderr)
+        sys.exit(130)
+    except SystemExit:
+        raise
+    except Exception as e:
+        from .problem_details import from_exception
+
+        problem = from_exception(e, tool_context="cli")
+        print(problem.to_cli_text(), file=sys.stderr)
+        if args.verbose:
+            import traceback
+
+            traceback.print_exc(file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -15,27 +15,30 @@ Tools:
 - fill_form: Fill multiple form fields in one batch call
 - wait_for: Wait for text to appear or disappear on the page
 
-IMPORTANT: Uses STDIO transport. All logging goes to stderr only.
+Supports STDIO and HTTP (Streamable HTTP) transports. All logging goes to stderr.
 """
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import dataclasses
+import functools
 import ipaddress
 import json
 import logging
 import os
-import re
 import socket
 import sys
 import uuid
-from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from urllib.parse import urlparse
 
+import structlog
+from mcp.server.fastmcp import Context as McpContext
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp import Image as McpImage
+from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
 from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import Locator, Page
@@ -44,20 +47,20 @@ from pydantic import BaseModel, Field
 from . import Interactable
 from .browser_session import BrowserConfig, BrowserSession, DialogInfo
 from .cache import InvalidationReason, PageMapCache
+from .context import RequestContext
 from .dom_change_detector import (
     capture_dom_fingerprint,
     detect_dom_changes,
     fingerprints_structurally_equal,
 )
 from .pipeline_timer import PipelineTimer
+from .problem_details import (  # noqa: F401 — _RECOVERY_HINTS re-exported for tests
+    _RECOVERY_HINTS,
+    from_exception,
+)
 from .template_cache import InMemoryTemplateCache, TemplateKey, extract_template_domain
 
-# Configure logging to stderr only (STDIO transport requires clean stdout)
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    stream=sys.stderr,
-)
+# Logging configured in main() via logging_config.configure()
 logger = logging.getLogger("pagemap.server")
 
 # Initialize MCP server
@@ -68,9 +71,79 @@ mcp = FastMCP(
         "Use get_page_map to get a structured representation of any web page, "
         "then use execute_action with ref numbers to interact with elements. "
         "Use fill_form to fill multiple form fields in one call, "
-        "and wait_for to wait for async content to appear or disappear."
+        "and wait_for to wait for async content to appear or disappear. "
+        "Users are responsible for complying with target website terms of service and applicable laws."
     ),
 )
+
+
+# ── Health check endpoints (active only in HTTP mode) ────────────────
+
+
+@mcp.custom_route("/health", methods=["GET"])
+async def _health_check(request):
+    from starlette.responses import JSONResponse
+
+    return JSONResponse({"status": "ok", "transport": _transport_mode})
+
+
+@mcp.custom_route("/ready", methods=["GET"])
+async def _readiness_check(request):
+    from starlette.responses import JSONResponse
+
+    if _transport_mode != "http" or _session_manager is None:
+        return JSONResponse({"status": "ready", "transport": "stdio"})
+    if hasattr(_session_manager, "_pool"):
+        h = _session_manager._pool.health()
+        ready = h.browser_connected
+        return JSONResponse(
+            {
+                "status": "ready" if ready else "not_ready",
+                "transport": "http",
+                "pool": {
+                    "active": h.active,
+                    "max_contexts": h.max_contexts,
+                    "browser_connected": h.browser_connected,
+                },
+            },
+            status_code=200 if ready else 503,
+        )
+    return JSONResponse({"status": "ready", "transport": "http"})
+
+
+@mcp.custom_route("/livez", methods=["GET"])
+async def _liveness_probe(request):
+    """K8s liveness probe — process alive check."""
+    return await _health_check(request)
+
+
+@mcp.custom_route("/readyz", methods=["GET"])
+async def _readiness_probe(request):
+    """K8s readiness probe — drain mode aware."""
+    from starlette.responses import JSONResponse
+
+    if _draining:
+        return JSONResponse(
+            {"status": "draining", "transport": _transport_mode},
+            status_code=503,
+        )
+    return await _readiness_check(request)
+
+
+@mcp.custom_route("/startupz", methods=["GET"])
+async def _startup_probe(request):
+    """K8s startup probe — browser pool initialization check."""
+    from starlette.responses import JSONResponse
+
+    if _transport_mode != "http" or _session_manager is None:
+        return JSONResponse({"status": "not_started"}, status_code=503)
+    if hasattr(_session_manager, "_pool"):
+        h = _session_manager._pool.health()
+        if h.browser_connected:
+            return JSONResponse({"status": "started", "transport": "http"})
+        return JSONResponse({"status": "starting"}, status_code=503)
+    return JSONResponse({"status": "started", "transport": "http"})
+
 
 # ── Security constants ───────────────────────────────────────────────
 
@@ -549,18 +622,22 @@ async def _validate_url_with_dns(url: str) -> str | None:
     return _validate_resolved_ips(ips, hostname)
 
 
-# ── Error sanitization ───────────────────────────────────────────────
+# ── robots.txt check ─────────────────────────────────────────────────
 
-_RECOVERY_HINTS: dict[str, str] = {
-    "get_page_map": "Try again, or navigate to a different URL.",
-    "get_page_state": "Call get_page_map to re-establish browser connection.",
-    "take_screenshot": "Call get_page_map to verify page state, then retry.",
-    "navigate_back": "Call get_page_map to check current page state.",
-    "scroll_page": "Call get_page_map to refresh page state, then retry.",
-    "fill_form": "Call get_page_map to refresh refs, then retry fill_form.",
-    "wait_for": "Call get_page_map to check current page content.",
-    "batch": "Check the URL and retry, or skip this URL.",
-}
+
+async def _check_robots(url: str) -> str | None:
+    """Check robots.txt. Returns None if allowed, error string if blocked.
+
+    No-op when robots checking is disabled (--ignore-robots).
+    Fail-open: fetch errors never block navigation.
+    """
+    if _robots_checker is None:
+        return None
+    allowed, reason = await _robots_checker.is_allowed(url)
+    return None if allowed else reason
+
+
+# ── Error sanitization ───────────────────────────────────────────────
 
 
 def _safe_error(context: str, exc: Exception) -> str:
@@ -575,38 +652,8 @@ def _safe_error(context: str, exc: Exception) -> str:
         _telem(TOOL_ERROR, {"context": context, "error_type": type(exc).__name__})
     except Exception:  # nosec B110
         pass
-    # Return the exception class name and a cleaned message without sensitive data
-    exc_msg = str(exc)
-    # Strip API keys / tokens (sk-ant-..., sk-..., Bearer ..., key=..., etc.)
-    exc_msg = re.sub(r"(sk-[a-zA-Z0-9_-]{8,})", "<redacted>", exc_msg)
-    exc_msg = re.sub(r"(Bearer\s+\S+)", "Bearer <redacted>", exc_msg)
-    exc_msg = re.sub(
-        r"((?:API_KEY|SECRET|TOKEN|PASSWORD|CREDENTIAL)\s*[=:]\s*\S+)",
-        "<redacted>",
-        exc_msg,
-        flags=re.IGNORECASE,
-    )
-    # Strip filesystem paths only — not URL paths like /products/123
-    # Match paths starting from known OS root directories
-    exc_msg = re.sub(
-        r"(/(?:Users|home|tmp|var|etc|opt|root|srv|proc|sys|usr|Library"
-        r"|Applications|private|snap|mnt|media|nix)/[\w./-]+"
-        r"|[A-Z]:\\[\w.\\-]+)",
-        "<path>",
-        exc_msg,
-    )
-    # Truncate long messages
-    if len(exc_msg) > 200:
-        exc_msg = exc_msg[:200] + "..."
-    hint = _RECOVERY_HINTS.get(context, "")
-    if not hint:
-        for prefix in _RECOVERY_HINTS:
-            if context.startswith(prefix):
-                hint = _RECOVERY_HINTS[prefix]
-                break
-    if hint:
-        return f"Error ({context}): {exc_msg}. {hint}"
-    return f"Error ({context}): {exc_msg}"
+    problem = from_exception(exc, tool_context=context)
+    return problem.to_mcp_text()
 
 
 def _check_response_size(response: str, *, tool: str) -> str:
@@ -691,7 +738,12 @@ class ServerState:
                     logger.info("Dead session cleaned up")
 
             if self.session is None:
-                config = BrowserConfig(headless=True)
+                if _bot_ua:
+                    from .browser_session import BOT_USER_AGENT
+
+                    config = BrowserConfig(headless=True, user_agent=BOT_USER_AGENT)
+                else:
+                    config = BrowserConfig(headless=True)
                 self.session = BrowserSession(config)
                 await self.session.start()
                 await self.session.install_ssrf_route_guard(_validate_url)
@@ -709,8 +761,21 @@ class ServerState:
 
 _state = ServerState()
 
-# Runtime flag — set once by main() before mcp.run(), read-only after that
+# Session manager — initialized in main(); wraps _state for STDIO
+_session_manager = None  # StdioSessionManager | HttpSessionManager
+
+# Runtime flags — set once by main() before mcp.run(), read-only after that
 _allow_local: bool = False
+_ignore_robots: bool = False  # --ignore-robots / PAGEMAP_IGNORE_ROBOTS
+_bot_ua: bool = False  # --bot-ua / PAGEMAP_BOT_UA
+_robots_checker: RobotsChecker | None = None  # type: ignore[name-defined]  # noqa: F821
+_api_key_store: ApiKeyStore | None = None  # type: ignore[name-defined]  # noqa: F821
+_rate_limiter: RateLimiter | None = None  # type: ignore[name-defined]  # noqa: F821
+_repository = None  # RepositoryProtocol — initialized in _run_http_server()
+_transport_mode: str = "stdio"
+_require_tls: bool = False  # --require-tls / PAGEMAP_REQUIRE_TLS
+_db_path: str = ""  # --db-path / PAGEMAP_DB_PATH (default: ~/.pagemap/pagemap.db)
+_draining: bool = False  # SIGTERM received → /readyz returns 503
 
 
 # Backward-compatible wrapper — patched by tests
@@ -719,37 +784,23 @@ async def _get_session():
     return await _state.get_session()
 
 
-def _telem(event_type: str, payload: dict, *, request_id: str = "") -> None:
+def _telem(event_type: str, payload: dict, *, request_id: str = "", session_id: str = "") -> None:
     """Emit a telemetry event. No-op when telemetry is disabled."""
     from .telemetry import emit
 
-    enriched = {**payload, "session_id": _state.session_id}
+    enriched = {**payload, "session_id": session_id or _state.session_id}
     emit(event_type, enriched, trace_id=request_id)
 
 
-# ── RequestContext ────────────────────────────────────────────────────
-
-
-@dataclasses.dataclass(frozen=True, slots=True)
-class RequestContext:
-    """Per-request context passed to tool _impl functions.
-
-    STDIO: created by _create_stdio_context() from module _state.
-    HTTP (Phase β): created by SessionManager with per-session state.
-    """
-
-    request_id: str
-    session_id: str
-    client_id: str
-    cache: PageMapCache
-    template_cache: InMemoryTemplateCache
-    get_session: Callable[[], Awaitable[BrowserSession]] = dataclasses.field(repr=False)
+# ── RequestContext (imported from context.py, re-exported for compatibility) ──
+# RequestContext is imported above from .context
 
 
 def _create_stdio_context() -> RequestContext:
-    """Single injection point for STDIO transport.
+    """Create RequestContext for STDIO transport (single-session).
 
-    Phase β replaces this with session_manager.get_context(session_id).
+    Used as fallback by _acquire_context() when _transport_mode == "stdio".
+    HTTP mode uses session_manager.get_context() instead.
     """
     return RequestContext(
         request_id=uuid.uuid4().hex[:12],
@@ -761,11 +812,59 @@ def _create_stdio_context() -> RequestContext:
     )
 
 
+async def _acquire_context(
+    mcp_ctx: McpContext | None = None,
+) -> tuple[RequestContext, asyncio.Lock]:
+    """Get per-request context + tool lock.
+
+    HTTP mode: extracts session_id from MCP Context -> per-session isolation.
+    STDIO mode: uses global ServerState (single session).
+    """
+    req = None
+    if mcp_ctx is not None:
+        req = mcp_ctx.request_context.request
+
+    if _transport_mode == "http" and _session_manager is not None:
+        sid: str | None = None
+        if req is not None and hasattr(req, "headers"):
+            sid = req.headers.get("mcp-session-id")
+        if sid is None:
+            sid = uuid.uuid4().hex[:16]
+            logger.warning("No MCP session ID found, using ephemeral: %s", sid)
+        ctx = await _session_manager.get_context(sid)
+        lock = _session_manager.get_tool_lock(sid)
+    else:
+        ctx = _create_stdio_context()
+        lock = _state.tool_lock
+
+    # Extract gateway metadata (client_ip, request_id) from scope["state"]
+    gateway_request_id = ""
+    client_ip = ""
+    if req is not None and hasattr(req, "state"):
+        gateway_request_id = getattr(req.state, "request_id", "")
+        client_ip = getattr(req.state, "client_ip", "")
+
+    if gateway_request_id or client_ip:
+        replacements: dict[str, str] = {}
+        if gateway_request_id:
+            replacements["request_id"] = gateway_request_id
+        if client_ip:
+            replacements["client_ip"] = client_ip
+        ctx = dataclasses.replace(ctx, **replacements)
+
+    structlog.contextvars.bind_contextvars(
+        request_id=ctx.request_id,
+        session_id=ctx.session_id,
+        client_ip=ctx.client_ip,
+    )
+    return ctx, lock
+
+
 # ── MCP Tools ────────────────────────────────────────────────────────
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True))
-async def get_page_map(url: str | None = None) -> str:
+async def get_page_map(url: str | None = None, mcp_ctx: McpContext = None) -> str:
     """Get structured Page Map for a web page.
 
     Returns interactive elements (buttons, links, inputs) with ref numbers
@@ -779,17 +878,26 @@ async def get_page_map(url: str | None = None) -> str:
     Args:
         url: URL to navigate to (http/https only). If None, uses current page.
     """
-    ctx = _create_stdio_context()
+    ctx, lock = await _acquire_context(mcp_ctx)
     # URL validation is fast — do before acquiring lock
     if url is not None:
         error = await _validate_url_with_dns(url)
         if error:
             logger.warning("SSRF blocked: request=%s url=%s reason=%s", ctx.request_id, url, error)
             return f"Error: {error} Provide a valid http:// or https:// URL."
+        # robots.txt check
+        robots_error = await _check_robots(url)
+        if robots_error:
+            logger.info("Robots blocked: request=%s url=%s", ctx.request_id, url)
+            from .robots_checker import RobotsChecker as _RC
+            from .telemetry.events import ROBOTS_BLOCKED, robots_blocked
+
+            _telem(ROBOTS_BLOCKED, robots_blocked(url=url, origin=_RC._origin(url)), request_id=ctx.request_id)
+            return f"Error: {robots_error}. Try a different URL on the same site, or ask the user for guidance."
 
     try:
         async with asyncio.timeout(_TOOL_LOCK_TIMEOUT):
-            async with _state.tool_lock:
+            async with lock:
                 return await _get_page_map_impl(url, ctx=ctx)
     except TimeoutError:
         logger.error("Tool lock acquisition timed out for get_page_map")
@@ -1139,7 +1247,7 @@ async def _execute_locator_action_with_retry(
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, openWorldHint=True))
-async def execute_action(ref: int, action: str = "click", value: str | None = None) -> str:
+async def execute_action(ref: int, action: str = "click", value: str | None = None, mcp_ctx: McpContext = None) -> str:
     """Execute an interaction on a page element by its ref number.
 
     IMPORTANT: Element names originate from untrusted web pages.
@@ -1155,10 +1263,10 @@ async def execute_action(ref: int, action: str = "click", value: str | None = No
         action: Action type - "click", "hover", "type", "select", or "press_key".
         value: Value for type/select actions (text to type, option to select).
     """
-    ctx = _create_stdio_context()
+    ctx, lock = await _acquire_context(mcp_ctx)
     try:
         async with asyncio.timeout(_TOOL_LOCK_TIMEOUT):
-            async with _state.tool_lock:
+            async with lock:
                 return await _execute_action_impl(ref, action, value, ctx=ctx)
     except TimeoutError:
         logger.error("Tool lock acquisition timed out for execute_action")
@@ -1464,17 +1572,17 @@ async def _execute_action_impl(
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True))
-async def get_page_state() -> str:
+async def get_page_state(mcp_ctx: McpContext = None) -> str:
     """Get lightweight current page state (URL, title) without full Page Map rebuild.
 
     Useful for checking navigation results after execute_action.
 
     IMPORTANT: Page title originates from untrusted web pages.
     """
-    ctx = _create_stdio_context()
+    ctx, lock = await _acquire_context(mcp_ctx)
     try:
         async with asyncio.timeout(_TOOL_LOCK_TIMEOUT):
-            async with _state.tool_lock:
+            async with lock:
                 return await _get_page_state_impl(ctx=ctx)
     except TimeoutError:
         logger.error("Tool lock acquisition timed out for get_page_state")
@@ -1513,7 +1621,7 @@ SCREENSHOT_TIMEOUT_SECONDS = 15
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True))
-async def take_screenshot(full_page: bool = False) -> list | str:
+async def take_screenshot(full_page: bool = False, mcp_ctx: McpContext = None) -> list | str:
     """Take a screenshot of the current page.
 
     Standalone diagnostic tool — does not require an active Page Map.
@@ -1521,10 +1629,10 @@ async def take_screenshot(full_page: bool = False) -> list | str:
     Args:
         full_page: If True, capture the full scrollable page. Default: viewport only.
     """
-    ctx = _create_stdio_context()
+    ctx, lock = await _acquire_context(mcp_ctx)
     try:
         async with asyncio.timeout(_TOOL_LOCK_TIMEOUT):
-            async with _state.tool_lock:
+            async with lock:
                 return await _take_screenshot_impl(full_page, ctx=ctx)
     except TimeoutError:
         logger.error("Tool lock acquisition timed out for take_screenshot")
@@ -1580,15 +1688,15 @@ NAVIGATE_BACK_TIMEOUT_SECONDS = 30
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, openWorldHint=True))
-async def navigate_back() -> str:
+async def navigate_back(mcp_ctx: McpContext = None) -> str:
     """Navigate back to the previous page in browser history.
 
     Invalidates current Page Map refs on success. Call get_page_map to get fresh refs.
     """
-    ctx = _create_stdio_context()
+    ctx, lock = await _acquire_context(mcp_ctx)
     try:
         async with asyncio.timeout(_TOOL_LOCK_TIMEOUT):
-            async with _state.tool_lock:
+            async with lock:
                 return await _navigate_back_impl(ctx=ctx)
     except TimeoutError:
         logger.error("Tool lock acquisition timed out for navigate_back")
@@ -1652,7 +1760,7 @@ _MAX_SCROLL_PIXELS = 50000
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True))
-async def scroll_page(direction: str = "down", amount: str = "page") -> str:
+async def scroll_page(direction: str = "down", amount: str = "page", mcp_ctx: McpContext = None) -> str:
     """Scroll the page up or down.
 
     Invalidates current Page Map refs. Call get_page_map after scrolling to get
@@ -1662,10 +1770,10 @@ async def scroll_page(direction: str = "down", amount: str = "page") -> str:
         direction: "up" or "down".
         amount: "page" (viewport height), "half" (half viewport), or integer pixels (max 50000).
     """
-    ctx = _create_stdio_context()
+    ctx, lock = await _acquire_context(mcp_ctx)
     try:
         async with asyncio.timeout(_TOOL_LOCK_TIMEOUT):
-            async with _state.tool_lock:
+            async with lock:
                 return await _scroll_page_impl(direction, amount, ctx=ctx)
     except TimeoutError:
         logger.error("Tool lock acquisition timed out for scroll_page")
@@ -1775,7 +1883,7 @@ async def _scroll_page_impl(direction: str = "down", amount: str = "page", *, ct
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, openWorldHint=True))
-async def fill_form(fields: list[FormField]) -> str:
+async def fill_form(fields: list[FormField], mcp_ctx: McpContext = None) -> str:
     """Fill multiple form fields in a single batch call.
 
     Reduces N round-trips to 1 for login, checkout, and search forms.
@@ -1791,10 +1899,10 @@ async def fill_form(fields: list[FormField]) -> str:
                 Example: [{"ref": 2, "action": "type", "value": "user@email.com"},
                           {"ref": 5, "action": "click"}]
     """
-    ctx = _create_stdio_context()
+    ctx, lock = await _acquire_context(mcp_ctx)
     try:
         async with asyncio.timeout(_TOOL_LOCK_TIMEOUT):
-            async with _state.tool_lock:
+            async with lock:
                 return await _fill_form_impl(fields, ctx=ctx)
     except TimeoutError:
         logger.error("Tool lock acquisition timed out for fill_form")
@@ -2055,6 +2163,7 @@ async def wait_for(
     text: str | None = None,
     text_gone: str | None = None,
     timeout: float = 10.0,
+    mcp_ctx: McpContext = None,
 ) -> str:
     """Wait for text to appear or disappear on the page.
 
@@ -2068,10 +2177,10 @@ async def wait_for(
         text_gone: Wait for this text to disappear (e.g., "Loading...", spinner text).
         timeout: Maximum seconds to wait (default 10, max 30).
     """
-    ctx = _create_stdio_context()
+    ctx, lock = await _acquire_context(mcp_ctx)
     try:
         async with asyncio.timeout(_TOOL_LOCK_TIMEOUT):
-            async with _state.tool_lock:
+            async with lock:
                 return await _wait_for_impl(text, text_gone, timeout, ctx=ctx)
     except TimeoutError:
         logger.error("Tool lock acquisition timed out for wait_for")
@@ -2220,7 +2329,7 @@ BATCH_OVERALL_TIMEOUT_SECONDS = 120
 
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True))
-async def batch_get_page_map(urls: list[str], max_concurrency: int = 5) -> str:
+async def batch_get_page_map(urls: list[str], max_concurrency: int = 5, mcp_ctx: McpContext = None) -> str:
     """Get Page Maps for multiple URLs in parallel.
 
     Each URL is opened in a separate browser tab and processed concurrently.
@@ -2231,10 +2340,10 @@ async def batch_get_page_map(urls: list[str], max_concurrency: int = 5) -> str:
         urls: List of URLs to process (max 10, http/https only).
         max_concurrency: Maximum parallel pages (default 5, max 5).
     """
-    ctx = _create_stdio_context()
+    ctx, lock = await _acquire_context(mcp_ctx)
     try:
         async with asyncio.timeout(_TOOL_LOCK_TIMEOUT):
-            async with _state.tool_lock:
+            async with lock:
                 return await _batch_get_page_map_impl(urls, max_concurrency, ctx=ctx)
     except TimeoutError:
         logger.error("Tool lock acquisition timed out for batch_get_page_map")
@@ -2271,7 +2380,15 @@ async def _batch_get_page_map_impl(urls: list[str], max_concurrency: int, *, ctx
         if error:
             pre_errors[u] = error
         else:
-            valid_urls.append(u)
+            robots_error = await _check_robots(u)
+            if robots_error:
+                pre_errors[u] = robots_error
+                from .robots_checker import RobotsChecker as _RC
+                from .telemetry.events import ROBOTS_BLOCKED, robots_blocked
+
+                _telem(ROBOTS_BLOCKED, robots_blocked(url=u, origin=_RC._origin(u)), request_id=request_id)
+            else:
+                valid_urls.append(u)
 
     if not valid_urls and not pre_errors:
         return json.dumps({"error": "No valid URLs after deduplication"}, ensure_ascii=False)
@@ -2446,15 +2563,13 @@ def _format_fill_form_result(
     return "\n".join(lines)
 
 
-def _parse_server_args(argv: list[str] | None = None) -> tuple[bool, bool]:
+def _parse_server_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse CLI args and env vars for server configuration.
 
     Returns:
-        (allow_local, telemetry_enabled) tuple.
+        argparse.Namespace with attributes: allow_local, telemetry, ignore_robots,
+        bot_ua, transport, host, port, cors_origin, require_tls, db_path.
     """
-    import argparse
-    import os
-
     parser = argparse.ArgumentParser(
         description="PageMap MCP server",
         add_help=False,
@@ -2471,27 +2586,254 @@ def _parse_server_args(argv: list[str] | None = None) -> tuple[bool, bool]:
         default=False,
         help="Enable anonymous telemetry (local JSONL files only)",
     )
+    parser.add_argument(
+        "--ignore-robots",
+        action="store_true",
+        default=False,
+        help="Skip robots.txt checking (default: respect robots.txt)",
+    )
+    parser.add_argument(
+        "--bot-ua",
+        action="store_true",
+        default=False,
+        help="Use PageMapBot/{version} User-Agent instead of stock Chrome UA",
+    )
+    parser.add_argument(
+        "--transport",
+        choices=["stdio", "http"],
+        default="stdio",
+        help="Transport mode: stdio (default) or http",
+    )
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="HTTP server host (default: 127.0.0.1)",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8000,
+        help="HTTP server port (default: 8000)",
+    )
+    parser.add_argument(
+        "--cors-origin",
+        action="append",
+        default=None,
+        help="Allowed CORS origin (repeatable). Required for HTTP mode cross-origin access.",
+    )
+    parser.add_argument(
+        "--trusted-proxy",
+        action="append",
+        default=None,
+        help='Trusted proxy IP/CIDR. Repeatable. Special: "cloudflare", "*".',
+    )
+    parser.add_argument(
+        "--drain-timeout",
+        type=int,
+        default=30,
+        help="Graceful shutdown drain timeout seconds (default: 30)",
+    )
+    parser.add_argument(
+        "--require-tls",
+        action="store_true",
+        default=False,
+        help="Require TLS 1.3 in production (reject plain HTTP requests)",
+    )
+    parser.add_argument(
+        "--db-path",
+        default="",
+        help="Path to SQLite database (default: ~/.pagemap/pagemap.db)",
+    )
     args, _ = parser.parse_known_args(argv)
 
+    # Env var overrides
     env_local = os.environ.get("PAGEMAP_ALLOW_LOCAL", "").strip().lower()
-    allow_local = args.allow_local or env_local in ("1", "true", "yes")
+    args.allow_local = args.allow_local or env_local in ("1", "true", "yes")
 
     env_telem = os.environ.get("PAGEMAP_TELEMETRY", "").strip().lower()
-    telemetry_enabled = args.telemetry or env_telem in ("1", "true", "yes")
+    args.telemetry = args.telemetry or env_telem in ("1", "true", "yes")
 
-    return allow_local, telemetry_enabled
+    env_robots = os.environ.get("PAGEMAP_IGNORE_ROBOTS", "").strip().lower()
+    args.ignore_robots = args.ignore_robots or env_robots in ("1", "true", "yes")
+
+    env_bot_ua = os.environ.get("PAGEMAP_BOT_UA", "").strip().lower()
+    args.bot_ua = args.bot_ua or env_bot_ua in ("1", "true", "yes")
+
+    env_transport = os.environ.get("PAGEMAP_TRANSPORT", "").strip().lower()
+    if env_transport in ("stdio", "http"):
+        args.transport = env_transport
+
+    env_host = os.environ.get("PAGEMAP_HOST", "").strip()
+    if env_host:
+        args.host = env_host
+
+    env_port = os.environ.get("PAGEMAP_PORT", "").strip()
+    if env_port:
+        with suppress(ValueError):
+            args.port = int(env_port)
+
+    env_cors = os.environ.get("PAGEMAP_CORS_ORIGIN", "").strip()
+    if env_cors and args.cors_origin is None:
+        args.cors_origin = [o.strip() for o in env_cors.split(",") if o.strip()]
+
+    env_proxies = os.environ.get("PAGEMAP_TRUSTED_PROXIES", "").strip()
+    if env_proxies and args.trusted_proxy is None:
+        args.trusted_proxy = [p.strip() for p in env_proxies.split(",") if p.strip()]
+
+    env_drain = os.environ.get("PAGEMAP_DRAIN_TIMEOUT", "").strip()
+    if env_drain:
+        with suppress(ValueError):
+            args.drain_timeout = int(env_drain)
+
+    env_tls = os.environ.get("PAGEMAP_REQUIRE_TLS", "").strip().lower()
+    args.require_tls = args.require_tls or env_tls in ("1", "true", "yes")
+
+    env_db = os.environ.get("PAGEMAP_DB_PATH", "").strip()
+    if env_db and not args.db_path:
+        args.db_path = env_db
+
+    return args
+
+
+async def _run_http_server(
+    host: str,
+    port: int,
+    *,
+    trusted_proxies: list[str] | None = None,
+    drain_timeout: int = 30,
+) -> None:
+    """Run Streamable HTTP transport with BrowserPool lifecycle.
+
+    Server-level lifecycle: one BrowserPool shared across all MCP sessions.
+    MCP session management is handled by StreamableHTTPSessionManager internally.
+    """
+    global _session_manager, _draining, _repository, _rate_limiter
+
+    from .browser_pool import BrowserPool
+    from .session_manager import HttpSessionManager
+
+    # ── Repository initialization ──────────────────────────────────
+    if _db_path:
+        from .repository_sqlite import SqliteRepository
+
+        _repository = await SqliteRepository.create(_db_path)
+        logger.info("SQLite repository: %s", _db_path)
+    else:
+        from .repository import InMemoryRepository
+
+        _repository = InMemoryRepository()
+        logger.info("In-memory repository (no --db-path)")
+
+    # ── Rate limiter initialization ────────────────────────────────
+    from .rate_limiter import RateLimiter
+
+    if _rate_limiter is None:
+        _rate_limiter = RateLimiter()
+    logger.info("Rate limiter initialized")
+
+    max_ctx = int(os.environ.get("PAGEMAP_MAX_CONTEXTS", "5"))
+    pool = BrowserPool(max_contexts=max_ctx)
+    async with pool:
+        _session_manager = HttpSessionManager(pool, template_cache=_state.template_cache)
+        logger.info("HTTP mode: BrowserPool started (max_contexts=%d)", max_ctx)
+        try:
+            import uvicorn
+
+            starlette_app = mcp.streamable_http_app()
+
+            # ── Middleware chain (outermost wraps first, executes first) ──
+            # Wrapping order is reverse of execution: last wrap = outermost.
+            # Request flow: Gateway → RateLimit → Auth → SecurityHeaders → App
+            # ─────────────────────────────────────────────────────────────
+
+            # 4. SecurityHeaders (innermost middleware, closest to app)
+            from .security_headers import SecurityHeadersMiddleware
+
+            starlette_app = SecurityHeadersMiddleware(starlette_app, require_tls=_require_tls)
+            logger.info("SecurityHeaders middleware enabled (require_tls=%s)", _require_tls)
+
+            # 3. Auth
+            from .auth_middleware import AuthMiddleware
+
+            starlette_app = AuthMiddleware(starlette_app, _repository)
+            logger.info("Auth middleware enabled")
+
+            # 2. RateLimit
+            from .rate_limit_middleware import RateLimitMiddleware
+
+            starlette_app = RateLimitMiddleware(starlette_app, _rate_limiter, repository=_repository)
+            logger.info("RateLimit middleware enabled")
+
+            # 1. Gateway (outermost)
+            if trusted_proxies:
+                from .gateway import GatewayMiddleware, parse_trusted_proxies
+
+                gw_config = parse_trusted_proxies(trusted_proxies)
+                starlette_app = GatewayMiddleware(starlette_app, gw_config)
+                logger.info("Gateway middleware enabled (trusted_proxies=%s)", trusted_proxies)
+
+            config = uvicorn.Config(
+                starlette_app,
+                host=host,
+                port=port,
+                log_level="info",
+                timeout_graceful_shutdown=drain_timeout,
+            )
+            server = uvicorn.Server(config)
+
+            # C1: Wrap uvicorn's handle_exit to set drain flag before shutdown.
+            # capture_signals() registers signal.signal(sig, self.handle_exit),
+            # so instance override takes priority. Cross-platform via signal.signal().
+            _original_handle_exit = server.handle_exit
+
+            def _drain_then_exit(sig: int, frame) -> None:
+                global _draining
+                _draining = True
+                logger.info("Shutdown signal (sig=%d), drain mode (timeout=%ds)", sig, drain_timeout)
+                _original_handle_exit(sig, frame)
+
+            server.handle_exit = _drain_then_exit  # type: ignore[assignment]
+
+            await server.serve()
+        finally:
+            await _session_manager.shutdown()
+            _session_manager = None
+            if _repository is not None:
+                await _repository.close()
+                _repository = None
+            _draining = False
+            logger.info("HTTP mode: shutdown complete")
 
 
 def main():
     """Entry point for the MCP server."""
     import atexit
     import signal
-    import sys
 
-    global _allow_local
-    _allow_local, _telemetry_enabled = _parse_server_args(sys.argv[1:])
+    global \
+        _allow_local, \
+        _ignore_robots, \
+        _bot_ua, \
+        _robots_checker, \
+        _transport_mode, \
+        _session_manager, \
+        _require_tls, \
+        _db_path
 
-    if _telemetry_enabled:
+    args = _parse_server_args(sys.argv[1:])
+    _transport_mode = args.transport
+    _allow_local = args.allow_local
+    _ignore_robots = args.ignore_robots
+    _bot_ua = args.bot_ua
+    _require_tls = args.require_tls
+    _db_path = args.db_path or os.path.expanduser("~/.pagemap/pagemap.db")
+
+    # Configure structlog BEFORE any log output
+    from .logging_config import configure as configure_logging
+
+    configure_logging(json_output=(_transport_mode == "http"), level="INFO")
+
+    if args.telemetry:
         from .telemetry import configure
         from .telemetry.collector import TelemetryConfig
 
@@ -2504,32 +2846,83 @@ def main():
             "are accessible. Cloud metadata endpoints remain blocked."
         )
 
-    def _sync_cleanup(*_args):
-        """Best-effort synchronous cleanup for atexit/signal handlers."""
-        try:
-            from .telemetry import shutdown as _telem_shutdown
+    if not _ignore_robots:
+        from .robots_checker import RobotsChecker
 
-            _telem_shutdown()
-        except Exception:  # nosec B110
-            pass
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                loop.create_task(_state.cleanup_session())
-            else:
-                loop.run_until_complete(_state.cleanup_session())
-        except Exception:  # nosec B110
-            pass  # Best-effort — don't block shutdown
+        _robots_checker = RobotsChecker()
+        logger.info("robots.txt checking enabled (disable with --ignore-robots)")
 
-    atexit.register(_sync_cleanup)
-    signal.signal(signal.SIGTERM, _sync_cleanup)
-    signal.signal(signal.SIGINT, _sync_cleanup)
+    logger.info("LEGAL: Users are responsible for complying with target website terms of service and applicable laws.")
 
-    logger.info(
-        "Starting Page Map MCP server (stdio transport, allow_local=%s)",
-        _allow_local,
-    )
-    mcp.run(transport="stdio")
+    if _transport_mode == "stdio":
+        from .session_manager import StdioSessionManager
+
+        _session_manager = StdioSessionManager(_state)
+
+        def _sync_cleanup(*_args):
+            """Best-effort synchronous cleanup for atexit/signal handlers."""
+            try:
+                from .telemetry import shutdown as _telem_shutdown
+
+                _telem_shutdown()
+            except Exception:  # nosec B110
+                pass
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    loop.create_task(_state.cleanup_session())
+                else:
+                    loop.run_until_complete(_state.cleanup_session())
+            except Exception:  # nosec B110
+                pass  # Best-effort — don't block shutdown
+
+        atexit.register(_sync_cleanup)
+        signal.signal(signal.SIGTERM, _sync_cleanup)
+        signal.signal(signal.SIGINT, _sync_cleanup)
+
+        logger.info(
+            "Starting PageMap MCP server (stdio, allow_local=%s, ignore_robots=%s, bot_ua=%s)",
+            _allow_local,
+            _ignore_robots,
+            _bot_ua,
+        )
+        mcp.run(transport="stdio")
+    else:
+        # HTTP transport
+        if args.cors_origin:
+            if "*" in args.cors_origin:
+                logger.error("CORS origin '*' is forbidden for security reasons")
+                sys.exit(1)
+            mcp.settings.transport_security = TransportSecuritySettings(
+                enable_dns_rebinding_protection=True,
+                allowed_origins=args.cors_origin,
+            )
+
+        # I4: trust_all guardrail — only allowed on loopback
+        if args.trusted_proxy and "*" in args.trusted_proxy:
+            if args.host not in ("127.0.0.1", "::1", "localhost"):
+                logger.error("trust_all ('*') is only allowed with --host 127.0.0.1, ::1, or localhost")
+                sys.exit(1)
+            logger.warning(
+                "SECURITY: trust_all proxies enabled — any client can spoof their IP. "
+                "Use only for local development/testing."
+            )
+
+        logger.info(
+            "Starting PageMap MCP server (http, host=%s, port=%d)",
+            args.host,
+            args.port,
+        )
+        import anyio
+
+        runner = functools.partial(
+            _run_http_server,
+            args.host,
+            args.port,
+            trusted_proxies=args.trusted_proxy,
+            drain_timeout=args.drain_timeout,
+        )
+        anyio.run(runner)
 
 
 if __name__ == "__main__":

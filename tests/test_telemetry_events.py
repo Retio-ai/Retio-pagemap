@@ -198,10 +198,12 @@ class TestPayloadBuilders:
             compress_ms=30.1,
             template_status="hit",
             page_type="product_detail",
+            schema_name="Product",
         )
         assert p["tokens"] == 2500
         assert p["budget"] == 5000
         assert p["template_status"] == "hit"
+        assert p["schema_name"] == "Product"
 
     def test_resource_guard_triggered(self):
         p = events.resource_guard_triggered(guard="html_size", value=6_000_000, limit=5_242_880)
@@ -257,6 +259,7 @@ class TestJsonSerializable:
                 compress_ms=3,
                 template_status="miss",
                 page_type="unknown",
+                schema_name="Generic",
             ),
             events.resource_guard_triggered(guard="dom_nodes", value=60000, limit=50000),
             events.hidden_content_removed(hidden_removed=5),

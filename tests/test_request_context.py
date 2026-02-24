@@ -104,10 +104,11 @@ class TestRequestContextContract:
             "client_id",
             "cache",
             "template_cache",
+            "client_ip",
             "get_session",
         }
         assert set(fields.keys()) == expected_names
-        assert len(fields) == 6
+        assert len(fields) == 7
 
 
 # ── TestCreateStdioContext ───────────────────────────────────────────

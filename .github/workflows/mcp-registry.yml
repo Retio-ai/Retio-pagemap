@@ -1,0 +1,27 @@
+name: Publish to MCP Registry
+
+on:
+  workflow_run:
+    workflows: ["Docker Build & Push"]
+    types: [completed]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    if: github.event.workflow_run.conclusion == 'success'
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Install mcp-publisher
+        run: |
+          curl -fsSL https://registry.modelcontextprotocol.io/install.sh | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Authenticate via OIDC
+        run: mcp-publisher login github-oidc
+
+      - name: Publish to MCP Registry
+        run: mcp-publisher publish

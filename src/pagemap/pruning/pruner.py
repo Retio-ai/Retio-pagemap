@@ -310,12 +310,167 @@ def _match_government_page(chunk: HtmlChunk) -> list[tuple[str, str]]:
     return matches
 
 
+_FAQ_BODY_MIN = 30  # FAQ answer text
+_EVENT_DESC_MIN = 50  # Event description
+_LOCAL_BIZ_DESC_MIN = 50  # LocalBusiness description
+
+# Pruner i18n terms for new schemas
+_LOCATION_TERMS = (
+    # ko
+    "장소",
+    "위치",
+    "주소",
+    # en
+    "venue",
+    "location",
+    "address",
+    # ja
+    "会場",
+    "場所",
+    # fr
+    "lieu",
+    "adresse",
+    # de
+    "Veranstaltungsort",
+    "Ort",
+    "Adresse",
+)
+_OPENING_HOURS_TERMS = (
+    # ko
+    "영업시간",
+    "운영시간",
+    # en
+    "hours",
+    "opening hours",
+    "business hours",
+    # ja
+    "営業時間",
+    # fr
+    "horaires",
+    # de
+    "Öffnungszeiten",
+)
+_ADDRESS_TERMS = (
+    # ko
+    "주소",
+    "위치",
+    # en
+    "address",
+    "location",
+    # ja
+    "住所",
+    "所在地",
+    # fr
+    "adresse",
+    # de
+    "Adresse",
+    "Standort",
+)
+_PHONE_RE = re.compile(r"[\+\(]?\d[\d\-\(\)\s]{6,}")
+_LOCATION_RE = re.compile("|".join(re.escape(t) for t in _LOCATION_TERMS), re.IGNORECASE)
+_OPENING_HOURS_RE = re.compile("|".join(re.escape(t) for t in _OPENING_HOURS_TERMS), re.IGNORECASE)
+_ADDRESS_RE = re.compile("|".join(re.escape(t) for t in _ADDRESS_TERMS), re.IGNORECASE)
+
+
+def _match_faq_page(chunk: HtmlChunk) -> list[tuple[str, str]]:
+    matches = []
+    text = chunk.text
+    tag = chunk.tag
+
+    # title
+    if tag == "h1":
+        matches.append(("title", "h1"))
+
+    # question headings
+    if tag in ("h2", "h3"):
+        matches.append(("question", "h2/h3-heading"))
+
+    # question mark in text → likely a question
+    if "?" in text or "\uff1f" in text:  # \uff1f = ？ (fullwidth)
+        matches.append(("question", "question-mark"))
+
+    # details/summary → expandable Q&A
+    if tag in ("details", "summary"):
+        matches.append(("question", "details-summary"))
+
+    # answer text (long text blocks)
+    if chunk.chunk_type == ChunkType.TEXT_BLOCK and len(text) > _FAQ_BODY_MIN:
+        matches.append(("answer", "long-text-block"))
+
+    return matches
+
+
+def _match_event(chunk: HtmlChunk) -> list[tuple[str, str]]:
+    matches = []
+    text = chunk.text
+    tag = chunk.tag
+
+    # name
+    if tag == "h1":
+        matches.append(("name", "h1"))
+
+    # date — time element or datetime attr
+    if tag == "time" or chunk.attrs.get("datetime"):
+        matches.append(("date", "time-element"))
+    if _DATE_RE.search(text):
+        matches.append(("date", "date-pattern"))
+
+    # location
+    if _LOCATION_RE.search(text):
+        matches.append(("location", "location-keyword"))
+
+    # price
+    if _PRICE_RE.search(text) and _NUMERIC_RE.search(text):
+        matches.append(("price", "price-pattern"))
+
+    # description
+    if chunk.chunk_type == ChunkType.TEXT_BLOCK and len(text) > _EVENT_DESC_MIN:
+        matches.append(("description", "long-text-block"))
+
+    return matches
+
+
+def _match_local_business(chunk: HtmlChunk) -> list[tuple[str, str]]:
+    matches = []
+    text = chunk.text
+    tag = chunk.tag
+
+    # name
+    if tag == "h1":
+        matches.append(("name", "h1"))
+
+    # address
+    if _ADDRESS_RE.search(text):
+        matches.append(("address", "address-keyword"))
+
+    # telephone
+    if _PHONE_RE.search(text):
+        matches.append(("telephone", "phone-pattern"))
+
+    # opening hours
+    if _OPENING_HOURS_RE.search(text):
+        matches.append(("opening_hours", "hours-keyword"))
+
+    # rating
+    if _RATING_RE.search(text):
+        matches.append(("rating", "rating-pattern"))
+
+    # description
+    if chunk.chunk_type == ChunkType.TEXT_BLOCK and len(text) > _LOCAL_BIZ_DESC_MIN:
+        matches.append(("description", "long-text-block"))
+
+    return matches
+
+
 _SCHEMA_MATCHERS = {
     "Product": _match_product,
     "NewsArticle": _match_news_article,
     "WikiArticle": _match_wiki_article,
     "SaaSPage": _match_saas_page,
     "GovernmentPage": _match_government_page,
+    "FAQPage": _match_faq_page,
+    "Event": _match_event,
+    "LocalBusiness": _match_local_business,
 }
 
 

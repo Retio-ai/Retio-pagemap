@@ -482,3 +482,255 @@ class TestWikipediaClassification:
         result = classify_page(url, raw_html=html)
         assert result.page_type == "article"
         assert "dom_mw_content" in result.signals
+
+
+# ---------------------------------------------------------------------------
+# QR-04: Amazon classification
+# ---------------------------------------------------------------------------
+
+
+class TestAmazonClassification:
+    """Amazon /dp/ pages must be classified as product_detail."""
+
+    def test_amazon_dp_url_only(self):
+        """Amazon /dp/ASIN URL alone → product_detail."""
+        url = "https://www.amazon.com/dp/B09V3KXJPB"
+        result = classify_page(url)
+        assert result.page_type == "product_detail"
+
+    def test_amazon_dp_heavy_dom_no_jsonld(self):
+        """Amazon /dp/ + heavy dashboard DOM, no JSON-LD → product_detail (short-circuit)."""
+        url = "https://www.amazon.com/dp/B09V3KXJPB"
+        html = """<html><body>
+            <table><tr><td>Specs</td></tr></table>
+            <table><tr><td>Reviews</td></tr></table>
+            <canvas id="chart1"></canvas>
+            <svg id="icon1"></svg>
+            <svg id="icon2"></svg>
+            <nav role="navigation"><div class="sidebar">Menu</div></nav>
+        </body></html>"""
+        result = classify_page(url, raw_html=html)
+        assert result.page_type == "product_detail"
+
+    def test_amazon_dp_with_jsonld_and_cart(self):
+        """Full Amazon product page → product_detail."""
+        url = "https://www.amazon.com/dp/B09V3KXJPB"
+        html = """<html><head>
+            <script type="application/ld+json">{"@type": "Product", "name": "Widget"}</script>
+        </head><body>
+            <button>Add to Cart</button>
+            <table><tr><td>Details</td></tr></table>
+        </body></html>"""
+        result = classify_page(url, raw_html=html)
+        assert result.page_type == "product_detail"
+
+
+# ---------------------------------------------------------------------------
+# QR-04: DOM cap behaviour
+# ---------------------------------------------------------------------------
+
+
+class TestDomCapBehavior:
+    """_DOM_CAP prevents dashboard DOM from overwhelming other signals."""
+
+    def test_dashboard_dom_capped(self):
+        """Generic URL + max dashboard DOM → dashboard score capped at 40."""
+        url = "https://example.com/page"
+        # Note: visible text < 200 chars, so dom_very_short_content fires (error: 20),
+        # but error threshold (25) prevents it from winning over dashboard (40).
+        html = """<html><body>
+            <table><tr><td>A</td></tr></table>
+            <table><tr><td>B</td></tr></table>
+            <canvas></canvas><svg></svg><svg></svg><svg></svg>
+            <nav role="navigation"><div class="sidebar">Nav</div></nav>
+            <p>Dashboard content with metrics and analytics data.</p>
+        </body></html>"""
+        result = classify_page(url, raw_html=html)
+        # Dashboard raw DOM = 25+25+20 = 70, capped to 40
+        assert result.page_type == "dashboard"
+        assert result.score <= 40
+
+    def test_product_url_beats_capped_dashboard_dom(self):
+        """/products/ URL + JSON-LD Product + dashboard DOM → product_detail wins."""
+        url = "https://shop.com/products/12345"
+        html = """<html><head>
+            <script type="application/ld+json">{"@type": "Product", "name": "Widget"}</script>
+        </head><body>
+            <table><tr><td>A</td></tr></table>
+            <table><tr><td>B</td></tr></table>
+            <canvas></canvas><svg></svg><svg></svg><svg></svg>
+            <nav role="navigation"><div class="sidebar">Nav</div></nav>
+            <p>Enough visible content to pass the threshold check easily.</p>
+        </body></html>"""
+        result = classify_page(url, raw_html=html)
+        assert result.page_type == "product_detail"
+
+    def test_legitimate_dashboard_still_works(self):
+        """/dashboard URL + heavy DOM → dashboard (URL + capped DOM = 60)."""
+        url = "https://app.example.com/dashboard"
+        html = """<html><body>
+            <table><tr><td>Metric A</td></tr></table>
+            <table><tr><td>Metric B</td></tr></table>
+            <canvas></canvas><svg></svg><svg></svg><svg></svg>
+            <nav role="navigation"><div class="sidebar">Sidebar</div></nav>
+            <p>Dashboard with enough content to display metrics and analytics data for users.</p>
+        </body></html>"""
+        result = classify_page(url, raw_html=html)
+        assert result.page_type == "dashboard"
+
+
+# ---------------------------------------------------------------------------
+# QR-04: Error threshold raised
+# ---------------------------------------------------------------------------
+
+
+class TestErrorThresholdRaised:
+    """Error threshold (25) prevents short-content-alone misclassification."""
+
+    def test_short_content_alone_not_error(self):
+        """Simple HTML < 200 chars → unknown, not error."""
+        url = "https://example.com/page"
+        html = "<html><body><p>Hello</p></body></html>"
+        result = classify_page(url, raw_html=html)
+        assert result.page_type != "error"
+
+    def test_short_content_plus_404_url_is_error(self):
+        """/404 URL + short content → error."""
+        url = "https://example.com/404"
+        html = "<html><body><p>Oops</p></body></html>"
+        result = classify_page(url, raw_html=html)
+        assert result.page_type == "error"
+
+    def test_title_error_still_works(self):
+        """Title '404 Not Found' → error (meta_title_error = 35 > 25)."""
+        url = "https://example.com/unknown-page"
+        html = "<html><head><title>404 Not Found</title></head><body><h1>Page not found</h1></body></html>"
+        result = classify_page(url, raw_html=html)
+        assert result.page_type == "error"
+
+
+# ---------------------------------------------------------------------------
+# QR-04: dom_add_to_cart signal
+# ---------------------------------------------------------------------------
+
+
+class TestDomAddToCart:
+    """dom_add_to_cart boosts product_detail classification."""
+
+    def test_cart_text_boosts_product(self):
+        """'Add to Cart' text on generic URL fires product_detail signal."""
+        url = "https://shop.com/item/12345"
+        html = """<html><body>
+            <h1>Widget</h1>
+            <button>Add to Cart</button>
+            <p>This is a product page with enough content to display the full product description and specifications.</p>
+        </body></html>"""
+        result = classify_page(url, raw_html=html)
+        assert result.page_type == "product_detail"
+        assert "dom_add_to_cart" in result.signals
+
+    def test_korean_cart_text(self):
+        """Korean '장바구니' triggers dom_add_to_cart."""
+        url = "https://shop.kr/goods/12345"
+        html = """<html><body>
+            <h1>상품</h1>
+            <button>장바구니</button>
+            <p>상품 설명이 충분히 길어야 에러 페이지로 분류되지 않습니다. 이 상품은 최고의 품질을 자랑합니다.</p>
+        </body></html>"""
+        result = classify_page(url, raw_html=html)
+        assert "dom_add_to_cart" in result.signals
+
+
+# ---------------------------------------------------------------------------
+# QR-04: Cross-type contamination invariant
+# ---------------------------------------------------------------------------
+
+
+# Types with strong enough URL signals to short-circuit past dashboard DOM.
+# Types with a single weak URL signal (20-25 pts) need additional meta/DOM
+# support to beat capped dashboard (40 pts) — tested in TestDomCapBehavior.
+_CROSS_TYPE_CASES = [
+    ("https://example.com/search?q=test", "search_results"),  # 25+25=50
+    ("https://en.wikipedia.org/wiki/Test", "article"),  # 30+15=45
+    ("https://shop.com/vp/products/123", "product_detail"),  # 25+20=45
+    ("https://www.amazon.com/dp/B09V3KXJPB", "product_detail"),  # 20+25=45
+]
+
+# Heavy dashboard DOM: 2 tables + 3 SVGs + sidebar nav + enough text (>200 chars)
+_HEAVY_DASHBOARD_HTML = """<html><body>
+    <table><tr><td>Metric A value</td></tr></table>
+    <table><tr><td>Metric B value</td></tr></table>
+    <canvas></canvas><svg></svg><svg></svg><svg></svg>
+    <nav role="navigation"><div class="sidebar">Navigation</div></nav>
+    <p>This page contains sufficient visible text content to avoid triggering the
+    short-content error signal. The text needs to be longer than two hundred characters
+    when all HTML tags are stripped, so we add this extended paragraph here.</p>
+</body></html>"""
+
+
+class TestCrossTypeContamination:
+    """Types with strong URL signals resist dashboard DOM contamination."""
+
+    @pytest.mark.parametrize(
+        "url,expected",
+        _CROSS_TYPE_CASES,
+        ids=[c[0].split("//")[1][:40] for c in _CROSS_TYPE_CASES],
+    )
+    def test_type_resists_dashboard_dom(self, url: str, expected: str):
+        result = classify_page(url, raw_html=_HEAVY_DASHBOARD_HTML)
+        assert result.page_type == expected, (
+            f"Expected {expected} but got {result.page_type} (score={result.score}, signals={result.signals})"
+        )
+
+
+# ---------------------------------------------------------------------------
+# QR-06: Captcha/WAF block page detection
+# ---------------------------------------------------------------------------
+
+
+class TestBlockedPageType:
+    """QR-06: Captcha/WAF block page detection."""
+
+    @pytest.mark.parametrize(
+        "url,expected",
+        [
+            ("https://example.com/captcha", "blocked"),
+            ("https://google.com/sorry/index?continue=foo", "blocked"),
+            ("https://example.com/challenge", "blocked"),
+            ("https://cdn.example.com/cdn-cgi/challenge-platform/abc", "blocked"),
+            ("https://errors.edgesuite.net/something", "blocked"),
+        ],
+    )
+    def test_blocked_url_signals(self, url, expected):
+        assert classify_page(url).page_type == expected
+
+    @pytest.mark.parametrize(
+        "title,dom_content",
+        [
+            ("Just a moment...", '<div id="cf-browser-verification">'),
+            ("Access Denied", "<p>Access denied.</p>"),
+            ("Please verify", '<div class="g-recaptcha">'),
+            ("Attention Required", '<div class="cf-turnstile">'),
+        ],
+    )
+    def test_blocked_html_signals(self, title, dom_content):
+        html = f"<html><head><title>{title}</title></head><body>{dom_content}</body></html>"
+        assert classify_page("https://example.com/page", raw_html=html).page_type == "blocked"
+
+    def test_large_page_not_blocked(self):
+        """Large page with captcha string in JS should NOT be classified as blocked."""
+        content = "Product description " * 500
+        html = f'<html><body><script>var x = "captcha";</script><p>{content}</p></body></html>'
+        assert classify_page("https://shop.com/products/123", raw_html=html).page_type != "blocked"
+
+    def test_search_url_with_challenge(self):
+        """Google search URL + CF challenge -> blocked wins over search_results."""
+        html = (
+            "<html><head><title>Just a moment...</title></head>"
+            '<body><div class="challenge-running"></div></body></html>'
+        )
+        assert classify_page("https://google.com/search?q=test", raw_html=html).page_type == "blocked"
+
+    def test_modern_provider_datadome(self):
+        html = '<html><body><div class="datadome-captcha"></div><p>Verify</p></body></html>'
+        assert classify_page("https://example.com/page", raw_html=html).page_type == "blocked"

@@ -7,22 +7,20 @@
     "url": "https://github.com/Retio-ai/Retio-pagemap",
     "source": "github"
   },
-  "version": "0.6.0",
+  "version": "0.7.0",
   "packages": [
     {
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "retio-pagemap",
-      "version": "0.6.0",
+      "version": "0.7.0",
       "transport": {
         "type": "stdio"
       }
     },
     {
       "registryType": "oci",
-      "registryBaseUrl": "https://docker.io",
-      "identifier": "retio1001/pagemap",
-      "version": "0.6.0",
+      "identifier": "docker.io/retio1001/pagemap:0.7.0",
       "transport": {
         "type": "stdio"
       }

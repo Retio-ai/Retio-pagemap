@@ -298,61 +298,61 @@ class TestHelperFunctions:
 class TestParseServerArgs:
     """Tests for _parse_server_args CLI + env var parsing.
 
-    _parse_server_args returns (allow_local, telemetry_enabled) tuple.
+    _parse_server_args returns argparse.Namespace with allow_local, telemetry, etc.
     """
 
     def test_cli_flag_enables(self):
-        allow_local, _telem = _parse_server_args(["--allow-local"])
-        assert allow_local is True
+        args = _parse_server_args(["--allow-local"])
+        assert args.allow_local is True
 
     def test_no_flag_disables(self):
-        allow_local, _telem = _parse_server_args([])
-        assert allow_local is False
+        args = _parse_server_args([])
+        assert args.allow_local is False
 
     def test_env_var_1_enables(self):
         with patch.dict("os.environ", {"PAGEMAP_ALLOW_LOCAL": "1"}):
-            allow_local, _telem = _parse_server_args([])
-            assert allow_local is True
+            args = _parse_server_args([])
+            assert args.allow_local is True
 
     def test_env_var_true_enables(self):
         with patch.dict("os.environ", {"PAGEMAP_ALLOW_LOCAL": "true"}):
-            allow_local, _telem = _parse_server_args([])
-            assert allow_local is True
+            args = _parse_server_args([])
+            assert args.allow_local is True
 
     def test_env_var_0_disables(self):
         with patch.dict("os.environ", {"PAGEMAP_ALLOW_LOCAL": "0"}):
-            allow_local, _telem = _parse_server_args([])
-            assert allow_local is False
+            args = _parse_server_args([])
+            assert args.allow_local is False
 
     def test_both_cli_and_env(self):
         with patch.dict("os.environ", {"PAGEMAP_ALLOW_LOCAL": "1"}):
-            allow_local, _telem = _parse_server_args(["--allow-local"])
-            assert allow_local is True
+            args = _parse_server_args(["--allow-local"])
+            assert args.allow_local is True
 
     def test_env_var_yes_enables(self):
         with patch.dict("os.environ", {"PAGEMAP_ALLOW_LOCAL": "yes"}):
-            allow_local, _telem = _parse_server_args([])
-            assert allow_local is True
+            args = _parse_server_args([])
+            assert args.allow_local is True
 
     def test_env_var_empty_disables(self):
         with patch.dict("os.environ", {"PAGEMAP_ALLOW_LOCAL": ""}):
-            allow_local, _telem = _parse_server_args([])
-            assert allow_local is False
+            args = _parse_server_args([])
+            assert args.allow_local is False
 
     def test_unknown_args_ignored(self):
         """parse_known_args should ignore unknown flags like 'serve'."""
-        allow_local, _telem = _parse_server_args(["serve", "--allow-local"])
-        assert allow_local is True
+        args = _parse_server_args(["serve", "--allow-local"])
+        assert args.allow_local is True
 
     def test_telemetry_cli_flag(self):
-        _local, telem = _parse_server_args(["--telemetry"])
-        assert telem is True
+        args = _parse_server_args(["--telemetry"])
+        assert args.telemetry is True
 
     def test_telemetry_env_var(self):
         with patch.dict("os.environ", {"PAGEMAP_TELEMETRY": "1"}):
-            _local, telem = _parse_server_args([])
-            assert telem is True
+            args = _parse_server_args([])
+            assert args.telemetry is True
 
     def test_telemetry_disabled_by_default(self):
-        _local, telem = _parse_server_args([])
-        assert telem is False
+        args = _parse_server_args([])
+        assert args.telemetry is False

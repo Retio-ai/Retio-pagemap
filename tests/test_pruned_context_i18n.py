@@ -3,7 +3,7 @@
 Covers:
 - Locale-specific output labels (title, rating, brand, pagination)
 - Universal keyword detection (ja/fr/de/en keywords in search/listing)
-- build_pruned_context locale parameter backward compat (None → "ko")
+- build_pruned_context locale parameter backward compat (None → "en")
 - Pagination i18n output
 """
 
@@ -130,12 +130,12 @@ class TestSerializeCardsI18n:
 
 
 class TestPaginationI18n:
-    def test_ko_default(self):
+    def test_en_default(self):
         html = '<a href="?page=10">10</a><a>다음</a>'
         result = _extract_pagination_info(html)
-        assert "페이지네이션" in result
-        assert "페이지" in result
-        assert "다음 있음" in result
+        assert "Pagination" in result
+        assert "pages" in result
+        assert "Next available" in result
 
     def test_en_locale(self):
         lc = get_locale("en")
@@ -238,13 +238,13 @@ class TestBuildPrunedContextLocale:
 <div>189,000원</div>
 </main></body></html>"""
 
-    def test_default_locale_ko(self):
-        """locale=None → Korean labels (backward compat)."""
+    def test_default_locale_en(self):
+        """locale=None → English labels (default)."""
         html = self._make_product_html()
         context, _, _ = build_pruned_context(html, page_type="product_detail", schema_name="Product")
-        assert "제목:" in context
-        assert "평점:" in context
-        assert "브랜드:" in context
+        assert "Title:" in context
+        assert "Rating:" in context
+        assert "Brand:" in context
 
     def test_locale_en(self):
         html = self._make_product_html()

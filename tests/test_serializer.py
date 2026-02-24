@@ -171,9 +171,10 @@ class TestContentBoundary:
             pruned_context="results",
         )
         prompt = to_agent_prompt(pm)
-        # URL should be escaped in the attribute
-        assert "&amp;" in prompt
+        # & preserved as-is (prompt boundary, not XML); " still escaped
+        assert "&amp;" not in prompt
         assert "&quot;" in prompt
+        assert "q=a&b=c" in prompt
 
 
 # ── Sanitization Integration ────────────────────────────────────────

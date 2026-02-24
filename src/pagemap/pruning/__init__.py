@@ -35,6 +35,9 @@ class SchemaName(StrEnum):
     WIKI_ARTICLE = "WikiArticle"
     SAAS_PAGE = "SaaSPage"
     GOVERNMENT_PAGE = "GovernmentPage"
+    FAQ_PAGE = "FAQPage"
+    EVENT = "Event"
+    LOCAL_BUSINESS = "LocalBusiness"
     GENERIC = "Generic"
 
 

@@ -32,7 +32,7 @@ PageMap gives your agent a **compressed, actionable** view of any web page:
 | **Avg tokens / task** | **2,710** | 13,737 | 13,888 | 11,424 |
 | **Cost / 94 tasks** | **$1.06** | $4.09 | $3.98 | $2.26 |
 
-> Benchmarked across 16 sites, 94 static tasks, 7 conditions. PageMap leads all competitors in accuracy (+20%p over next best) while using **5.1x fewer tokens** and is the only tool that supports **interaction**.
+> Benchmarked across 11 e-commerce sites, 94 static tasks, 7 conditions. PageMap leads all competitors in accuracy (+20%p over next best) while using **5.1x fewer tokens** and is the only tool that supports **interaction**.
 
 ---
 
@@ -177,6 +177,22 @@ Restart your IDE. Nine tools become available:
 
 All tools include [MCP Tool Annotations](https://modelcontextprotocol.io/docs/concepts/tool-annotations) — `readOnlyHint` for safe tools (`get_page_map`, `scroll_page`, etc.) and `destructiveHint` for state-changing tools (`execute_action`, `fill_form`). MCP clients can use these hints to auto-approve read-only calls.
 
+### HTTP Transport
+
+Run as an HTTP server for multi-client or cloud deployments:
+
+```bash
+uvx retio-pagemap --transport http --port 8000
+```
+
+With security enabled:
+
+```bash
+uvx retio-pagemap --transport http --port 8000 \
+  --require-tls --cors-origin "https://app.example.com" \
+  --trusted-proxy cloudflare
+```
+
 ### CLI
 
 ```bash
@@ -188,27 +204,37 @@ pagemap build --url "https://www.example.com/product/123"
 ## Output Example
 
 ```yaml
-URL: https://www.example.com/product/air-max-90
-Title: Nike Air Max 90
+URL: https://www.zara.com/kr/ko/콤비-레더-점퍼-p05479750.html
+Title: 콤비 칼라 레더 점퍼 - 블랙 | ZARA South Korea / 대한민국
 Type: product_detail
 
 ## Actions
-[1] searchbox: Search (type)
-[2] button: Add to Cart (click)
-[3] combobox: Size (select) options=[250,255,260,265,270]
-[4] button: Buy Now (click)
+[1] button: 메뉴 열기 (click)
+[2] button: 위시리스트에 항목 추가 (click)
+[3] button: 설명 (click)
+[4] button: 사이즈 (click)
+[5] button: S (KR 90) (click)
+[6] button: M (KR 95-100) (click)
+[7] button: L (KR 100-105) (click)
+[8] button: XL (KR 105-110) (click)
+[9] button: 추가하기 (click)
+...
 
 ## Info
-<h1>Nike Air Max 90</h1>
-<span itemprop="price">139,000</span>
-<span itemprop="ratingValue">4.7</span>
-<span>2,341 reviews</span>
+제목: 콤비 칼라 레더 점퍼
+3,299원
+브랜드: ZARA
 
 ## Images
-  [1] https://cdn.example.com/air-max-90-1.jpg
+  [1] https://static.zara.net/...05479750800-p.jpg
+
+## Meta
+Tokens: ~1,611 | Interactables: 43 | Generation: 425ms
 ```
 
-An agent reads the page and executes `execute_action(ref=3, action="select", value="260")` to select a size — all in one context window.
+> *Output trimmed for readability. Actual output includes all 43 interactive elements.*
+
+An agent reads the page and executes `execute_action(ref=6, action="click")` to select size M (KR 95-100) — all in one context window.
 
 ---
 
@@ -217,7 +243,7 @@ An agent reads the page and executes `execute_action(ref=3, action="select", val
 Try these prompts with any MCP-compatible AI client:
 
 **Product Information**
-- "Go to this Nike page and tell me the price, available sizes, and rating."
+- "Go to this Musinsa page and tell me the price, available options, and rating."
 - "What's the cheapest running shoe on this search results page?"
 
 **Form & Search**
@@ -225,7 +251,7 @@ Try these prompts with any MCP-compatible AI client:
 - "Fill in the shipping form with my address: 123 Main St, Seoul, 04789."
 
 **Multi-Site Comparison**
-- "Compare the price of this jacket on Zara and H&M."
+- "Compare the price of this jacket on Zara and Uniqlo."
 - "Open these 3 product pages and tell me which has the best reviews."
 
 **Multi-Step Workflows**
@@ -233,7 +259,7 @@ Try these prompts with any MCP-compatible AI client:
 - "Navigate to the sale section, filter by price under $50, and list the items."
 
 **Content Extraction**
-- "Read this Wikipedia article and summarize the key dates."
+- "Read this news article and summarize the main story."
 - "Extract all image URLs from this product page."
 
 ---
@@ -244,7 +270,7 @@ Try these prompts with any MCP-compatible AI client:
 Raw HTML (~100K tokens)
   → PageMap (2-5K tokens)
      ├── Actions        Interactive elements with numbered refs
-     ├── Info            Compressed HTML (prices, titles, key info)
+     ├── Info            Key page content (prices, titles, ratings)
      ├── Images          Product image URLs
      └── Metadata        Structured data (JSON-LD, Open Graph)
 ```
@@ -306,9 +332,16 @@ PageMap treats all web content as **untrusted input**:
 - **Browser Hardening** — WebRTC IP leak prevention, ServiceWorker blocking, internal protocol blocking (`view-source:`, `blob:`, `data:`), Markdown injection defense
 - **Resource Guards** — DOM node limit (50K), HTML size limit (5MB), response size limit (text 1MB, screenshot 5MB). Configurable via env vars (`PAGEMAP_MAX_TEXT_BYTES`, `PAGEMAP_MAX_IMAGE_BYTES`)
 - **Hidden Content Detection** — 2-layer defense against SEO spam and cloaking: JS `getComputedStyle()` removal + AOM inline style pattern matching (`opacity:0`, `font-size:0`, off-screen elements)
-- **Prompt Injection Defense** — nonce-based content boundaries, role-prefix stripping, Unicode control char removal
+- **robots.txt Compliance** — RFC 9309 compliant checker with origin-level cache, dynamic TTL, fail-open semantics. `--ignore-robots` opt-out flag
+- **Bot User-Agent** — `--bot-ua` flag for transparent `PageMapBot/{version}` identification. Default remains standard Chrome UA
+- **HTTP Transport Security** — TLS 1.3 enforcement (`--require-tls`), 4-layer ASGI middleware chain (API Gateway → Rate Limiting → API Key Auth → Security Headers), session isolation with cookie/storage destruction, browser context recycling (100 nav / 30 min), per-session resource quotas
+- **Prompt Injection Defense** — nonce-based content boundaries, role-prefix stripping, Unicode control char removal, token scrubbing in logs/responses
 - **Action Sandboxing** — whitelisted actions only, dangerous key combos blocked, affordance-action compatibility pre-check
 - **Input Validation** — value length limits, timeout enforcement, error sanitization
+
+### Disclaimer
+
+Users are responsible for complying with the terms of service of target websites and all applicable laws and regulations when using PageMap. PageMap is a general-purpose browser automation tool — the authors do not endorse or encourage unauthorized scraping, data collection, or any activity that violates third-party rights.
 
 ### Local Development
 
@@ -375,8 +408,15 @@ Built-in i18n for price, review, rating, and pagination extraction:
 | Japanese | `ja` | ¥, 円 | レビュー, 評価, 次へ |
 | French | `fr` | €, CHF | avis, note, suivant |
 | German | `de` | €, CHF | Bewertungen, Bewertung, weiter |
+| Chinese | `zh` | ¥, 元, CNY | 评价, 评分, 下一页, 加载更多 |
+| Spanish | `es` | €, $ | reseñas, valoración, siguiente |
+| Italian | `it` | € | recensioni, valutazione, successivo |
+| Portuguese | `pt` | R$, € | avaliações, avaliação, próximo |
+| Dutch | `nl` | € | beoordelingen, beoordeling, volgende |
 
-Locale is auto-detected from the URL domain. Token budgets are automatically adjusted for CJK scripts — Korean uses ~9.4x more tokens per character than English, so PageMap compensates with language-aware budget weights to ensure consistent output quality.
+Locale is auto-detected from the URL domain across 10 locales. Token budgets are automatically adjusted for CJK scripts — Korean uses ~9.4x more tokens per character than English, so PageMap compensates with language-aware budget weights to ensure consistent output quality.
+
+Unicode script-based language filtering automatically removes foreign-language noise from mixed-content pages (enabled by default).
 
 ---
 

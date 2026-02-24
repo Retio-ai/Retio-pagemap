@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
+from typing import Any
 
 import lxml.html
 
@@ -93,10 +94,77 @@ class AomFilterStats:
     removed_nodes: int = 0
     removal_reasons: dict[str, int] = field(default_factory=dict)
     removed_xpaths: set[str] = field(default_factory=set)  # for future xpath-level matching
+    grid_whitelist_count: int = 0
+    content_rescue_count: int = 0
 
     def record(self, reason: str) -> None:
         self.removed_nodes += 1
         self.removal_reasons[reason] = self.removal_reasons.get(reason, 0) + 1
+
+
+_GRID_CONTAINER_TAGS = frozenset({"div", "section", "ul", "ol", "main", "article"})
+_MIN_REPEATING_CHILDREN = 3
+_MAX_FINGERPRINT_CLASSES = 3
+
+
+def _child_fingerprint(el: lxml.html.HtmlElement) -> tuple[str, frozenset[str]] | None:
+    """Fingerprint a child element by (tag, first-N classes)."""
+    tag = el.tag if isinstance(el.tag, str) else None
+    if tag is None:
+        return None
+    classes = el.get("class", "").split()[:_MAX_FINGERPRINT_CLASSES]
+    return (tag.lower(), frozenset(classes))
+
+
+def _detect_repeating_grids(doc: lxml.html.HtmlElement) -> set[str]:
+    """Detect repeating grid containers (pre-AOM whitelist).
+
+    Finds containers whose direct children share the same tag+class
+    structure (>= 3 siblings). These are likely product grids, file
+    lists, or article lists — not navigation.
+
+    Only whitelists containers where link density > 0.5 (otherwise
+    the AOM filter won't penalize them anyway).
+
+    Returns set of xpaths for containers that should be exempted
+    from link-density penalty in AOM filter.
+    """
+    tree = doc.getroottree()
+    whitelist: set[str] = set()
+
+    for el in doc.iter():
+        if not isinstance(el.tag, str):
+            continue
+        if el.tag.lower() not in _GRID_CONTAINER_TAGS:
+            continue
+
+        # Group direct children by fingerprint
+        fp_counts: dict[tuple[str, frozenset[str]], int] = {}
+        for child in el:
+            fp = _child_fingerprint(child)
+            if fp is not None:
+                fp_counts[fp] = fp_counts.get(fp, 0) + 1
+
+        # Check if any fingerprint group has >= 3 children
+        has_repeating = any(c >= _MIN_REPEATING_CHILDREN for c in fp_counts.values())
+        if not has_repeating:
+            continue
+
+        # Only whitelist if link density > 0.5 (the penalty threshold)
+        total_text = (el.text_content() or "").strip()
+        total_len = len(total_text)
+        if total_len <= _LINK_DENSITY_MIN_TEXT_LEN:
+            continue
+
+        link_text_len = sum(len((a.text_content() or "").strip()) for a in el.iter("a"))
+        if link_text_len > 0 and link_text_len / total_len > _LINK_DENSITY_MODERATE:
+            try:
+                xpath = tree.getpath(el)
+                whitelist.add(xpath)
+            except ValueError:
+                continue
+
+    return whitelist
 
 
 def _is_body_direct_child(el: lxml.html.HtmlElement) -> bool:
@@ -163,6 +231,8 @@ def _has_interactive_descendants(el: lxml.html.HtmlElement) -> bool:
 def _compute_weight(
     el: lxml.html.HtmlElement,
     schema_name: str | None = None,
+    grid_whitelist: set[str] | None = None,
+    tree: Any = None,
 ) -> tuple[float, str]:
     """Compute AOM weight for an element.
 
@@ -174,6 +244,7 @@ def _compute_weight(
       3. aria-hidden="true"
       4. Inline style display:none / visibility:hidden
       5. Class/ID noise pattern matching
+      6. Link density penalty (with grid whitelist exemption)
     """
     tag = el.tag.lower() if isinstance(el.tag, str) else ""
 
@@ -254,6 +325,15 @@ def _compute_weight(
 
     # 6. Link density penalty (block-level containers only)
     if tag in _LINK_DENSITY_TAGS:
+        # Check grid whitelist before applying link density penalty
+        if grid_whitelist and tree is not None:
+            try:
+                el_xpath = tree.getpath(el)
+                # Exempt if this element or any ancestor is whitelisted
+                if el_xpath in grid_whitelist or any(el_xpath.startswith(wp + "/") for wp in grid_whitelist):
+                    return 0.8, "grid-whitelist"
+            except ValueError:
+                pass
         total_text = (el.text_content() or "").strip()
         total_len = len(total_text)
         if total_len > _LINK_DENSITY_MIN_TEXT_LEN:
@@ -273,12 +353,17 @@ def aom_filter(
     doc: lxml.html.HtmlElement,
     schema_name: str | None = None,
     threshold: float = _DEFAULT_THRESHOLD,
+    grid_whitelist: set[str] | None = None,
 ) -> AomFilterStats:
     """Apply AOM-based filtering to DOM tree (in-place).
 
     Removes nodes with weight < threshold along with all their descendants.
     """
     stats = AomFilterStats()
+    if grid_whitelist:
+        stats.grid_whitelist_count = len(grid_whitelist)
+
+    tree = doc.getroottree()
 
     # Collect elements to remove (can't modify tree during iteration)
     to_remove: list[tuple[lxml.html.HtmlElement, str]] = []
@@ -293,9 +378,13 @@ def aom_filter(
         if tag in ("body", "html", "main"):
             continue
 
-        weight, reason = _compute_weight(el, schema_name)
+        weight, reason = _compute_weight(el, schema_name, grid_whitelist=grid_whitelist, tree=tree)
         if weight < threshold:
             to_remove.append((el, reason))
+
+    # Track link-density removals for content rescue
+    _link_density_removed: list[tuple[lxml.html.HtmlElement, lxml.html.HtmlElement, int, lxml.html.HtmlElement]] = []
+    # (element_copy, parent, index_in_parent, original_el) — only for link-density reasons
 
     # Remove collected elements (parent-first to avoid double removal)
     for el, reason in to_remove:
@@ -305,7 +394,7 @@ def aom_filter(
             continue
 
         try:
-            xpath = doc.getroottree().getpath(el)
+            xpath = tree.getpath(el)
         except ValueError:
             continue
 
@@ -316,14 +405,35 @@ def aom_filter(
         if any("/".join(parts[:i]) in stats.removed_xpaths for i in range(4, len(parts))):
             continue
 
+        # Save link-density removals for possible content rescue
+        if reason.startswith("link-density"):
+            idx = list(parent).index(el)
+            _link_density_removed.append((el, parent, idx))
+
         parent.remove(el)
         stats.removed_xpaths.add(xpath)
         stats.record(reason)
 
+    # Content rescue: if remaining text is < 100 chars, restore link-density
+    # removals that contain price patterns (likely product grids).
+    # NEVER restore security-critical removals (display:none, aria-hidden, etc.)
+    remaining_text = (doc.text_content() or "").strip()
+    if len(remaining_text) < 100 and _link_density_removed:
+        for el, parent, idx in _link_density_removed:
+            el_text = (el.text_content() or "").strip()
+            if el_text and _PRICE_IN_NOISE_RE.search(el_text):
+                # Re-insert at original position (clamped to parent length)
+                insert_idx = min(idx, len(parent))
+                parent.insert(insert_idx, el)
+                stats.content_rescue_count += 1
+                logger.debug("Content rescue: restored element with price data")
+
     logger.debug(
-        "AOM filter: %d/%d nodes removed (%s)",
+        "AOM filter: %d/%d nodes removed, %d grid-whitelisted, %d rescued (%s)",
         stats.removed_nodes,
         stats.total_nodes,
+        stats.grid_whitelist_count,
+        stats.content_rescue_count,
         stats.removal_reasons,
     )
 
@@ -336,6 +446,8 @@ def aom_filter(
             "total_nodes": stats.total_nodes,
             "removed_nodes": stats.removed_nodes,
             "removal_reasons": dict(stats.removal_reasons),
+            "grid_whitelist_count": stats.grid_whitelist_count,
+            "content_rescue_count": stats.content_rescue_count,
         },
     )
 

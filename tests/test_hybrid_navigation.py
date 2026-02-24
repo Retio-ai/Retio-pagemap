@@ -41,6 +41,7 @@ class TestHybridNavigate:
         session._page.wait_for_load_state = AsyncMock()
         session._context = MagicMock()
         session._context.clear_cookies = AsyncMock()
+        session._context.set_extra_http_headers = AsyncMock()
         return session
 
     async def test_networkidle_strategy(self):

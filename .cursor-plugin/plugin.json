@@ -2,7 +2,7 @@
   "$schema": "https://raw.githubusercontent.com/cursor/plugins/main/schemas/plugin.schema.json",
   "name": "pagemap",
   "displayName": "PageMap",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Browse and interact with any web page at 97% fewer tokens. Extracts interactive elements with ref numbers and compressed page content for AI agents.",
   "author": {
     "name": "Retio AI"

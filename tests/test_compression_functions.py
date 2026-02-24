@@ -18,13 +18,16 @@ from pagemap.pruned_context_builder import (
     _compress_for_documentation,
     _compress_for_error,
     _compress_for_form,
+    _compress_for_government,
     _compress_for_help_faq,
     _compress_for_landing,
     _compress_for_listing,
     _compress_for_login,
     _compress_for_product,
+    _compress_for_saas,
     _compress_for_search_results,
     _compress_for_settings,
+    _compress_for_wiki,
     _extract_text_lines,
     _truncate_to_tokens,
 )
@@ -462,3 +465,164 @@ class TestCompressForLanding:
         result = _compress_for_landing(src, max_tokens=500)
         assert long_text not in result
         assert "Short CTA" in result
+
+
+# ---------------------------------------------------------------------------
+# Schema-aware compressors (SaaSPage, GovernmentPage, WikiArticle)
+# ---------------------------------------------------------------------------
+
+
+class TestCompressForSaas:
+    def test_pricing_keywords(self):
+        src = html("<p>Free plan</p><p>$9/mo Pro</p><p>Enterprise custom pricing</p>")
+        result = _compress_for_saas(src, max_tokens=500)
+        assert any(kw in result.lower() for kw in ("free", "$9", "enterprise"))
+
+    def test_feature_keywords(self):
+        src = html("<p>Features Overview</p><p>API Integration</p><p>Support 24/7</p>")
+        result = _compress_for_saas(src, max_tokens=500)
+        assert any(kw in result.lower() for kw in ("api", "integration", "support"))
+
+    def test_metadata_phase1(self):
+        src = html("<p>Extra content here for the page</p>")
+        result = _compress_for_saas(
+            src,
+            max_tokens=500,
+            metadata={"name": "GitHub Copilot", "description": "AI pair programmer"},
+        )
+        assert "GitHub Copilot" in result
+        assert "AI pair programmer" in result
+
+    def test_metadata_and_regex_hybrid(self):
+        """Phase 1 supplies name only; pricing filled by regex from HTML."""
+        src = html("<p>$29/mo Professional plan with all features</p><p>Free tier available</p>")
+        result = _compress_for_saas(
+            src,
+            max_tokens=500,
+            metadata={"name": "Acme SaaS"},
+        )
+        assert "Acme SaaS" in result
+        assert "$29" in result
+
+    def test_fallback_to_default(self):
+        """Unrelated content falls back to _compress_default."""
+        src = html("<p>Totally unrelated content about nature and wildlife</p>")
+        result = _compress_for_saas(src, max_tokens=500)
+        assert isinstance(result, str)
+        assert len(result) > 0
+
+
+class TestCompressForGovernment:
+    def test_department_keywords(self):
+        src = html("<p>교육부 공지사항</p><p>Ministry of Education</p>")
+        result = _compress_for_government(src, max_tokens=500)
+        assert "교육부" in result or "Ministry" in result
+
+    def test_contact_and_date(self):
+        src = html("<p>문의: 전화 02-1234-5678</p><p>2025-01-15</p>")
+        result = _compress_for_government(src, max_tokens=500)
+        assert "전화" in result or "2025-01-15" in result
+
+    def test_service_keywords(self):
+        src = html("<p>서비스 안내</p><p>민원 신청 접수</p>")
+        result = _compress_for_government(src, max_tokens=500)
+        assert "서비스" in result or "신청" in result
+
+    def test_metadata_and_regex_hybrid(self):
+        """Phase 1 supplies title only; service/date filled by regex from HTML."""
+        src = html("<p>서비스 안내 페이지</p><p>2025-03-01</p><p>민원 접수 방법 안내</p>")
+        result = _compress_for_government(
+            src,
+            max_tokens=500,
+            metadata={"title": "정부24 민원포털"},
+        )
+        assert "정부24" in result
+        assert "2025-03-01" in result or "서비스" in result
+
+    def test_fallback_to_default(self):
+        """Unrelated content falls back to _compress_default."""
+        src = html("<p>Totally unrelated content about nature and wildlife</p>")
+        result = _compress_for_government(src, max_tokens=500)
+        assert isinstance(result, str)
+        assert len(result) > 0
+
+
+class TestCompressForWiki:
+    def test_metadata_title_and_summary(self):
+        src = html("<p>Extra wiki content here for testing</p>")
+        result = _compress_for_wiki(
+            src,
+            max_tokens=500,
+            metadata={"title": "Python", "summary": "Python is a programming language"},
+        )
+        assert "Python" in result
+        assert "programming language" in result
+
+    def test_chunk_based_sections(self):
+        from pagemap.pruning import ChunkType, HtmlChunk
+
+        chunks = [
+            HtmlChunk(
+                xpath="/body/h2[1]",
+                html="<h2>History</h2>",
+                text="History",
+                tag="h2",
+                chunk_type=ChunkType.HEADING,
+            ),
+            HtmlChunk(
+                xpath="/body/p[1]",
+                html="<p>Python was created in the late 1980s by Guido van Rossum.</p>",
+                text="Python was created in the late 1980s by Guido van Rossum.",
+                tag="p",
+                chunk_type=ChunkType.TEXT_BLOCK,
+            ),
+            HtmlChunk(
+                xpath="/body/h2[2]",
+                html="<h2>Features</h2>",
+                text="Features",
+                tag="h2",
+                chunk_type=ChunkType.HEADING,
+            ),
+            HtmlChunk(
+                xpath="/body/p[2]",
+                html="<p>Dynamic typing and garbage collection.</p>",
+                text="Dynamic typing and garbage collection.",
+                tag="p",
+                chunk_type=ChunkType.TEXT_BLOCK,
+            ),
+        ]
+        result = _compress_for_wiki(
+            html("<h2>History</h2><p>Python was created...</p><h2>Features</h2><p>Dynamic typing...</p>"),
+            max_tokens=500,
+            chunks=chunks,
+        )
+        assert "## History" in result
+        assert "## Features" in result
+
+    def test_budget_limit(self):
+        from pagemap.preprocessing.preprocess import count_tokens
+
+        big = html("".join(f"<p>{'Long paragraph content number ' * 5}{i}</p>" for i in range(100)))
+        result = _compress_for_wiki(big, max_tokens=50)
+        assert count_tokens(result) <= 60
+
+    def test_text_fallback_no_chunks(self):
+        """Phase 3 path: chunks=None, long paragraphs + short headings."""
+        long_para = "This is a substantial paragraph that exceeds eighty characters to trigger the summary extraction path in wiki compression"
+        src = html(
+            f"<p>{long_para}</p>"
+            "<p>Introduction</p>"
+            "<p>Another long paragraph with enough characters to be picked up as a second summary line in the fallback</p>"
+        )
+        result = _compress_for_wiki(src, max_tokens=500, chunks=None)
+        # Long paragraph extracted as summary
+        assert "substantial paragraph" in result
+        # Short line collected as heading
+        assert "## Introduction" in result
+
+    def test_fallback_to_default(self):
+        """Unrelated content falls back to _compress_default."""
+        src = html("<p>Totally unrelated content about nature and wildlife</p>")
+        result = _compress_for_wiki(src, max_tokens=500)
+        assert isinstance(result, str)
+        assert len(result) > 0

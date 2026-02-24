@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
@@ -148,6 +149,30 @@ SKIP_ROLES = frozenset(
         "progressbar",
     }
 )
+
+# ── Noise classification ─────────────────────────────────────────────
+_TABLE_STRUCTURE_ROLES = frozenset({"row", "cell", "gridcell"})
+
+_TRIVIAL_LABEL_RE = re.compile(r"^\s*(?:[#(]?\d+[.)]?|[-\u2014\u2013\u00b7\u2026]+|[Nn]/[Aa])\s*$")
+
+
+def _is_table_noise(role: str, name: str) -> bool:
+    """Classify table-structural interactable as noise.
+
+    Returns True for:
+    - Unnamed row/cell/gridcell (empty or whitespace-only name)
+    - Trivial labels: ordinals ("1.", "#3"), dashes ("---"), "N/A"
+
+    Named elements with real content pass through.
+    Only applies to _TABLE_STRUCTURE_ROLES -- buttons, links, etc. unaffected.
+    """
+    if role not in _TABLE_STRUCTURE_ROLES:
+        return False
+    stripped = name.strip()
+    if not stripped:
+        return True
+    return bool(_TRIVIAL_LABEL_RE.match(stripped))
+
 
 # ── Tier 3 batch JS ──────────────────────────────────────────────────
 # Single Runtime.evaluate call replaces ~200 sequential CDP IPC round-trips.

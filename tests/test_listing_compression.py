@@ -209,7 +209,7 @@ class TestSerializeCards:
         result = _serialize_cards(cards, max_cards=5)
         assert "5. " in result
         assert "6. " not in result
-        assert "외 15건" in result
+        assert "+15 more" in result
 
     def test_price_from_numeric(self):
         cards = [{"name": "상품", "price": 189000, "currency": "KRW"}]
@@ -241,7 +241,7 @@ class TestExtractPaginationInfo:
         html = "<div>총 500건</div>"
         result = _extract_pagination_info(html)
         assert "총 500건" in result
-        assert "페이지네이션" in result
+        assert "Pagination" in result
 
     def test_korean_total_with_space(self):
         html = "<div>총 1,234건</div>"
@@ -273,17 +273,17 @@ class TestExtractPaginationInfo:
     def test_page_param(self):
         html = '<a href="/search?page=25">25</a>'
         result = _extract_pagination_info(html)
-        assert "~25페이지" in result
+        assert "~25pages" in result
 
     def test_p_param(self):
         html = '<a href="/list?category=shoes&p=10">10</a>'
         result = _extract_pagination_info(html)
-        assert "~10페이지" in result
+        assert "~10pages" in result
 
     def test_multiple_page_params_max(self):
         html = '<a href="?page=1">1</a><a href="?page=5">5</a><a href="?page=10">10</a>'
         result = _extract_pagination_info(html)
-        assert "~10페이지" in result
+        assert "~10pages" in result
 
     # Next button detection
     def test_next_button_korean(self):
@@ -291,38 +291,38 @@ class TestExtractPaginationInfo:
         # Need wrapping with > <
         html = '<a class="btn">다음</a>'
         result = _extract_pagination_info(html)
-        assert "다음 있음" in result
+        assert "Next available" in result
 
     def test_next_button_english(self):
         html = '<a class="pagination-next">Next</a>'
         result = _extract_pagination_info(html)
-        assert "다음 있음" in result
+        assert "Next available" in result
 
     def test_load_more(self):
         html = "<button>Load more</button>"
         result = _extract_pagination_info(html)
-        assert "다음 있음" in result
+        assert "Next available" in result
 
     def test_show_more(self):
         html = "<button>Show more</button>"
         result = _extract_pagination_info(html)
-        assert "다음 있음" in result
+        assert "Next available" in result
 
     def test_aria_label_next(self):
         html = '<a aria-label="Next">→</a>'
         result = _extract_pagination_info(html)
-        assert "다음 있음" in result
+        assert "Next available" in result
 
     # Page X of Y patterns
     def test_page_of_pattern(self):
         html = "<div>Page 2 of 50</div>"
         result = _extract_pagination_info(html)
-        assert "~50페이지" in result
+        assert "~50pages" in result
 
     def test_korean_page_pattern(self):
         html = "<div>페이지 3/20</div>"
         result = _extract_pagination_info(html)
-        assert "~20페이지" in result
+        assert "~20pages" in result
 
     # Combined
     def test_combined_info(self):
@@ -332,9 +332,9 @@ class TestExtractPaginationInfo:
         <a class="next-btn">다음</a>
         """
         result = _extract_pagination_info(html)
-        assert "~25페이지" in result
+        assert "~25pages" in result
         assert "500건" in result
-        assert "다음 있음" in result
+        assert "Next available" in result
 
     # No info
     def test_no_pagination(self):
@@ -349,7 +349,7 @@ class TestExtractPaginationInfo:
     def test_next_class(self):
         html = '<a class="pagination-next" href="/page/2">→</a>'
         result = _extract_pagination_info(html)
-        assert "다음 있음" in result
+        assert "Next available" in result
 
 
 # ---------------------------------------------------------------------------
@@ -359,7 +359,7 @@ class TestExtractPaginationInfo:
 
 class TestMetadataItemList:
     def test_itemlist_json_ld(self):
-        from pagemap.metadata import _find_itemlist_in_jsonld, _parse_json_ld_itemlist
+        from pagemap.metadata import _find_type_in_jsonld, _parse_json_ld_itemlist
 
         json_ld = {
             "@type": "ItemList",
@@ -385,10 +385,9 @@ class TestMetadataItemList:
                 },
             ],
         }
-        assert _find_itemlist_in_jsonld(json_ld) is not None
+        assert _find_type_in_jsonld(json_ld, ("ItemList",)) is not None
 
-        chunk = _make_meta_chunk(json_ld)
-        items = _parse_json_ld_itemlist([chunk])
+        items = _parse_json_ld_itemlist([json_ld])
         assert len(items) == 2
         assert items[0]["name"] == "Nike Air Max 90"
         assert items[0]["price"] == 189000.0
@@ -396,7 +395,7 @@ class TestMetadataItemList:
         assert items[0]["position"] == 1
 
     def test_itemlist_in_graph(self):
-        from pagemap.metadata import _find_itemlist_in_jsonld
+        from pagemap.metadata import _find_type_in_jsonld
 
         json_ld = {
             "@graph": [
@@ -404,12 +403,12 @@ class TestMetadataItemList:
                 {"@type": "ItemList", "itemListElement": []},
             ]
         }
-        assert _find_itemlist_in_jsonld(json_ld) is not None
+        assert _find_type_in_jsonld(json_ld, ("ItemList",)) is not None
 
     def test_no_itemlist(self):
-        from pagemap.metadata import _find_itemlist_in_jsonld
+        from pagemap.metadata import _find_type_in_jsonld
 
-        assert _find_itemlist_in_jsonld({"@type": "Product"}) is None
+        assert _find_type_in_jsonld({"@type": "Product"}, ("ItemList",)) is None
 
     def test_extract_metadata_includes_items(self):
         from pagemap.metadata import extract_metadata
@@ -498,8 +497,8 @@ class TestBuildPrunedContextIntegration:
 
         html = self._make_listing_html()
         context, token_count, metadata = build_pruned_context(html, page_type="listing", schema_name="Product")
-        assert "페이지네이션" in context
-        assert "다음 있음" in context
+        assert "Pagination" in context
+        assert "Next available" in context
 
     def test_search_results_has_cards(self):
         from pagemap.pruned_context_builder import build_pruned_context
@@ -514,7 +513,7 @@ class TestBuildPrunedContextIntegration:
 
         html = self._make_listing_html().replace("베스트셀러", "검색결과: 신발")
         context, token_count, metadata = build_pruned_context(html, page_type="search_results", schema_name="Product")
-        assert "페이지네이션" in context
+        assert "Pagination" in context
 
 
 # ---------------------------------------------------------------------------
@@ -546,7 +545,7 @@ class TestProductDetailRegression:
         assert "Nike Air Max 90" in context
         assert "189,000" in context
         # Should NOT have pagination
-        assert "페이지네이션" not in context
+        assert "Pagination" not in context
 
 
 # ---------------------------------------------------------------------------

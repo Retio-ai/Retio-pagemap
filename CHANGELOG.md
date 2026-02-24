@@ -9,6 +9,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-02-24
+
+### Added
+
+- **Content extraction quality overhaul** — AOM grid whitelist (`_detect_repeating_grids()` for schema-agnostic sibling container detection, link-density penalty exemption), DOM card detection (price-anchor + parent walk algorithm), Minimum Content Guarantee safety net (OG → pruned_html → raw_html cascade when < 10 tokens), Extraction Quality Score (EQS) telemetry. 36 new tests
+- **Captcha/WAF block page detection** — "blocked" page_type with URL, meta, and DOM signals for Cloudflare, reCAPTCHA, hCaptcha, Turnstile, DataDome, PerimeterX/HUMAN, Imperva. HTTP status capture, `CAPTCHA_DETECTED` telemetry, `blocked_info` metadata, `verify_ref` navigation hint. Short-circuit safety override
+- **Interactable noise filtering** — `_is_table_noise` predicate (unnamed row/cell/gridcell, trivial ordinals). 5th bucket (`bucket_table_noise`) in budget filter for noise deprioritization. Chrome inputs (radio, checkbox, switch) in pruned regions demoted to `bucket_rest`
+- **Enhanced image extraction pipeline** — 4-phase pipeline: `<picture>`/`<source>` support, size/semantic filtering (W3C decorative signals), canonical URL dedup (largest variant), fetchpriority boost. `<figure>` semantic boost, `loading="eager"` boost, srcset `w` descriptor validation, SVG filtering, Amazon/Korean CDN patterns, JSON-LD/OG image integration. `IMAGE_FILTER_APPLIED` telemetry event. Code review: 7 fixes for telemetry counters, SVG filter ordering, dedup, Amazon noise patterns
+- **Unicode script-based language filtering** — `script_filter.py` with bisect-based O(log k) codepoint classification, page-dominant-script detection, line-level filtering (short UI noise → remove, long foreign content → `[lang]` tag). Passthrough exceptions: URLs, numbers/units, brand names, ≤5 chars. `LANG_FILTER_APPLIED` telemetry. Enabled by default in `build_pruned_context()`
+- **CLI UX improvements** — `--output` supports file mode (`out.json`) and directory mode (`out/`). `build` without `--url` prints error with examples. `--help` epilog with usage examples (`RawDescriptionHelpFormatter`). `--format json|text|markdown` stdout output (mutually exclusive with `--output`). `_progress.py` with rich spinner (optional dep) + TTY-aware `print_step`
+- **Structured error handling** — regex-based `net::ERR_*` classifier (`classify_network_error()`), CLI formatter (`to_cli_text()`), `cmd_build()` sync-level error catch, `main()` top-level handler. `--verbose` for traceback. `RuntimeError` → `BrowserError` fix for MCP path. 31 new tests
+- **JSON-LD schema expansion** — NewsArticle, BreadcrumbList, FAQPage, Event, LocalBusiness parsers. 1-pass JSON-LD parsing + generic type finder + dispatch registry refactoring. Event 8 subtypes, LocalBusiness 10 subtypes. 470+ new tests
+- **SaaS/Government/Wiki schema-aware compressors** — `_compress_saas_dispatch()`/`_compress_government_dispatch()`/`_compress_wiki_dispatch()` in `pruned_context_builder.py`. Per-schema OG field mapping, dedicated ChunkTypes, domain-specific metadata extraction. `_compress_default()` fallback resolved
+- **robots.txt compliance** — `RobotsChecker` (RFC 9309, Protego-based): origin-level cache, Cache-Control max-age dynamic TTL, fail-open semantics, 401/403→full block, 4xx→full allow. `--ignore-robots` / `PAGEMAP_IGNORE_ROBOTS` flag. Integrated in `get_page_map`/`batch_get_page_map`. `ROBOTS_BLOCKED` telemetry event
+- **Bot User-Agent** — `--bot-ua` / `PAGEMAP_BOT_UA` flag for transparent `PageMapBot/{version}` User-Agent. Default remains Chrome UA
+- **Legal disclaimer** — README, PyPI page, and MCP server startup message: users responsible for target website ToS and applicable laws
+- **RFC 9457 Problem Details** — `problem_details.py`: `ProblemType(StrEnum)` 15-type error taxonomy, `ProblemDetail` frozen dataclass, `sanitize_detail()` 8-pattern secret masking, 9 factory functions. `_safe_error()` → `ProblemDetail` pathway, MCP text output backward compatible. `to_response()` produces `application/problem+json`. 88 tests
+- **i18n expansion** — default locale changed from ko to en. Chinese (zh) locale added (Taobao/JD.com/Pinduoduo, 24 keyword tuples, 8 domain + 2 TLD mappings). 4 European locales added (es/it/pt/nl) with full LocaleConfig, domain/TLD mapping, path segment detection, Layer 1 detection terms (RATING, REVIEW_COUNT, NEXT/PREV_BUTTON, LOAD_MORE, REPORTER, CONTACT, BRAND). Accept-Language headers auto-sent per URL locale
+- **K8s/nginx/Cloudflare deployment configs** — `deploy/` directory with Kubernetes manifests, nginx reverse proxy, and Cloudflare tunnel configuration
+- **MCG regression tests** — 12-case regression suite with snapshot markers (NB-E)
+- **SessionManager + BrowserPool** — `StdioSessionManager` (single session) + `HttpSessionManager` (BrowserPool-based multi-session). `BrowserPool` with `max_contexts=5`, `asyncio.Semaphore` capacity control, idle timeout reaper, `PoolHealth` monitoring
+- **HTTP transport** — `--transport stdio|http` flag, FastMCP HTTP mode, structlog JSON logging, `/health`+`/ready` + K8s probes (`/livez`/`/readyz`/`/startupz`), CORS origin control, API Gateway middleware (trusted proxy IP, X-Request-ID, Cloudflare CIDR), graceful drain (SIGTERM → drain → shutdown)
+- **Phase δ: Auth + Rate Limiting + Security** — 4-stream parallel implementation:
+  - **Auth middleware** (`auth_middleware.py`) — ASGI `AuthMiddleware` (Bearer `sk-pm-*` key verification, health endpoint bypass, audit event logging via repository)
+  - **SQLite persistent storage** (`repository_sqlite.py`) — `SqliteRepository` implementing `RepositoryProtocol` (aiosqlite, `api_keys`/`audit_log`/`usage_records` tables, `PRAGMA user_version` schema migration). `--db-path` / `PAGEMAP_DB_PATH` flag
+  - **Repository abstraction** (`repository.py`) — `RepositoryProtocol` (runtime_checkable), `AuditEvent`/`UsageRecord` frozen dataclasses, `InMemoryRepository` backward-compat wrapper
+  - **Rate limit middleware** (`rate_limit_middleware.py`) — ASGI `RateLimitMiddleware` (token bucket, `X-RateLimit-*` IETF headers, 429 with RFC 9457 body, fire-and-forget usage metering)
+  - **Security headers middleware** (`security_headers.py`) — ASGI `SecurityHeadersMiddleware` (`X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Content-Security-Policy: default-src 'none'`, `Cache-Control: no-store`). TLS 1.3 enforcement via `--require-tls` / `PAGEMAP_REQUIRE_TLS` (HSTS + 421 Misdirected Request)
+  - **Token security** (`token_security.py`) — `scrub_from_text()`/`scrub_headers()`/`contains_token()` for API key scrubbing in logs/responses
+  - **Session isolation hardening** — `context.close()` destroys all cookies/storage on session removal
+  - **Browser context recycling** — auto-recycle after `PAGEMAP_MAX_NAVIGATIONS` (default 100) or `PAGEMAP_MAX_SESSION_AGE` (default 1800s)
+  - **Per-session resource quotas** — max tabs (`PAGEMAP_MAX_TABS`, default 5), navigation limit, session TTL enforcement
+  - **Security event taxonomy** — 4 new telemetry events: `SSRF_BLOCKED`, `DNS_REBINDING_BLOCKED`, `BROWSER_DEAD`, `PROMPT_INJECTION_SANITIZED`
+- **Phase I: Middleware chain integration** — Gateway (outermost) → RateLimit → Auth → SecurityHeaders → App (innermost). Repository + RateLimiter initialization in `_run_http_server()`, cleanup in `finally`
+
+### Changed
+
+- **Amazon page_type accuracy** — DOM score cap (`_DOM_CAP=40`), Amazon `/dp/` URL signal (25pts), `dom_add_to_cart` signal (8-language cart button detection), error threshold 15→25
+- **HTML entity decoding** — `_unescape_entities()` in `sanitize_text()`/`sanitize_content_block()`. `\xa0` → normal space normalization. Applied to `_extract_text_lines()`, interactable/title extraction. 42 new tests
+- **`_extract_pruning_metadata` helper extraction** — DRY improvement for metadata handling in page_map_builder (NB-C)
+- **Content rescue deepcopy removal** — unnecessary `copy.deepcopy(el)` eliminated in AOM content rescue (NB-A)
+- **README Output Example** — replaced idealized Nike output with real Zara product page output. Example prompts updated to match realistic scenarios
+- **Community stats unified** — "16 sites" → "11 e-commerce sites" across README and community posts
+- **ruff lint/format** — resolved all ruff warnings (I001, SIM103/105/114/117, F401/541/841, B007) across 16 files
+- 2940 → 3983 tests passing (+1043)
+- New dependency: `aiosqlite>=0.22.0`
+
+### Fixed
+
+- **HTML entity leaks in agent prompt output** — `_unescape_entities()` coverage extended to `pruned_context_builder.py` section headers and sanitizer edge cases. Golden site regression tests added
+- **Age-based browser recycling test determinism** — fixed flaky timing-dependent assertions in `test_browser_recycling.py`
+
+### Tests
+
+- **5 new test suites** — `test_cli_smoke.py` (CLI 엔드투엔드), `test_fuzz.py` (퍼징), `test_output_quality.py` (출력 품질 검증), `test_pipeline_integration.py` (파이프라인 통합), `test_golden_sites.py` (골든 사이트 entity 검증). +614 tests (3369→3983)
+
 ## [0.6.0] - 2026-02-23
 
 ### Added

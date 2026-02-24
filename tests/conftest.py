@@ -11,6 +11,19 @@ except ImportError:
 import pytest
 
 
+def pytest_collection_modifyitems(config, items):
+    """Skip snapshot-marked tests when data/snapshots/ is absent."""
+    from pathlib import Path
+
+    snapshots_dir = Path(__file__).parent.parent / "data" / "snapshots"
+    if snapshots_dir.exists():
+        return
+    skip_marker = pytest.mark.skip(reason="data/snapshots/ not found")
+    for item in items:
+        if "snapshot" in item.keywords:
+            item.add_marker(skip_marker)
+
+
 @pytest.fixture(autouse=True)
 def _block_real_browser(request, monkeypatch):
     """Safety net: prevent real browser sessions in unit tests.
@@ -41,5 +54,20 @@ def _reset_state():
     import pagemap.server as srv
 
     srv._state.cache.invalidate_all()
+    old_robots = srv._robots_checker
+    old_api_key_store = srv._api_key_store
+    old_rate_limiter = srv._rate_limiter
+    old_transport_mode = srv._transport_mode
+    old_draining = srv._draining
+    srv._robots_checker = None
+    srv._api_key_store = None
+    srv._rate_limiter = None
+    srv._transport_mode = "stdio"
+    srv._draining = False
     yield
     srv._state.cache.invalidate_all()
+    srv._robots_checker = old_robots
+    srv._api_key_store = old_api_key_store
+    srv._rate_limiter = old_rate_limiter
+    srv._transport_mode = old_transport_mode
+    srv._draining = old_draining

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from pagemap.pruned_context_builder import (
     _COMPRESSORS,
+    _SCHEMA_COMPRESSORS,
     CompressorContext,
     _compress_default_dispatch,
     _compress_for_checkout,
@@ -249,3 +250,57 @@ class TestFallback:
             result = fn(ctx)
             # Allow small overshoot due to tokenization granularity
             assert count_tokens(result) <= max_tok + 10, f"{ptype} exceeded token budget"
+
+
+# ---------------------------------------------------------------------------
+# Schema-aware dispatch table
+# ---------------------------------------------------------------------------
+
+
+class TestSchemaDispatchTable:
+    EXPECTED_SCHEMAS = ["SaaSPage", "GovernmentPage", "WikiArticle"]
+
+    def test_all_schemas_registered(self):
+        for schema in self.EXPECTED_SCHEMAS:
+            assert schema in _SCHEMA_COMPRESSORS, f"{schema} missing from _SCHEMA_COMPRESSORS"
+
+    def test_dispatch_returns_string(self):
+        html = "<html><body><h1>Test Page</h1><p>Some content here for testing.</p></body></html>"
+        ctx = CompressorContext(pruned_html=html, max_tokens=500)
+        for schema, fn in _SCHEMA_COMPRESSORS.items():
+            result = fn(ctx)
+            assert isinstance(result, str), f"{schema} dispatcher did not return str"
+
+
+class TestSchemaFallback:
+    def test_schema_used_when_page_type_misses(self):
+        """page_type not in _COMPRESSORS + schema_name in _SCHEMA_COMPRESSORS → schema compressor."""
+        assert "unknown_type" not in _COMPRESSORS
+        assert "SaaSPage" in _SCHEMA_COMPRESSORS
+        # Simulate dispatch logic
+        compressor = _COMPRESSORS.get("unknown_type")
+        assert compressor is None
+        compressor = _SCHEMA_COMPRESSORS.get("SaaSPage", _compress_default_dispatch)
+        assert compressor is not _compress_default_dispatch
+
+    def test_page_type_takes_precedence(self):
+        """page_type in _COMPRESSORS → page_type compressor wins over schema."""
+        assert "documentation" in _COMPRESSORS
+        compressor = _COMPRESSORS.get("documentation")
+        assert compressor is not None  # documentation compressor, not wiki
+
+    def test_unknown_schema_falls_to_default(self):
+        """Unregistered schema → default fallback."""
+        compressor = _SCHEMA_COMPRESSORS.get("UnknownSchema", _compress_default_dispatch)
+        assert compressor is _compress_default_dispatch
+
+    def test_schema_compressor_budget_respected(self):
+        """All schema compressors respect token budget."""
+        from pagemap.preprocessing.preprocess import count_tokens
+
+        long_html = "<html><body>" + "<p>Some content here. </p>" * 200 + "</body></html>"
+        max_tok = 50
+        for schema, fn in _SCHEMA_COMPRESSORS.items():
+            ctx = CompressorContext(pruned_html=long_html, max_tokens=max_tok)
+            result = fn(ctx)
+            assert count_tokens(result) <= max_tok + 10, f"{schema} exceeded token budget"

@@ -22,10 +22,11 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
+from typing import Any
 
 from pagemap.preprocessing.preprocess import count_tokens, count_tokens_approx
 from pagemap.pruning import HtmlChunk, PruningError
-from pagemap.pruning.aom_filter import AomFilterStats, aom_filter
+from pagemap.pruning.aom_filter import AomFilterStats, _detect_repeating_grids, aom_filter
 from pagemap.pruning.compressor import compress_html, remerge_chunks
 from pagemap.pruning.preprocessor import _decompose_element, preprocess
 from pagemap.pruning.pruner import prune_chunks
@@ -53,6 +54,7 @@ class PruningResult:
     meta_chunks: list[HtmlChunk] = field(default_factory=list)
     heading_chunks: list[HtmlChunk] = field(default_factory=list)
     selected_chunks: list[HtmlChunk] = field(default_factory=list)
+    doc: Any = None  # lxml.html.HtmlElement — transient, not serialized
 
 
 def prune_page(
@@ -85,8 +87,16 @@ def prune_page(
         # Step 1-3: Preprocess (no chunk decomposition yet)
         meta_chunks, doc = preprocess(raw_html)
 
-        # Step 4: AOM filter (in-place on DOM)
-        result.aom_filter_stats = aom_filter(doc, schema_name=schema_name)
+        # Step 3.5: Detect repeating grids for AOM whitelist
+        grid_whitelist = _detect_repeating_grids(doc)
+        if grid_whitelist:
+            logger.info("Grid whitelist: %d containers", len(grid_whitelist))
+
+        # Step 4: AOM filter (in-place on DOM, with grid whitelist)
+        result.aom_filter_stats = aom_filter(doc, schema_name=schema_name, grid_whitelist=grid_whitelist)
+
+        # Preserve post-AOM doc for downstream DOM card detection
+        result.doc = doc
 
         # Step 5: Chunk decomposition — single pass after AOM filter
         body = doc.body if doc.body is not None else doc

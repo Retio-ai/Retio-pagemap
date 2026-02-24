@@ -328,9 +328,10 @@ def infer_metadata_source(
         return ""
 
     # Try JSON-LD comparison
-    from pagemap.metadata import _parse_json_ld_product
+    from pagemap.metadata import _parse_json_ld_product, _parse_jsonld_chunks
 
-    json_ld = _parse_json_ld_product(meta_chunks)
+    parsed_data = _parse_jsonld_chunks(meta_chunks)
+    json_ld = _parse_json_ld_product(parsed_data)
     if json_ld:
         # If JSON-LD produced most of the same keys, it was likely the source
         overlap = set(json_ld.keys()) & set(metadata.keys())

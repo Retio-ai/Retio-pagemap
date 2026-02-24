@@ -9,7 +9,7 @@
   Layer 2 (Rendering): LocaleConfig dataclass — locale-specific labels,
       templates, and formatting for AI agent output.
 
-Supported locales: ko (default), en, ja, fr, de
+Supported locales: en (default), ko, ja, fr, de, zh, es, it, pt, nl
 """
 
 from __future__ import annotations
@@ -46,6 +46,10 @@ PRICE_TERMS: tuple[str, ...] = (
     "원",
     "円",
     "元",
+    # zh
+    "CNY",
+    "RMB",
+    "人民币",
 )
 
 RATING_TERMS: tuple[str, ...] = (
@@ -65,6 +69,22 @@ RATING_TERMS: tuple[str, ...] = (
     # de
     "Bewertung",
     "Sterne",
+    # zh
+    "评分",
+    "评价",
+    "好评",
+    # es
+    "valoración",
+    "estrellas",
+    # it
+    "valutazione",
+    "stelle",
+    # pt
+    "avaliação",
+    "estrelas",
+    # nl
+    "beoordeling",
+    "sterren",
 )
 
 REVIEW_COUNT_TERMS: tuple[str, ...] = (
@@ -84,6 +104,26 @@ REVIEW_COUNT_TERMS: tuple[str, ...] = (
     "Bewertung",
     "Bewertungen",
     "Rezension",
+    # zh
+    "条评论",
+    "个评价",
+    "条评价",
+    # es
+    "reseña",
+    "reseñas",
+    "opinión",
+    "opiniones",
+    # it
+    "recensione",
+    "recensioni",
+    # pt
+    "avaliação",
+    "avaliações",
+    # nl
+    "beoordeling",
+    "beoordelingen",
+    "recensie",
+    "recensies",
 )
 
 REPORTER_TERMS: tuple[str, ...] = (
@@ -104,6 +144,21 @@ REPORTER_TERMS: tuple[str, ...] = (
     "Reporter",
     "Journalist",
     "Redakteur",
+    # zh
+    "记者",
+    "编辑",
+    # es
+    "periodista",
+    "redactor",
+    # it
+    "giornalista",
+    "redattore",
+    # pt
+    "jornalista",
+    "redator",
+    # nl
+    "journalist",
+    "redacteur",
 )
 
 CONTACT_TERMS: tuple[str, ...] = (
@@ -128,6 +183,26 @@ CONTACT_TERMS: tuple[str, ...] = (
     # de
     "Telefon",
     "Kontakt",
+    # zh
+    "电话",
+    "地址",
+    "邮箱",
+    # es
+    "teléfono",
+    "dirección",
+    "correo",
+    # it
+    "telefono",
+    "indirizzo",
+    "email",
+    # pt
+    "telefone",
+    "endereço",
+    "e-mail",
+    # nl
+    "telefoon",
+    "adres",
+    "e-mail",
 )
 
 BRAND_TERMS: tuple[str, ...] = (
@@ -146,6 +221,21 @@ BRAND_TERMS: tuple[str, ...] = (
     # de
     "Marke",
     "Hersteller",
+    # zh
+    "品牌",
+    "厂商",
+    # es
+    "marca",
+    "fabricante",
+    # it
+    "marca",
+    "produttore",
+    # pt
+    "marca",
+    "fabricante",
+    # nl
+    "merk",
+    "fabrikant",
 )
 
 DEPARTMENT_TERMS: tuple[str, ...] = (
@@ -170,6 +260,9 @@ DEPARTMENT_TERMS: tuple[str, ...] = (
     "Ministerium",
     "Behörde",
     "Amt",
+    # zh
+    "部门",
+    "机构",
 )
 
 FEATURE_TERMS: tuple[str, ...] = (
@@ -187,6 +280,9 @@ FEATURE_TERMS: tuple[str, ...] = (
     # de
     "Funktion",
     "Merkmal",
+    # zh
+    "功能",
+    "特点",
 )
 
 PRICING_TERMS: tuple[str, ...] = (
@@ -209,6 +305,9 @@ PRICING_TERMS: tuple[str, ...] = (
     # de
     "Preis",
     "Preise",
+    # zh
+    "价格",
+    "费用",
 )
 
 SEARCH_RESULT_TERMS: tuple[str, ...] = (
@@ -231,6 +330,10 @@ SEARCH_RESULT_TERMS: tuple[str, ...] = (
     "Suchergebnisse",
     "Ergebnisse",
     "Produkte",
+    # zh
+    "搜索结果",
+    "个商品",
+    "条宝贝",
 )
 
 LISTING_TERMS: tuple[str, ...] = (
@@ -256,6 +359,10 @@ LISTING_TERMS: tuple[str, ...] = (
     "Bestseller",
     "Beliebt",
     "Neuheiten",
+    # zh
+    "热销",
+    "新品",
+    "推荐",
 )
 
 FILTER_TERMS: tuple[str, ...] = (
@@ -279,6 +386,10 @@ FILTER_TERMS: tuple[str, ...] = (
     "Filter",
     "Sortieren",
     "Kategorie",
+    # zh
+    "筛选",
+    "排序",
+    "分类",
 )
 
 NEXT_BUTTON_TERMS: tuple[str, ...] = (
@@ -299,6 +410,21 @@ NEXT_BUTTON_TERMS: tuple[str, ...] = (
     # de
     "Weiter",
     "Nächste Seite",
+    # zh
+    "下一页",
+    "下一步",
+    # es
+    "Siguiente",
+    "Página siguiente",
+    # it
+    "Successivo",
+    "Pagina successiva",
+    # pt
+    "Próximo",
+    "Próxima página",
+    # nl
+    "Volgende",
+    "Volgende pagina",
 )
 
 PREV_BUTTON_TERMS: tuple[str, ...] = (
@@ -319,6 +445,21 @@ PREV_BUTTON_TERMS: tuple[str, ...] = (
     # de
     "Zurück",
     "Vorherige Seite",
+    # zh
+    "上一页",
+    "上一步",
+    # es
+    "Anterior",
+    "Página anterior",
+    # it
+    "Precedente",
+    "Pagina precedente",
+    # pt
+    "Anterior",
+    "Página anterior",
+    # nl
+    "Vorige",
+    "Vorige pagina",
 )
 
 LOAD_MORE_TERMS: tuple[str, ...] = (
@@ -338,6 +479,21 @@ LOAD_MORE_TERMS: tuple[str, ...] = (
     # de
     "Mehr laden",
     "Mehr anzeigen",
+    # zh
+    "加载更多",
+    "查看更多",
+    # es
+    "Ver más",
+    "Cargar más",
+    # it
+    "Carica altro",
+    "Mostra altro",
+    # pt
+    "Ver mais",
+    "Carregar mais",
+    # nl
+    "Meer laden",
+    "Meer tonen",
 )
 
 PRICE_LABEL_TERMS: tuple[str, ...] = (
@@ -360,6 +516,10 @@ PRICE_LABEL_TERMS: tuple[str, ...] = (
     # de
     "Originalpreis",
     "Sonderpreis",
+    # zh
+    "原价",
+    "折扣价",
+    "促销价",
 )
 
 OPTION_TERMS: tuple[str, ...] = (
@@ -385,6 +545,10 @@ OPTION_TERMS: tuple[str, ...] = (
     "Größe",
     "Farbe",
     "Option",
+    # zh
+    "尺码",
+    "颜色",
+    "规格",
 )
 
 AVAILABILITY_TERMS: tuple[str, ...] = (
@@ -417,6 +581,12 @@ AVAILABILITY_TERMS: tuple[str, ...] = (
     "ausverkauft",
     "verfügbar",
     "nicht verfügbar",
+    # zh
+    "库存",
+    "缺货",
+    "已售罄",
+    "预订",
+    "现货",
 )
 
 DISCOUNT_TERMS: tuple[str, ...] = (
@@ -436,6 +606,10 @@ DISCOUNT_TERMS: tuple[str, ...] = (
     # de
     "rabatt",
     "Preisnachlass",
+    # zh
+    "折扣",
+    "优惠",
+    "满减",
 )
 
 SHIPPING_TERMS: tuple[str, ...] = (
@@ -461,6 +635,11 @@ SHIPPING_TERMS: tuple[str, ...] = (
     "kostenloser versand",
     "versandkostenfrei",
     "lieferung",
+    # zh
+    "包邮",
+    "运费",
+    "快递",
+    "免运费",
 )
 
 LOGIN_TERMS: tuple[str, ...] = (
@@ -480,6 +659,9 @@ LOGIN_TERMS: tuple[str, ...] = (
     # de
     "Anmelden",
     "Einloggen",
+    # zh
+    "登录",
+    "登入",
 )
 
 CHECKOUT_TERMS: tuple[str, ...] = (
@@ -506,6 +688,11 @@ CHECKOUT_TERMS: tuple[str, ...] = (
     "Kasse",
     "Bestellen",
     "Zahlung",
+    # zh
+    "结账",
+    "支付",
+    "下单",
+    "付款",
 )
 
 FAQ_TERMS: tuple[str, ...] = (
@@ -530,6 +717,9 @@ FAQ_TERMS: tuple[str, ...] = (
     "Häufig gestellte Fragen",
     "Hilfe-Center",
     "Hilfe",
+    # zh
+    "常见问题",
+    "帮助中心",
 )
 
 FORM_FIELD_TERMS: tuple[str, ...] = (
@@ -551,6 +741,9 @@ FORM_FIELD_TERMS: tuple[str, ...] = (
     # de
     "Pflichtfeld",
     "Bitte eingeben",
+    # zh
+    "必填",
+    "请输入",
 )
 
 # ---------------------------------------------------------------------------
@@ -653,9 +846,84 @@ _LOCALES: dict[str, LocaleConfig] = {
         default_currency="EUR",
         date_ymd_suffixes=(),
     ),
+    "zh": LocaleConfig(
+        code="zh",
+        label_title="标题",
+        label_rating="评分",
+        label_brand="品牌",
+        label_original_price="原价",
+        label_discount="折扣",
+        label_pagination="分页",
+        label_next_available="有下一页",
+        label_page_suffix="页",
+        overflow_template="还有{n}个",
+        review_template="({count}条评价)",
+        default_currency="CNY",
+        date_ymd_suffixes=("年", "月", "日"),
+    ),
+    "es": LocaleConfig(
+        code="es",
+        label_title="Título",
+        label_rating="Valoración",
+        label_brand="Marca",
+        label_original_price="Precio original",
+        label_discount="Descuento",
+        label_pagination="Paginación",
+        label_next_available="Siguiente disponible",
+        label_page_suffix="páginas",
+        overflow_template="+{n} más",
+        review_template="({count} reseñas)",
+        default_currency="EUR",
+        date_ymd_suffixes=(),
+    ),
+    "it": LocaleConfig(
+        code="it",
+        label_title="Titolo",
+        label_rating="Valutazione",
+        label_brand="Marca",
+        label_original_price="Prezzo originale",
+        label_discount="Sconto",
+        label_pagination="Paginazione",
+        label_next_available="Successivo disponibile",
+        label_page_suffix="pagine",
+        overflow_template="+{n} altri",
+        review_template="({count} recensioni)",
+        default_currency="EUR",
+        date_ymd_suffixes=(),
+    ),
+    "pt": LocaleConfig(
+        code="pt",
+        label_title="Título",
+        label_rating="Avaliação",
+        label_brand="Marca",
+        label_original_price="Preço original",
+        label_discount="Desconto",
+        label_pagination="Paginação",
+        label_next_available="Próximo disponível",
+        label_page_suffix="páginas",
+        overflow_template="+{n} mais",
+        review_template="({count} avaliações)",
+        default_currency="BRL",
+        date_ymd_suffixes=(),
+    ),
+    "nl": LocaleConfig(
+        code="nl",
+        label_title="Titel",
+        label_rating="Beoordeling",
+        label_brand="Merk",
+        label_original_price="Oorspronkelijke prijs",
+        label_discount="Korting",
+        label_pagination="Paginering",
+        label_next_available="Volgende beschikbaar",
+        label_page_suffix="pagina's",
+        overflow_template="+{n} meer",
+        review_template="({count} beoordelingen)",
+        default_currency="EUR",
+        date_ymd_suffixes=(),
+    ),
 }
 
-DEFAULT_LOCALE = "ko"
+DEFAULT_LOCALE = "en"
 
 
 def get_locale(code: str | None = None) -> LocaleConfig:
@@ -668,7 +936,7 @@ def get_locale(code: str | None = None) -> LocaleConfig:
 # ---------------------------------------------------------------------------
 
 # Path segments like /ja/, /fr/, /de/
-_PATH_LOCALE_SEGMENTS = {"ja", "fr", "de", "en", "ko"}
+_PATH_LOCALE_SEGMENTS = {"ja", "fr", "de", "en", "ko", "zh", "es", "it", "pt", "nl"}
 
 # Domain / TLD → locale mapping (checked in order: exact domain, then TLD)
 _DOMAIN_LOCALE: dict[str, str] = {
@@ -679,6 +947,15 @@ _DOMAIN_LOCALE: dict[str, str] = {
     "ssfshop.com": "ko",
     "wconcept.co.kr": "ko",
     "thehandsome.com": "ko",
+    # Chinese exact domains (Simplified Chinese — zh-Hans)
+    "taobao.com": "zh",
+    "tmall.com": "zh",
+    "jd.com": "zh",
+    "pinduoduo.com": "zh",
+    "xiaohongshu.com": "zh",
+    "douyin.com": "zh",
+    "bilibili.com": "zh",
+    "suning.com": "zh",
     # TLD-based
     ".co.kr": "ko",
     ".kr": "ko",
@@ -687,6 +964,14 @@ _DOMAIN_LOCALE: dict[str, str] = {
     ".fr": "fr",
     ".de": "de",
     ".co.uk": "en",
+    # Southern/Western European TLDs
+    ".es": "es",
+    ".it": "it",
+    ".pt": "pt",
+    ".nl": "nl",
+    # Chinese TLDs
+    ".com.cn": "zh",
+    ".cn": "zh",
     ".com": "en",
 }
 
@@ -723,3 +1008,32 @@ def detect_locale(url: str) -> str:
             return locale
 
     return DEFAULT_LOCALE
+
+
+# ---------------------------------------------------------------------------
+# Accept-Language header mapping
+# ---------------------------------------------------------------------------
+
+_LOCALE_TO_ACCEPT_LANGUAGE: dict[str, str] = {
+    "ko": "ko-KR,ko;q=0.9,en;q=0.8",
+    "en": "en-US,en;q=0.9",
+    "ja": "ja-JP,ja;q=0.9,en;q=0.8",
+    "fr": "fr-FR,fr;q=0.9,en;q=0.8",
+    "de": "de-DE,de;q=0.9,en;q=0.8",
+    "zh": "zh-CN,zh;q=0.9,en;q=0.8",
+    "es": "es-ES,es;q=0.9,en;q=0.8",
+    "it": "it-IT,it;q=0.9,en;q=0.8",
+    "pt": "pt-BR,pt;q=0.9,en;q=0.8",
+    "nl": "nl-NL,nl;q=0.9,en;q=0.8",
+}
+
+
+def accept_language_for_url(url: str) -> str:
+    """Return Accept-Language header value appropriate for the given URL.
+
+    Uses detect_locale() to determine the site's language, then maps
+    to a proper Accept-Language string with quality weights.
+    Falls back to English (project default) for unknown locales.
+    """
+    locale = detect_locale(url)
+    return _LOCALE_TO_ACCEPT_LANGUAGE.get(locale, _LOCALE_TO_ACCEPT_LANGUAGE["en"])

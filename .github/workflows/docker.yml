@@ -1,20 +1,28 @@
 name: Docker Build & Push
 
 on:
-  release:
-    types: [published]
+  workflow_run:
+    workflows: ["Publish to PyPI"]
+    types: [completed]
 
 jobs:
   docker:
     runs-on: ubuntu-latest
+    if: github.event.workflow_run.conclusion == 'success'
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
 
-      - name: Extract version from tag
+      - name: Extract version from pyproject.toml
         id: version
-        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+        run: |
+          VERSION=$(python3 -c "
+          import tomllib
+          with open('pyproject.toml', 'rb') as f:
+              print(tomllib.load(f)['project']['version'])
+          ")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3

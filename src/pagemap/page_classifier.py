@@ -27,6 +27,20 @@ from typing import Any
 from urllib.parse import urlparse
 
 # ---------------------------------------------------------------------------
+# Anti-bot keywords (shared with check_urls.py via import)
+# ---------------------------------------------------------------------------
+
+ANTI_BOT_KEYWORDS: tuple[str, ...] = (
+    "captcha",
+    "challenge-platform",
+    "cf-browser-verification",
+    "just a moment",
+    "access denied",
+    "akamai",
+    "errors.edgesuite.net",
+)
+
+# ---------------------------------------------------------------------------
 # Data classes
 # ---------------------------------------------------------------------------
 
@@ -73,6 +87,24 @@ _JSONLD_TYPE_TO_PAGE: dict[str, str] = {
     "FAQPage": "help_faq",
     "ContactPage": "form",
     "CheckoutPage": "checkout",
+    "Event": "landing",
+    "MusicEvent": "landing",
+    "SportsEvent": "landing",
+    "TheaterEvent": "landing",
+    "BusinessEvent": "landing",
+    "EducationEvent": "landing",
+    "Festival": "landing",
+    "ExhibitionEvent": "landing",
+    "LocalBusiness": "landing",
+    "Restaurant": "landing",
+    "Hotel": "landing",
+    "Store": "landing",
+    "MedicalClinic": "landing",
+    "FoodEstablishment": "landing",
+    "HealthAndBeautyBusiness": "landing",
+    "AutoRepair": "landing",
+    "Dentist": "landing",
+    "RealEstateAgent": "landing",
 }
 
 
@@ -119,7 +151,7 @@ THRESHOLDS: dict[str, int] = {
     # Strong-signal new types (easy to confirm)
     "login": 20,
     "checkout": 20,
-    "error": 15,
+    "error": 25,
     # Medium-signal new types
     "help_faq": 20,
     "documentation": 20,
@@ -127,9 +159,16 @@ THRESHOLDS: dict[str, int] = {
     "dashboard": 20,
     "settings": 20,
     "landing": 25,
+    # Anti-bot / captcha / WAF block pages
+    "blocked": 20,
 }
 
 _DEFAULT_THRESHOLD = 50
+
+# Maximum positive DOM contribution per page type.  Dashboard DOM signals
+# can accumulate up to 70 pts, overwhelming URL+JSON-LD for most types.
+# Capping at 40 keeps DOM influential but not dominant.
+_DOM_CAP = 40
 
 # ---------------------------------------------------------------------------
 # Signal Registry — URL signals
@@ -145,6 +184,11 @@ _URL_SIGNALS: list[SignalDef] = [
     SignalDef("url_product_slash", {"product_detail": 25}, check_url=lambda u: "/product/" in u),
     SignalDef("url_product_dot", {"product_detail": 25}, check_url=lambda u: "/product." in u),
     SignalDef("url_dp", {"product_detail": 20}, check_url=lambda u: "/dp/" in u),
+    SignalDef(
+        "url_amazon_dp",
+        {"product_detail": 25},
+        check_url=lambda u: "/dp/" in u and "amazon." in u,
+    ),
     SignalDef(
         "url_nike_t",
         {"product_detail": 15, "listing": -5},
@@ -221,6 +265,18 @@ _URL_SIGNALS: list[SignalDef] = [
     SignalDef("url_api_ref", {"documentation": 25}, check_url=lambda u: "/api-reference" in u or "/api-docs" in u),
     # ---- landing ----
     SignalDef("url_root", {"landing": 30, "listing": -10}, check_url=lambda u: _is_root_url(u)),
+    # ---- blocked (captcha/WAF) ----
+    SignalDef("url_sorry", {"blocked": 30}, check_url=lambda u: "/sorry/" in u),
+    SignalDef("url_captcha", {"blocked": 25, "error": -10}, check_url=lambda u: "/captcha" in u),
+    SignalDef(
+        "url_challenge", {"blocked": 25, "error": -10}, check_url=lambda u: "/challenge" in u and "/challenges" not in u
+    ),
+    SignalDef(
+        "url_cf_verify",
+        {"blocked": 30},
+        check_url=lambda u: "challenge-platform" in u or "cf-browser-verification" in u,
+    ),
+    SignalDef("url_edgesuite", {"blocked": 30}, check_url=lambda u: "errors.edgesuite.net" in u),
 ]
 
 # ---------------------------------------------------------------------------
@@ -257,6 +313,23 @@ _META_SIGNALS: list[SignalDef] = [
     ),
     # ---- og:type ----
     SignalDef("meta_og_article", {"article": 20}, check_meta=lambda h: _og_type_is(h, "article")),
+    # ---- blocked (captcha/WAF) ----
+    SignalDef(
+        "meta_title_blocked",
+        {"blocked": 30, "error": -15},
+        check_meta=lambda h: _title_contains(
+            h,
+            (
+                "access denied",
+                "attention required",
+                "please verify",
+                "just a moment",
+                "you have been blocked",
+                "접근이 거부",
+                "アクセスが拒否",
+            ),
+        ),
+    ),
 ]
 
 # JSON-LD weight map — parsed once per page, not per-signal
@@ -376,6 +449,92 @@ _DOM_SIGNALS: list[SignalDef] = [
         ),
     ),
     SignalDef("dom_many_sections", {"landing": 15}, check_dom=lambda h: h.count("<section") >= 5),
+    # ---- product_detail (cart/buy keywords) ----
+    SignalDef(
+        "dom_add_to_cart",
+        {"product_detail": 20},
+        check_dom=lambda h: any(
+            kw in h
+            for kw in (
+                "add to cart",
+                "add to bag",
+                "add to basket",
+                "buy now",
+                "장바구니",
+                "카트에 담기",
+                "구매하기",
+                "바로구매",
+                "カートに入れる",
+                "今すぐ買う",
+                "ajouter au panier",
+                "in den warenkorb",
+                "加入购物车",
+                "立即购买",
+                "añadir al carrito",
+                "comprar ahora",
+            )
+        ),
+    ),
+    # ---- blocked (captcha/WAF) ----
+    # Cloudflare, reCAPTCHA, hCaptcha, Turnstile
+    SignalDef(
+        "dom_captcha_element",
+        {"blocked": 30, "error": -10},
+        check_dom=lambda h: any(
+            kw in h
+            for kw in (
+                "g-recaptcha",
+                "h-captcha",
+                "cf-turnstile",
+                "challenge-form",
+                "captcha-container",
+            )
+        ),
+    ),
+    # Modern providers: DataDome, PerimeterX/HUMAN, Imperva
+    SignalDef(
+        "dom_modern_antibot",
+        {"blocked": 25},
+        check_dom=lambda h: any(
+            kw in h
+            for kw in (
+                "datadome",
+                "px-captcha",
+                "human-challenge",
+                "incapsula",
+                "_incap_",
+            )
+        ),
+    ),
+    # Short "Access Denied" pages (WAF)
+    SignalDef(
+        "dom_blocked_short",
+        {"blocked": 35, "error": -10},
+        check_dom=lambda h: (
+            _stripped_text_length(h) < 2000
+            and any(kw in h for kw in ("access denied", "access blocked", "forbidden", "접근이 거부", "アクセスが拒否"))
+        ),
+    ),
+    # Cloudflare challenge DOM markers
+    SignalDef(
+        "dom_cf_challenge",
+        {"blocked": 35},
+        check_dom=lambda h: any(
+            kw in h
+            for kw in (
+                "cf-browser-verification",
+                "challenge-platform",
+                "cf-chl-bypass",
+                "challenge-running",
+            )
+        ),
+    ),
+    # Cloudflare "Just a moment" interstitial
+    SignalDef(
+        "dom_just_a_moment",
+        {"blocked": 30},
+        check_dom=lambda h: "just a moment" in h and _stripped_text_length(h) < 2000,
+    ),
 ]
 
 # Combined registry for iteration
@@ -482,11 +641,40 @@ def classify_page(url: str, raw_html: str | None = None) -> ClassificationResult
             scores[jsonld_type] = scores.get(jsonld_type, 0) + _JSONLD_WEIGHTS[jsonld_type]
 
         # Layer 3: DOM signals — use lowered html
+        dom_pos: dict[str, int] = {}
         for sig in _DOM_SIGNALS:
             if sig.check_dom and sig.check_dom(html_lower):
                 fired.append(sig.name)
                 for ptype, weight in sig.scores.items():
                     scores[ptype] = scores.get(ptype, 0) + weight
+                    if weight > 0:
+                        dom_pos[ptype] = dom_pos.get(ptype, 0) + weight
+
+        # Clamp excess positive DOM contribution per type
+        for ptype, total in dom_pos.items():
+            if total > _DOM_CAP:
+                scores[ptype] -= total - _DOM_CAP
+
+    elif raw_html is not None and can_short_circuit:
+        # Even when short-circuiting, always check blocked signals (safety override).
+        # Captcha/WAF pages can appear on any URL pattern (e.g. search, product).
+        html_lower = raw_html.lower()
+        for sig in _META_SIGNALS:
+            if sig.check_meta and "blocked" in sig.scores and sig.check_meta(raw_html):
+                fired.append(sig.name)
+                for ptype, weight in sig.scores.items():
+                    scores[ptype] = scores.get(ptype, 0) + weight
+        dom_pos_blocked: dict[str, int] = {}
+        for sig in _DOM_SIGNALS:
+            if sig.check_dom and "blocked" in sig.scores and sig.check_dom(html_lower):
+                fired.append(sig.name)
+                for ptype, weight in sig.scores.items():
+                    scores[ptype] = scores.get(ptype, 0) + weight
+                    if weight > 0:
+                        dom_pos_blocked[ptype] = dom_pos_blocked.get(ptype, 0) + weight
+        for ptype, total in dom_pos_blocked.items():
+            if total > _DOM_CAP:
+                scores[ptype] -= total - _DOM_CAP
 
     # Determine winner
     if not scores:

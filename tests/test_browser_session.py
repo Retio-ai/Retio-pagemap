@@ -20,6 +20,7 @@ from pagemap.browser_session import (
     _auto_install_chromium,
     _cdp_ax_nodes_to_tree,
 )
+from pagemap.errors import BrowserError
 
 # ── BrowserConfig Defaults ─────────────────────────────────────────
 
@@ -33,7 +34,7 @@ class TestBrowserConfig:
 
     def test_default_locale(self):
         cfg = BrowserConfig()
-        assert cfg.locale == "ko-KR"
+        assert cfg.locale == "en-US"
 
     def test_default_viewport(self):
         cfg = BrowserConfig()
@@ -77,7 +78,7 @@ class TestModuleConstants:
         assert DEFAULT_VIEWPORT == {"width": 1280, "height": 800}
 
     def test_default_locale_value(self):
-        assert DEFAULT_LOCALE == "ko-KR"
+        assert DEFAULT_LOCALE == "en-US"
 
     def test_user_agent_looks_like_chrome(self):
         assert "Chrome" in DEFAULT_USER_AGENT
@@ -792,7 +793,7 @@ class TestAutoInstallChromium:
         assert mock_chromium.launch.call_count == 2
 
     async def test_start_raises_on_install_failure(self):
-        """start() should raise RuntimeError when auto-install fails."""
+        """start() should raise BrowserError when auto-install fails."""
         mock_pw_cm, mock_chromium, mock_browser, mock_context, mock_page = _build_mock_chain()
 
         mock_chromium.launch = AsyncMock(
@@ -808,7 +809,7 @@ class TestAutoInstallChromium:
             patch("pagemap.browser_session.asyncio.create_subprocess_exec", return_value=mock_proc),
         ):
             session = BrowserSession()
-            with pytest.raises(RuntimeError, match="auto-install failed"):
+            with pytest.raises(BrowserError, match="auto-install failed"):
                 await session.start()
 
     async def test_start_propagates_non_chromium_error(self):

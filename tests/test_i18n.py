@@ -22,6 +22,7 @@ from pagemap.i18n import (
     REPORTER_TERMS,
     REVIEW_COUNT_TERMS,
     SEARCH_RESULT_TERMS,
+    SHIPPING_TERMS,
     detect_locale,
     get_locale,
 )
@@ -32,13 +33,13 @@ from pagemap.i18n import (
 
 
 class TestLocaleConfig:
-    def test_default_locale_is_ko(self):
-        assert DEFAULT_LOCALE == "ko"
+    def test_default_locale_is_en(self):
+        assert DEFAULT_LOCALE == "en"
 
-    def test_get_locale_none_returns_ko(self):
+    def test_get_locale_none_returns_en(self):
         lc = get_locale(None)
-        assert lc.code == "ko"
-        assert lc.label_title == "\uc81c\ubaa9"
+        assert lc.code == "en"
+        assert lc.label_title == "Title"
 
     def test_get_locale_ko(self):
         lc = get_locale("ko")
@@ -70,9 +71,9 @@ class TestLocaleConfig:
         assert lc.label_title == "Titel"
         assert lc.default_currency == "EUR"
 
-    def test_unknown_locale_falls_back_to_ko(self):
+    def test_unknown_locale_falls_back_to_en(self):
         lc = get_locale("xx")
-        assert lc.code == "ko"
+        assert lc.code == "en"
 
     def test_locale_config_is_frozen(self):
         lc = get_locale("en")
@@ -251,3 +252,108 @@ class TestKeywordTuples:
         assert "sale price" in PRICE_LABEL_TERMS
         assert "original price" in PRICE_LABEL_TERMS
         assert "list price" in PRICE_LABEL_TERMS
+
+
+# ---------------------------------------------------------------------------
+# Chinese (zh) locale tests
+# ---------------------------------------------------------------------------
+
+
+class TestZhLocale:
+    def test_get_locale_zh(self):
+        lc = get_locale("zh")
+        assert lc.code == "zh"
+        assert lc.label_title == "标题"
+        assert lc.default_currency == "CNY"
+        assert lc.date_ymd_suffixes == ("年", "月", "日")
+
+    def test_detect_locale_zh_path(self):
+        assert detect_locale("https://www.example.com/zh/products") == "zh"
+
+    def test_detect_locale_zh_subdomain(self):
+        assert detect_locale("https://zh.example.com/page") == "zh"
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://www.taobao.com/item/123",
+            "https://www.jd.com/product/456",
+            "https://www.douyin.com/video/789",
+        ],
+    )
+    def test_detect_locale_zh_exact_domain(self, url):
+        assert detect_locale(url) == "zh"
+
+    def test_detect_locale_zh_tld(self):
+        assert detect_locale("https://store.example.cn/item/1") == "zh"
+
+    def test_detect_locale_zh_comcn(self):
+        assert detect_locale("https://store.example.com.cn/item/1") == "zh"
+
+    def test_price_terms_has_zh(self):
+        assert "CNY" in PRICE_TERMS
+        assert "RMB" in PRICE_TERMS
+
+    def test_rating_terms_has_zh(self):
+        assert "评分" in RATING_TERMS
+
+    def test_option_terms_has_zh(self):
+        assert "颜色" in OPTION_TERMS
+        assert "尺码" in OPTION_TERMS
+
+    def test_shipping_terms_has_zh(self):
+        assert "包邮" in SHIPPING_TERMS
+
+    def test_cjk_multiplier_zh(self):
+        from pagemap.page_map_builder import _CJK_TOKEN_MULTIPLIERS
+
+        assert _CJK_TOKEN_MULTIPLIERS["zh"] == 1.6
+
+
+# ---------------------------------------------------------------------------
+# Accept-Language for URL
+# ---------------------------------------------------------------------------
+
+
+class TestAcceptLanguageForUrl:
+    def test_amazon_com_returns_english(self):
+        from pagemap.i18n import accept_language_for_url
+
+        result = accept_language_for_url("https://www.amazon.com/dp/B08N5WRWNW")
+        assert result == "en-US,en;q=0.9"
+
+    def test_coupang_returns_korean(self):
+        from pagemap.i18n import accept_language_for_url
+
+        result = accept_language_for_url("https://www.coupang.com/vp/products/123")
+        assert result == "ko-KR,ko;q=0.9,en;q=0.8"
+
+    def test_amazon_co_jp_returns_japanese(self):
+        from pagemap.i18n import accept_language_for_url
+
+        result = accept_language_for_url("https://www.amazon.co.jp/dp/B08N5WRWNW")
+        assert result == "ja-JP,ja;q=0.9,en;q=0.8"
+
+    def test_nike_fr_path_returns_french(self):
+        from pagemap.i18n import accept_language_for_url
+
+        result = accept_language_for_url("https://www.nike.com/fr/w/shoes")
+        assert result == "fr-FR,fr;q=0.9,en;q=0.8"
+
+    def test_zara_de_subdomain_returns_german(self):
+        from pagemap.i18n import accept_language_for_url
+
+        result = accept_language_for_url("https://www.zara.com/de/")
+        assert result == "de-DE,de;q=0.9,en;q=0.8"
+
+    def test_unknown_domain_falls_back_to_english(self):
+        from pagemap.i18n import accept_language_for_url
+
+        result = accept_language_for_url("https://some-random-site.xyz/page")
+        assert result == "en-US,en;q=0.9"
+
+    def test_spanish_tld_returns_spanish(self):
+        from pagemap.i18n import accept_language_for_url
+
+        result = accept_language_for_url("https://www.example.es/products")
+        assert "es" in result

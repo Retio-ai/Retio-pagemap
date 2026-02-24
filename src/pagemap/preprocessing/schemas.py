@@ -90,6 +90,60 @@ class GovernmentPageExtraction(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# FAQ
+# ---------------------------------------------------------------------------
+
+
+class FAQPageExtraction(BaseModel):
+    """Structured data from FAQ pages (Schema.org FAQPage)."""
+
+    name: str | None = Field(None, description="FAQ page title")
+    questions: list[dict] | None = Field(None, description="List of {question, answer} dicts")
+
+
+# ---------------------------------------------------------------------------
+# Event
+# ---------------------------------------------------------------------------
+
+
+class EventExtraction(BaseModel):
+    """Structured data from event pages (Schema.org Event)."""
+
+    name: str | None = Field(None, description="Event name/title")
+    start_date: str | None = Field(None, description="Event start date (ISO 8601)")
+    end_date: str | None = Field(None, description="Event end date (ISO 8601)")
+    location: str | None = Field(None, description="Event location (venue name + address)")
+    event_status: str | None = Field(
+        None, description="Event status (Scheduled/Cancelled/Postponed/Rescheduled/MovedOnline)"
+    )
+    performer: str | None = Field(None, description="Performer name")
+    organizer: str | None = Field(None, description="Organizer name")
+    description: str | None = Field(None, description="Event description (max 200 chars)")
+    price: float | None = Field(None, description="Ticket price (numeric)")
+    currency: str | None = Field(None, description="ISO 4217 currency code")
+    image_url: str | None = Field(None, description="Event image URL (absolute)")
+
+
+# ---------------------------------------------------------------------------
+# LocalBusiness
+# ---------------------------------------------------------------------------
+
+
+class LocalBusinessExtraction(BaseModel):
+    """Structured data from local business pages (Schema.org LocalBusiness)."""
+
+    name: str | None = Field(None, description="Business name")
+    address: str | None = Field(None, description="Business address")
+    telephone: str | None = Field(None, description="Phone number")
+    opening_hours: str | None = Field(None, description="Opening hours")
+    price_range: str | None = Field(None, description="Price range (e.g. $, $$, $$$)")
+    rating: float | None = Field(None, description="Average rating")
+    review_count: int | None = Field(None, description="Number of reviews")
+    geo: dict | None = Field(None, description="Geo coordinates {latitude, longitude}")
+    image_url: str | None = Field(None, description="Business image URL (absolute)")
+
+
+# ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
 
@@ -99,6 +153,9 @@ SCHEMA_MAP: dict[str, type[BaseModel]] = {
     "WikiArticle": WikiArticleExtraction,
     "SaaSPage": SaaSPageExtraction,
     "GovernmentPage": GovernmentPageExtraction,
+    "FAQPage": FAQPageExtraction,
+    "Event": EventExtraction,
+    "LocalBusiness": LocalBusinessExtraction,
 }
 
 # Field type classification for evaluation matching logic.
@@ -146,5 +203,33 @@ FIELD_TYPES: dict[str, dict[str, str]] = {
         "description": "long_text",
         "date": "date",
         "contact_info": "text",
+    },
+    "FAQPage": {
+        "name": "text",
+        "questions": "list",
+    },
+    "Event": {
+        "name": "text",
+        "start_date": "date",
+        "end_date": "date",
+        "location": "text",
+        "event_status": "exact",
+        "performer": "text",
+        "organizer": "text",
+        "description": "long_text",
+        "price": "numeric",
+        "currency": "exact",
+        "image_url": "url",
+    },
+    "LocalBusiness": {
+        "name": "text",
+        "address": "text",
+        "telephone": "text",
+        "opening_hours": "text",
+        "price_range": "exact",
+        "rating": "numeric",
+        "review_count": "numeric",
+        "geo": "exact",
+        "image_url": "url",
     },
 }

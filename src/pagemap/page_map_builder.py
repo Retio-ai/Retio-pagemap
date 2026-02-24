@@ -11,6 +11,7 @@ Two modes:
 from __future__ import annotations
 
 import asyncio
+import html as _html
 import json
 import logging
 import re
@@ -30,11 +31,15 @@ from .i18n import (
     PREV_BUTTON_TERMS,
     detect_locale,
 )
-from .interactive_detector import detect_all
+from .interactive_detector import _is_table_noise, detect_all
 from .page_classifier import classify_page
 from .pipeline_timer import PipelineTimer
 from .pruned_context_builder import (
+    _ALLOWED_URL_PREFIXES,
+    _EXCLUDE_IMG_PATTERNS,
+    _MAX_URL_LENGTH,
     _NO_TEMPLATE,
+    _normalize_image_url,
     build_pruned_context,
     extract_pagination_structured,
     extract_product_images,
@@ -104,6 +109,47 @@ _DOM_GUARD_AND_HIDDEN_JS = """
 """
 
 
+def _merge_structured_images(
+    html_images: list[str],
+    metadata: dict[str, Any],
+) -> tuple[list[str], bool]:
+    """Merge structured-data image (JSON-LD/OG) into the HTML-extracted list.
+
+    Prepends the metadata image_url to the front of the list if it passes
+    security validation and is not already present (canonical dedup).
+
+    Returns (merged_list, was_merged) tuple.
+    """
+    meta_img = metadata.get("image_url")
+    if not meta_img or not isinstance(meta_img, str):
+        return html_images[:10], False
+
+    meta_img = meta_img.strip()
+    if not meta_img:
+        return html_images[:10], False
+
+    # Security: scheme allowlist + length limit
+    img_lower = meta_img.lower()
+    if ":" in img_lower.split("/")[0] and not img_lower.startswith(_ALLOWED_URL_PREFIXES):
+        return html_images[:10], False
+    if len(meta_img) > _MAX_URL_LENGTH:
+        return html_images[:10], False
+
+    # Exclude pattern check (tracking, logos, etc.)
+    if _EXCLUDE_IMG_PATTERNS.search(meta_img):
+        return html_images[:10], False
+
+    # Canonical dedup: check if already in list
+    canon_meta = _normalize_image_url(meta_img)
+    for existing in html_images:
+        if _normalize_image_url(existing) == canon_meta:
+            return html_images[:10], False
+
+    # Prepend structured image and cap at 10
+    merged = [meta_img] + html_images
+    return merged[:10], True
+
+
 def _check_html_size(raw_html: str) -> None:
     """Reject HTML exceeding 5MB limit. Raises ResourceExhaustionError + emits telemetry."""
     html_size = len(raw_html.encode("utf-8"))
@@ -119,6 +165,51 @@ def _check_html_size(raw_html: str) -> None:
             f"HTML size {html_size:,} bytes exceeds {MAX_HTML_SIZE_BYTES:,} byte limit. "
             "Try a more specific URL or a lighter page."
         )
+
+
+def _extract_pruning_metadata(
+    meta: dict[str, Any],
+    warnings: list[str],
+) -> set[str]:
+    """Pop internal pruning keys from metadata and update warnings."""
+    pruning_warnings = meta.pop("_pruning_warnings", [])
+    warnings.extend(pruning_warnings)
+    if meta.pop("_mcg_activated", False):
+        warnings.append("Content extraction used minimum content guarantee; page content may be sparse")
+    return meta.pop("_pruned_regions", set())
+
+
+_BLOCKED_PAGE_WARNING = (
+    "Page is blocked by anti-bot protection (captcha/WAF). "
+    "Content shown is from the block page, not the intended page. "
+    "Try: (1) a different URL on the same site, (2) a less protected page, "
+    "or (3) inform the user the site requires manual verification."
+)
+
+
+def _check_blocked_page(
+    page_type: str,
+    warnings: list[str],
+    metadata: dict,
+    *,
+    url: str = "",
+    http_status: int | None = None,
+) -> None:
+    """Append warning and structured info if page is classified as blocked."""
+    if page_type != "blocked":
+        return
+    warnings.append(_BLOCKED_PAGE_WARNING)
+    blocked_info: dict = {"detected": True}
+    if http_status is not None:
+        blocked_info["http_status"] = http_status
+    metadata["blocked_info"] = blocked_info
+    try:
+        from .telemetry import emit
+        from .telemetry.events import CAPTCHA_DETECTED
+
+        emit(CAPTCHA_DETECTED, {"url": url, "http_status": http_status})
+    except Exception:  # nosec B110
+        pass
 
 
 async def _check_resource_limits(page, raw_html: str) -> str:
@@ -172,6 +263,7 @@ async def _check_resource_limits(page, raw_html: str) -> str:
 
 _CJK_TOKEN_MULTIPLIERS: dict[str, float] = {
     "ko": 1.8,  # Hangul: ~0.61 chars/token, 9.4x penalty
+    "zh": 1.6,  # Hanzi-heavy: between ko(1.8 Hangul) and ja(1.5 kana+kanji mix)
     "ja": 1.5,  # Mixed kana+kanji: ~1.0 chars/token avg
     "en": 1.0,
     "fr": 1.0,
@@ -276,6 +368,7 @@ async def _build_pruned_context_async(
     max_tokens: int = DEFAULT_PRUNED_CONTEXT_TOKENS,
     locale: str | None = None,
     template: Any = _NO_TEMPLATE,
+    enable_lang_filter: bool = True,
 ) -> tuple[str, int, dict]:
     """Run build_pruned_context in a worker thread to unblock the event loop.
 
@@ -294,6 +387,7 @@ async def _build_pruned_context_async(
             max_tokens=max_tokens,
             locale=locale,
             template=template,
+            enable_lang_filter=enable_lang_filter,
         ),
         timeout=_PRUNED_CONTEXT_THREAD_TIMEOUT,
     )
@@ -314,6 +408,7 @@ DOMAIN_SCHEMA_MAP: dict[str, str] = {
     "hm.com": "Product",
     "uniqlo.com": "Product",
     "nike.com": "Product",
+    "amazon.com": "Product",
     # Non-ecommerce
     "news.naver.com": "NewsArticle",
     "bbc.com": "NewsArticle",
@@ -370,6 +465,25 @@ _JSONLD_TYPE_TO_SCHEMA: dict[str, str] = {
     "WebApplication": "SaaSPage",
     "GovernmentOrganization": "GovernmentPage",
     "GovernmentService": "GovernmentPage",
+    "FAQPage": "FAQPage",
+    "Event": "Event",
+    "MusicEvent": "Event",
+    "SportsEvent": "Event",
+    "TheaterEvent": "Event",
+    "BusinessEvent": "Event",
+    "EducationEvent": "Event",
+    "Festival": "Event",
+    "ExhibitionEvent": "Event",
+    "LocalBusiness": "LocalBusiness",
+    "Restaurant": "LocalBusiness",
+    "Hotel": "LocalBusiness",
+    "Store": "LocalBusiness",
+    "MedicalClinic": "LocalBusiness",
+    "FoodEstablishment": "LocalBusiness",
+    "HealthAndBeautyBusiness": "LocalBusiness",
+    "AutoRepair": "LocalBusiness",
+    "Dentist": "LocalBusiness",
+    "RealEstateAgent": "LocalBusiness",
 }
 
 
@@ -452,10 +566,11 @@ async def build_page_map_live(
     """
     start = time.monotonic()
 
+    nav_result = None
     if url:
         if timer:
             timer.stage("navigation")
-        await session.navigate(url)
+        nav_result = await session.navigate(url)
 
     if timer:
         timer.stage("page_info")
@@ -522,9 +637,16 @@ async def build_page_map_live(
 
     # Extract learning data (popped immediately — never reaches serializer)
     _pruning_result = metadata.pop("_pruning_result", None)
-    _pruning_warnings = metadata.pop("_pruning_warnings", [])
-    warnings.extend(_pruning_warnings)
-    _pruned_regions: set[str] = metadata.pop("_pruned_regions", set())
+    _pruned_regions = _extract_pruning_metadata(metadata, warnings)
+
+    # Captcha/WAF block page detection
+    _check_blocked_page(
+        page_type,
+        warnings,
+        metadata,
+        url=page_url,
+        http_status=nav_result.http_status if nav_result else None,
+    )
 
     # Template learning / validation
     if template_cache is not None and _pruning_result is not None and _template_key is not None:
@@ -564,11 +686,24 @@ async def build_page_map_live(
     if timer:
         timer.stage("assembly")
     # Extract product images
-    images = extract_product_images(raw_html, page_url)
+    images, _img_stats = extract_product_images(raw_html, page_url)
+    images, _img_merged = _merge_structured_images(images, metadata)
+    _img_stats["structured_image_merged"] = _img_merged
+    try:
+        from .telemetry import emit, events
+        from .telemetry.events import IMAGE_FILTER_APPLIED
+
+        emit(IMAGE_FILTER_APPLIED, events.image_filter_applied(**_img_stats))
+    except Exception:  # nosec B110
+        pass
 
     # Budget-aware filtering
     interactables = _budget_filter_interactables(
-        interactables, pruned_tokens, total_budget=budget.total, warnings=warnings
+        interactables,
+        pruned_tokens,
+        total_budget=budget.total,
+        warnings=warnings,
+        pruned_regions=_pruned_regions,
     )
 
     # Phase 4.1: Pruned region coherence warning
@@ -671,15 +806,29 @@ async def build_page_map_from_page(
     )
     metadata["_total_budget"] = budget.total
 
-    _pruning_warnings = metadata.pop("_pruning_warnings", [])
-    warnings.extend(_pruning_warnings)
     metadata.pop("_pruning_result", None)
-    _pruned_regions: set[str] = metadata.pop("_pruned_regions", set())
+    _pruned_regions = _extract_pruning_metadata(metadata, warnings)
 
-    images = extract_product_images(raw_html, page_url)
+    # Captcha/WAF block page detection (no http_status — already navigated)
+    _check_blocked_page(page_type, warnings, metadata, url=page_url)
+
+    images, _img_stats = extract_product_images(raw_html, page_url)
+    images, _img_merged = _merge_structured_images(images, metadata)
+    _img_stats["structured_image_merged"] = _img_merged
+    try:
+        from .telemetry import emit, events
+        from .telemetry.events import IMAGE_FILTER_APPLIED
+
+        emit(IMAGE_FILTER_APPLIED, events.image_filter_applied(**_img_stats))
+    except Exception:  # nosec B110
+        pass
 
     interactables = _budget_filter_interactables(
-        interactables, pruned_tokens, total_budget=budget.total, warnings=warnings
+        interactables,
+        pruned_tokens,
+        total_budget=budget.total,
+        warnings=warnings,
+        pruned_regions=_pruned_regions,
     )
 
     navigation_hints = _build_navigation_hints(interactables, raw_html, page_type)
@@ -792,9 +941,11 @@ async def rebuild_content_only(
 
     # Extract learning data (popped immediately)
     _pruning_result = metadata.pop("_pruning_result", None)
-    _pruning_warnings = metadata.pop("_pruning_warnings", [])
-    warnings = list(cached.warnings) + _pruning_warnings  # don't mutate cached
-    _pruned_regions: set[str] = metadata.pop("_pruned_regions", set())
+    warnings = list(cached.warnings)  # don't mutate cached
+    _pruned_regions = _extract_pruning_metadata(metadata, warnings)
+
+    # Captcha/WAF block page detection
+    _check_blocked_page(page_type, warnings, metadata, url=page_url)
 
     # Template validation (Tier B — template should already exist)
     if template_cache is not None and _pruning_result is not None and _template_key is not None:
@@ -826,7 +977,16 @@ async def rebuild_content_only(
             else:
                 template_cache.record_validation_failure(_template_key)
 
-    images = extract_product_images(raw_html, page_url)
+    images, _img_stats = extract_product_images(raw_html, page_url)
+    images, _img_merged = _merge_structured_images(images, metadata)
+    _img_stats["structured_image_merged"] = _img_merged
+    try:
+        from .telemetry import emit, events
+        from .telemetry.events import IMAGE_FILTER_APPLIED
+
+        emit(IMAGE_FILTER_APPLIED, events.image_filter_applied(**_img_stats))
+    except Exception:  # nosec B110
+        pass
     navigation_hints = _build_navigation_hints(cached.interactables, raw_html, page_type)
 
     # Phase 4.1: Pruned region coherence warning
@@ -899,12 +1059,21 @@ async def rebuild_interactables_only(
     warnings.extend(detect_warnings)
 
     interactables = _budget_filter_interactables(
-        interactables, cached.pruned_tokens, total_budget=total_budget, warnings=warnings
+        interactables,
+        cached.pruned_tokens,
+        total_budget=total_budget,
+        warnings=warnings,
+        pruned_regions=cached.pruned_regions,
     )
 
     raw_html = await session.get_page_html()
     raw_html = await _check_resource_limits(session.page, raw_html)
     page_type = detect_page_type(page_url, raw_html)
+
+    # Captcha/WAF block page detection — shallow copy to avoid mutating cached metadata
+    metadata = dict(cached.metadata)
+    _check_blocked_page(page_type, warnings, metadata, url=page_url)
+
     navigation_hints = _build_navigation_hints(interactables, raw_html, page_type)
 
     # Phase 4.1: Pruned region coherence warning (carry forward from cache)
@@ -927,7 +1096,7 @@ async def rebuild_interactables_only(
         pruned_tokens=cached.pruned_tokens,
         generation_ms=elapsed_ms,
         images=cached.images,
-        metadata=cached.metadata,
+        metadata=metadata,
         warnings=warnings,
         navigation_hints=navigation_hints,
         pruned_regions=cached.pruned_regions,
@@ -1064,7 +1233,7 @@ def _extract_interactables_from_html(raw_html: str) -> list[Interactable]:
                 name = attr_m.group(1).strip()
                 break
         options = re.findall(r"<option[^>]*>(.*?)</option>", inner, re.IGNORECASE | re.DOTALL)
-        options = [re.sub(r"<[^>]+>", "", o).strip() for o in options if o.strip()]
+        options = [_html.unescape(re.sub(r"<[^>]+>", "", o).strip()) for o in options if o.strip()]
         interactables.append(
             Interactable(
                 ref=ref,
@@ -1077,6 +1246,10 @@ def _extract_interactables_from_html(raw_html: str) -> list[Interactable]:
             )
         )
         ref += 1
+
+    # Decode HTML entities in all extracted names
+    for el in interactables:
+        el.name = _html.unescape(el.name).replace("\xa0", " ")
 
     # Deduplicate by (role, name)
     seen: set[tuple[str, str]] = set()
@@ -1133,7 +1306,7 @@ def build_page_map_offline(
 
     # Extract title from HTML
     title_match = re.search(r"<title[^>]*>(.*?)</title>", raw_html, re.IGNORECASE | re.DOTALL)
-    title = title_match.group(1).strip() if title_match else ""
+    title = _html.unescape(title_match.group(1).strip()) if title_match else ""
 
     locale = detect_locale(url)
     budget = compute_token_budget(locale, raw_html, base_pruned=max_pruned_tokens)
@@ -1160,18 +1333,34 @@ def build_page_map_offline(
             budget.total,
         )
 
-    warnings: list[str] = metadata.pop("_pruning_warnings", [])
-    _pruned_regions: set[str] = metadata.pop("_pruned_regions", set())
+    warnings: list[str] = []
+    _pruned_regions = _extract_pruning_metadata(metadata, warnings)
+
+    # Captcha/WAF block page detection
+    _check_blocked_page(page_type, warnings, metadata, url=url)
 
     # Extract interactables from HTML (static parsing)
     interactables = _extract_interactables_from_html(raw_html)
 
     # Extract product images
-    images = extract_product_images(raw_html, url)
+    images, _img_stats = extract_product_images(raw_html, url)
+    images, _img_merged = _merge_structured_images(images, metadata)
+    _img_stats["structured_image_merged"] = _img_merged
+    try:
+        from .telemetry import emit, events
+        from .telemetry.events import IMAGE_FILTER_APPLIED
+
+        emit(IMAGE_FILTER_APPLIED, events.image_filter_applied(**_img_stats))
+    except Exception:  # nosec B110
+        pass
 
     # Budget-aware filtering
     interactables = _budget_filter_interactables(
-        interactables, pruned_tokens, total_budget=budget.total, warnings=warnings
+        interactables,
+        pruned_tokens,
+        total_budget=budget.total,
+        warnings=warnings,
+        pruned_regions=_pruned_regions,
     )
 
     # Navigation hints (after budget filter so refs match)
@@ -1302,20 +1491,38 @@ async def build_page_map_from_snapshot(
 
     _pruning_warnings = structured_meta.pop("_pruning_warnings", [])
     warnings.extend(_pruning_warnings)
+    if structured_meta.pop("_mcg_activated", False):
+        warnings.append("Content extraction used minimum content guarantee; page content may be sparse")
     _pruned_regions: set[str] = structured_meta.pop("_pruned_regions", set())
+
+    # Captcha/WAF block page detection
+    _check_blocked_page(page_type, warnings, structured_meta, url=url)
 
     # Title from metadata or HTML
     title = meta.get("title", "")
     if not title:
         title_match = re.search(r"<title[^>]*>(.*?)</title>", raw_html, re.IGNORECASE | re.DOTALL)
-        title = title_match.group(1).strip() if title_match else ""
+        title = _html.unescape(title_match.group(1).strip()) if title_match else ""
 
     # Extract product images
-    images = extract_product_images(raw_html, url)
+    images, _img_stats = extract_product_images(raw_html, url)
+    images, _img_merged = _merge_structured_images(images, structured_meta)
+    _img_stats["structured_image_merged"] = _img_merged
+    try:
+        from .telemetry import emit, events
+        from .telemetry.events import IMAGE_FILTER_APPLIED
+
+        emit(IMAGE_FILTER_APPLIED, events.image_filter_applied(**_img_stats))
+    except Exception:  # nosec B110
+        pass
 
     # Budget-aware filtering
     interactables = _budget_filter_interactables(
-        interactables, pruned_tokens, total_budget=budget.total, warnings=warnings
+        interactables,
+        pruned_tokens,
+        total_budget=budget.total,
+        warnings=warnings,
+        pruned_regions=_pruned_regions,
     )
 
     # Navigation hints (after budget filter so refs match)
@@ -1418,7 +1625,22 @@ def _build_navigation_hints(
     if page_type == "error":
         return _build_error_hints(interactables)
 
+    # Blocked pages: verify button hint
+    if page_type == "blocked":
+        return _build_blocked_hints(interactables)
+
     return {}
+
+
+def _build_blocked_hints(interactables: list[Interactable]) -> dict:
+    """Verify/retry hints for captcha/WAF block pages."""
+    hints: dict = {}
+    verify_terms = ("verify", "확인", "continue", "retry", "다시 시도")
+    for item in interactables:
+        if any(t in item.name.lower() for t in verify_terms):
+            hints["verify_ref"] = item.ref
+            break
+    return hints
 
 
 def _build_listing_hints(interactables: list[Interactable], raw_html: str) -> dict:
@@ -1536,6 +1758,7 @@ def _budget_filter_interactables(
     pruned_tokens: int,
     total_budget: int = DEFAULT_TOTAL_BUDGET_TOKENS,
     warnings: list[str] | None = None,
+    pruned_regions: set[str] | None = None,
 ) -> list[Interactable]:
     """Filter interactables to fit within the total token budget.
 
@@ -1544,12 +1767,14 @@ def _budget_filter_interactables(
     2. Named buttons in header/navigation/search regions
     3. Tier 1 elements (well-labeled) by region priority
     4. Remaining elements until budget is exhausted
+    5. Table-structural noise (unnamed row/cell/gridcell) — lowest priority
 
     Args:
         interactables: full list of detected interactables
         pruned_tokens: tokens used by pruned_context
         total_budget: total token budget for the entire PageMap prompt
         warnings: if provided, appends a message when elements are dropped
+        pruned_regions: regions removed during pruning (chrome inputs demoted)
 
     Returns:
         Filtered list fitting within budget, renumbered sequentially
@@ -1566,15 +1791,32 @@ def _budget_filter_interactables(
     # Priority buckets
     INPUT_ROLES = {"searchbox", "textbox", "combobox", "checkbox", "radio", "switch", "slider"}
     HIGH_REGIONS = {"header", "navigation", "search"}
+    _CHROME_DEMOTE_ROLES = {"radio", "checkbox", "switch"}
 
     bucket_input: list[Interactable] = []
     bucket_high_region: list[Interactable] = []
     bucket_tier1_main: list[Interactable] = []
     bucket_rest: list[Interactable] = []
+    bucket_table_noise: list[Interactable] = []
+
+    noise_demoted = 0
+    chrome_demoted_roles: list[str] = []
 
     for el in interactables:
-        if el.role in INPUT_ROLES:
-            bucket_input.append(el)
+        _in_pruned = bool(pruned_regions and el.region in pruned_regions)
+
+        # QR-01: Table noise → lowest bucket
+        if _is_table_noise(el.role, el.name):
+            bucket_table_noise.append(el)
+            noise_demoted += 1
+        elif el.role in INPUT_ROLES:
+            # QR-01: Demote chrome inputs in pruned regions
+            if _in_pruned and el.role in _CHROME_DEMOTE_ROLES:
+                bucket_rest.append(el)
+                noise_demoted += 1
+                chrome_demoted_roles.append(el.role)
+            else:
+                bucket_input.append(el)
         elif el.region in HIGH_REGIONS and el.name:
             bucket_high_region.append(el)
         elif el.tier == 1 and el.region == "main":
@@ -1586,7 +1828,7 @@ def _budget_filter_interactables(
     selected: list[Interactable] = []
     current_tokens = 0
 
-    for bucket in [bucket_input, bucket_high_region, bucket_tier1_main, bucket_rest]:
+    for bucket in [bucket_input, bucket_high_region, bucket_tier1_main, bucket_rest, bucket_table_noise]:
         for el in bucket:
             el_tokens = count_tokens_approx(str(el))
             if current_tokens + el_tokens > available:
@@ -1617,5 +1859,26 @@ def _budget_filter_interactables(
         )
         if warnings is not None:
             warnings.append(f"{len(selected)} of {len(interactables)} interactable elements shown (token budget)")
+
+    if noise_demoted:
+        logger.info("Noise demotion: %d table-structural/chrome elements deprioritized", noise_demoted)
+        try:
+            from collections import Counter
+
+            from .telemetry import emit, events
+            from .telemetry.events import NOISE_FILTER_APPLIED
+
+            noise_counter = Counter(el.role for el in bucket_table_noise)
+            noise_counter.update(chrome_demoted_roles)
+            emit(
+                NOISE_FILTER_APPLIED,
+                events.noise_filter_applied(
+                    total_interactables=len(interactables),
+                    noise_demoted=noise_demoted,
+                    noise_roles=dict(noise_counter),
+                ),
+            )
+        except Exception:  # nosec B110
+            pass
 
     return selected

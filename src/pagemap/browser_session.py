@@ -28,6 +28,8 @@ from playwright.async_api import (
     async_playwright,
 )
 
+from .errors import BrowserError
+from .i18n import accept_language_for_url
 from .interactive_detector import _CDP_AX_TREE_TIMEOUT
 
 logger = logging.getLogger(__name__)
@@ -46,7 +48,7 @@ BLOCKED_URL_SCHEMES = (
     "blob:",
     "data:",
 )
-DEFAULT_LOCALE = "ko-KR"
+DEFAULT_LOCALE = "en-US"
 
 _MAX_DIALOG_BUFFER = 10
 
@@ -65,6 +67,15 @@ DEFAULT_USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/120.0.0.0 Safari/537.36"
 )
+
+try:
+    from importlib.metadata import version as _pkg_version
+
+    _PAGEMAP_VERSION = _pkg_version("retio-pagemap")
+except Exception:
+    _PAGEMAP_VERSION = "unknown"
+
+BOT_USER_AGENT = f"PageMapBot/{_PAGEMAP_VERSION} (+https://github.com/Retio-ai/pagemap)"
 
 
 def _cdp_ax_nodes_to_tree(nodes: list[dict]) -> dict | None:
@@ -145,6 +156,7 @@ class NavigationResult:
 
     strategy: str  # "networkidle" | "load+settle" | "load"
     settle_metrics: dict | None  # DOM settle: {waited_ms, mutations, reason}
+    http_status: int | None = None  # HTTP response status code
 
 
 _BROWSER_DEAD_PATTERNS = (
@@ -208,6 +220,36 @@ async def _auto_install_chromium() -> bool:
         return False
 
 
+def chromium_launch_args(config: BrowserConfig) -> list[str]:
+    """Return hardened Chromium launch arguments.
+
+    Shared by both ``BrowserSession`` and ``BrowserPool`` to avoid
+    duplicating the argument list (DRY).
+    """
+    return [
+        "--disable-blink-features=AutomationControlled",
+        f"--lang={config.locale}",
+        "--disable-extensions",
+        "--disable-plugins",
+        "--disable-dev-shm-usage",
+        "--disable-background-networking",
+        "--disable-sync",
+        "--disable-gpu",
+        "--no-first-run",
+        "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+        "--disable-features=ServiceWorker,WebRtcHideLocalIpsWithMdns",
+        "--deny-permission-prompts",
+        "--disable-breakpad",
+        "--no-pings",
+        "--disable-domain-reliability",
+        "--disable-component-update",
+        "--disable-client-side-phishing-detection",
+        "--disable-external-intent-requests",
+        "--noerrdialogs",
+        "--disable-prompt-on-repost",
+    ]
+
+
 class BrowserSession:
     """Manages a Playwright browser session with CDP access."""
 
@@ -221,6 +263,7 @@ class BrowserSession:
         self._pending_dialogs: list[DialogInfo] = []
         self._pending_new_page: Page | None = None
         self._batch_pages: set[Page] = set()
+        self._owns_browser: bool = True  # False when created via start_from_pool()
 
     @property
     def page(self) -> Page:
@@ -233,6 +276,13 @@ class BrowserSession:
         if self._context is None:
             raise RuntimeError("Browser session not started.")
         return self._context
+
+    @property
+    def tab_count(self) -> int:
+        """Number of open pages (tabs) in the browser context."""
+        if self._context is None:
+            return 0
+        return len(self._context.pages)
 
     async def is_alive(self, timeout: float = 5.0) -> bool:
         """Check if the browser process is responsive (2-stage health check)."""
@@ -250,36 +300,7 @@ class BrowserSession:
 
     def _chromium_launch_args(self) -> list[str]:
         """Return hardened Chromium launch arguments."""
-        return [
-            "--disable-blink-features=AutomationControlled",
-            f"--lang={self.config.locale}",
-            # Core isolation
-            "--disable-extensions",
-            "--disable-plugins",
-            "--disable-dev-shm-usage",
-            "--disable-background-networking",
-            "--disable-sync",
-            "--disable-gpu",
-            "--no-first-run",
-            # Popups handled by context.on("page") → auto-switch
-            # S3: WebRTC IP leak prevention
-            "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
-            # S3: Disable dangerous features (single flag — last wins)
-            "--disable-features=ServiceWorker,WebRtcHideLocalIpsWithMdns",
-            # S3: Auto-deny permission prompts (camera, geo, mic, etc.)
-            "--deny-permission-prompts",
-            # S3: Suppress crash/telemetry outbound calls
-            "--disable-breakpad",
-            "--no-pings",
-            "--disable-domain-reliability",
-            "--disable-component-update",
-            "--disable-client-side-phishing-detection",
-            # S3: Block external app/intent deep links
-            "--disable-external-intent-requests",
-            # S3: No error/repost dialogs in headless
-            "--noerrdialogs",
-            "--disable-prompt-on-repost",
-        ]
+        return chromium_launch_args(self.config)
 
     async def _launch_browser(self) -> None:
         """Launch Chromium, auto-installing on first 'executable not found' error."""
@@ -297,17 +318,17 @@ class BrowserSession:
                         args=args,
                     )
                 else:
-                    raise RuntimeError(
+                    raise BrowserError(
                         "Chromium is not installed and auto-install failed. Please run: playwright install chromium"
                     ) from exc
             else:
                 raise
 
-    async def start(self) -> None:
-        """Launch browser and create initial page."""
-        self._playwright = await async_playwright().start()
-        await self._launch_browser()
-        self._context = await self._browser.new_context(
+    async def _create_context(self, browser: Browser) -> None:
+        """Create BrowserContext + Page + event handlers on given browser."""
+        # D1: isolation verified — accept_downloads=False, service_workers="block",
+        # permissions=[] ensure each context is sandboxed.
+        self._context = await browser.new_context(
             viewport={
                 "width": self.config.viewport_width,
                 "height": self.config.viewport_height,
@@ -320,6 +341,8 @@ class BrowserSession:
             permissions=[],
             # S3: Prevent file downloads
             accept_downloads=False,
+            # Default Accept-Language (overridden per-URL in navigate())
+            extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
         )
         # Auto-handle JS dialogs (alert/confirm/prompt/beforeunload)
         self._context.on("dialog", self._on_dialog)
@@ -331,7 +354,23 @@ class BrowserSession:
         # S3: Block dangerous URL schemes at context level (covers all pages)
         await self._install_scheme_block_route()
 
+    async def start(self) -> None:
+        """Launch browser and create initial page."""
+        self._playwright = await async_playwright().start()
+        await self._launch_browser()
+        await self._create_context(self._browser)
         logger.info("Browser session started (headless=%s)", self.config.headless)
+
+    async def start_from_pool(self, browser: Browser) -> None:
+        """Start session using a shared browser (pool mode).
+
+        The browser is owned by the pool — stop() will only close the
+        context, not the browser or playwright instance.
+        """
+        self._owns_browser = False
+        self._browser = browser
+        await self._create_context(browser)
+        logger.info("Browser session started from pool (headless=%s)", self.config.headless)
 
     async def _install_scheme_block_route(self) -> None:
         """Block dangerous URL schemes at context level (covers all pages).
@@ -389,7 +428,11 @@ class BrowserSession:
         logger.info("SSRF route guard installed on browser context")
 
     async def stop(self) -> None:
-        """Close browser and clean up. Safe to call on a crashed browser."""
+        """Close browser and clean up. Safe to call on a crashed browser.
+
+        Pool mode (_owns_browser=False): closes context only, leaves browser/playwright alone.
+        Standalone mode (_owns_browser=True): closes everything (existing behaviour).
+        """
         # Clean up batch pages first
         for page in list(self._batch_pages):
             if not page.is_closed():
@@ -401,19 +444,32 @@ class BrowserSession:
             with suppress(Exception):
                 await self._cdp_session.detach()
             self._cdp_session = None
-        if self._browser:
+
+        # Close context (common to both modes)
+        if self._context:
             with suppress(Exception):
-                await self._browser.close()
-            self._browser = None
-        if self._playwright:
-            with suppress(Exception):
-                await self._playwright.stop()
-            self._playwright = None
+                await self._context.close()
+            self._context = None
+
         self._page = None
-        self._context = None
         self._pending_dialogs = []
         self._pending_new_page = None
-        logger.info("Browser session stopped")
+
+        if self._owns_browser:
+            # Standalone mode: close browser + playwright
+            if self._browser:
+                with suppress(Exception):
+                    await self._browser.close()
+                self._browser = None
+            if self._playwright:
+                with suppress(Exception):
+                    await self._playwright.stop()
+                self._playwright = None
+        else:
+            # Pool mode: release reference only, pool owns the browser
+            self._browser = None
+
+        logger.info("Browser session stopped (owned_browser=%s)", self._owns_browser)
 
     async def __aenter__(self) -> BrowserSession:
         await self.start()
@@ -542,16 +598,26 @@ class BrowserSession:
             if current_host and new_host and current_host != new_host:
                 await self.context.clear_cookies()
 
+        # Set Accept-Language matching the target site's locale.
+        # NOTE: set_extra_http_headers() REPLACES all extra headers.
+        # If other extra headers are added in the future, merge them here.
+        accept_lang = accept_language_for_url(url)
+        await self.context.set_extra_http_headers({"Accept-Language": accept_lang})
+
         strategy = self.config.wait_strategy
 
         if strategy == "networkidle":
             # Legacy path
-            await self.page.goto(url, wait_until="networkidle", timeout=self.config.timeout_ms)
+            response = await self.page.goto(url, wait_until="networkidle", timeout=self.config.timeout_ms)
             settle = await self.wait_for_dom_settle()
-            return NavigationResult(strategy="networkidle", settle_metrics=settle)
+            return NavigationResult(
+                strategy="networkidle",
+                settle_metrics=settle,
+                http_status=response.status if response else None,
+            )
 
         # Step 1: goto with "load" (window load event)
-        await self.page.goto(url, wait_until="load", timeout=self.config.timeout_ms)
+        response = await self.page.goto(url, wait_until="load", timeout=self.config.timeout_ms)
 
         # Step 2: networkidle attempt (hybrid only, asyncio.wait for safe cancellation)
         used_strategy = "load"
@@ -583,7 +649,11 @@ class BrowserSession:
 
         # Step 3: DOM settle (always)
         settle = await self.wait_for_dom_settle()
-        return NavigationResult(strategy=used_strategy, settle_metrics=settle)
+        return NavigationResult(
+            strategy=used_strategy,
+            settle_metrics=settle,
+            http_status=response.status if response else None,
+        )
 
     async def load_html(self, html: str, base_url: str = "about:blank") -> None:
         """Load raw HTML content directly (offline mode)."""

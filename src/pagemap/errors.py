@@ -33,3 +33,28 @@ class PageMapBuildError(PageMapError):
 
 class ResourceExhaustionError(PageMapError):
     """Page exceeds resource limits (DOM nodes, HTML size, etc.)."""
+
+
+class ApiKeyError(PageMapError):
+    """API key validation failure (invalid, expired, or revoked)."""
+
+    def __init__(self, message: str, *, client_id: str = "") -> None:
+        super().__init__(message)
+        self.client_id = client_id
+
+
+class RateLimitError(PageMapError):
+    """Request rate limit exceeded."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        retry_after: float = 0.0,
+        limit: int = 0,
+        remaining: int = 0,
+    ) -> None:
+        super().__init__(message)
+        self.retry_after = retry_after
+        self.limit = limit
+        self.remaining = remaining

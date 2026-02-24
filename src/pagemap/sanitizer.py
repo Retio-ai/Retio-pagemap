@@ -14,6 +14,7 @@ escape sequences. This module provides multi-layer defense:
 
 from __future__ import annotations
 
+import html as _html
 import re
 import secrets
 from datetime import UTC, datetime
@@ -55,6 +56,12 @@ _MARKDOWN_AUTOLINK_DANGEROUS_RE = re.compile(
 )
 
 
+def _unescape_entities(text: str) -> str:
+    """Decode HTML entities and normalize non-breaking spaces."""
+    text = _html.unescape(text)
+    return text.replace("\xa0", " ")
+
+
 def sanitize_text(text: str, max_len: int = 256) -> str:
     """Sanitize a short text field (element names, titles, metadata values).
 
@@ -66,6 +73,9 @@ def sanitize_text(text: str, max_len: int = 256) -> str:
     """
     if not text:
         return text
+
+    # Decode HTML entities first (before all security checks)
+    text = _unescape_entities(text)
 
     # Remove ANSI escapes
     text = _ANSI_ESCAPE_RE.sub("", text)
@@ -105,6 +115,9 @@ def sanitize_content_block(text: str, max_len: int = 50_000) -> str:
     if not text:
         return text
 
+    # Decode HTML entities first (before all security checks)
+    text = _unescape_entities(text)
+
     # Remove ANSI escapes
     text = _ANSI_ESCAPE_RE.sub("", text)
 
@@ -142,5 +155,5 @@ def add_content_boundary(text: str, source_url: str) -> str:
 
 
 def _escape_attr(value: str) -> str:
-    """Escape a string for use in an XML-like attribute."""
-    return value.replace("&", "&amp;").replace('"', "&quot;").replace("<", "&lt;").replace(">", "&gt;")
+    """Escape a string for use in a prompt boundary attribute (not XML)."""
+    return value.replace('"', "&quot;").replace("<", "&lt;").replace(">", "&gt;")

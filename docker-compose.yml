@@ -6,3 +6,23 @@ services:
         PAGEMAP_VERSION: "0.5.2"
     image: retio1001/pagemap:latest
     stdin_open: true
+
+  pagemap-http:
+    build:
+      context: .
+      args:
+        PAGEMAP_VERSION: "0.5.2"
+    image: retio1001/pagemap:latest
+    command: ["--transport", "http", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "8000:8000"
+    environment:
+      PAGEMAP_MAX_CONTEXTS: "5"
+      PAGEMAP_DRAIN_TIMEOUT: "30"
+    stop_grace_period: 35s
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/readyz')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s

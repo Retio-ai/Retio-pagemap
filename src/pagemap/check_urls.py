@@ -27,6 +27,7 @@ from urllib.parse import urlparse
 
 from .collect import _count_tokens_approx, _validate_snapshot
 from .collect_sim import SimulatorController, load_config
+from .page_classifier import ANTI_BOT_KEYWORDS
 
 logger = logging.getLogger(__name__)
 
@@ -154,17 +155,7 @@ _DUMMY_ID_RE = re.compile(r"1234567\d{3}|123456[789]$")
 
 # ── Anti-bot / expired patterns ──────────────────────────────────────────────
 
-_ANTI_BOT_PATTERNS: frozenset[str] = frozenset(
-    {
-        "errors.edgesuite.net",
-        "akamai",
-        "access denied",
-        "captcha",
-        "challenge-platform",
-        "cf-browser-verification",
-        "just a moment",
-    }
-)
+_ANTI_BOT_PATTERNS: frozenset[str] = frozenset(ANTI_BOT_KEYWORDS)
 
 _EXPIRED_PATTERNS: frozenset[str] = frozenset(
     {

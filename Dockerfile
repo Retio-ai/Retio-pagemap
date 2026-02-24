@@ -1,6 +1,6 @@
 # Stage 1: uv로 패키지 설치
 FROM python:3.14-slim-bookworm AS builder
-ARG PAGEMAP_VERSION=0.5.2
+ARG PAGEMAP_VERSION=0.7.0
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 RUN uv venv /opt/pagemap && \
     uv pip install --python /opt/pagemap/bin/python \
@@ -21,5 +21,8 @@ WORKDIR /home/pagemap
 
 # MCP Registry 소유권 검증용 OCI 라벨
 LABEL io.modelcontextprotocol.server.name="io.github.Retio-ai/pagemap"
+
+EXPOSE 8000
+STOPSIGNAL SIGTERM
 
 ENTRYPOINT ["retio-pagemap"]

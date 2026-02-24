@@ -167,7 +167,7 @@ class TestOriginalPriceExtraction:
         )
         metadata = {"name": "테스트 상품", "price": 5000, "currency": "KRW"}
         result = _compress_for_product(html, max_tokens=500, metadata=metadata)
-        assert "원가" in result
+        assert "Original price" in result
         assert "45,000" in result
 
     def test_no_original_price_when_same(self):
@@ -196,7 +196,7 @@ class TestOriginalPriceExtraction:
             "currency": "KRW",
         }
         result = _compress_for_product(html, max_tokens=500, metadata=metadata)
-        assert "원가" in result
+        assert "Original price" in result
         assert "45,000" in result
 
     def test_en_original_price(self):
@@ -280,11 +280,11 @@ class TestBackwardCompatibility:
             "brand": "테스트 브랜드",
         }
         result = _compress_for_product("<html><body></body></html>", max_tokens=500, metadata=metadata)
-        assert "제목: 테스트 상품" in result
+        assert "Title: 테스트 상품" in result
         assert "29,000" in result
-        assert "평점: 4.5" in result
+        assert "Rating: 4.5" in result
         assert "100" in result
-        assert "브랜드: 테스트 브랜드" in result
+        assert "Brand: 테스트 브랜드" in result
 
     def test_no_metadata_fallback(self):
         """Without metadata, regex fallback extracts info from HTML."""
