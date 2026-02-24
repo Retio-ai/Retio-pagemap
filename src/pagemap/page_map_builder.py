@@ -412,7 +412,10 @@ DOMAIN_SCHEMA_MAP: dict[str, str] = {
     # Non-ecommerce
     "news.naver.com": "NewsArticle",
     "bbc.com": "NewsArticle",
-    "ko.wikipedia.org": "WikiArticle",
+    "wikipedia.org": "WikiArticle",
+    "youtube.com": "VideoObject",
+    "youtu.be": "VideoObject",
+    "vimeo.com": "VideoObject",
     "github.com": "SaaSPage",
     "gov.kr": "GovernmentPage",
 }
@@ -484,6 +487,7 @@ _JSONLD_TYPE_TO_SCHEMA: dict[str, str] = {
     "AutoRepair": "LocalBusiness",
     "Dentist": "LocalBusiness",
     "RealEstateAgent": "LocalBusiness",
+    "VideoObject": "VideoObject",
 }
 
 

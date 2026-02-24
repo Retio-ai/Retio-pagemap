@@ -2572,7 +2572,6 @@ def _parse_server_args(argv: list[str] | None = None) -> argparse.Namespace:
     """
     parser = argparse.ArgumentParser(
         description="PageMap MCP server",
-        add_help=False,
     )
     parser.add_argument(
         "--allow-local",
@@ -2805,7 +2804,7 @@ async def _run_http_server(
             logger.info("HTTP mode: shutdown complete")
 
 
-def main():
+def main(argv: list[str] | None = None):
     """Entry point for the MCP server."""
     import atexit
     import signal
@@ -2820,7 +2819,7 @@ def main():
         _require_tls, \
         _db_path
 
-    args = _parse_server_args(sys.argv[1:])
+    args = _parse_server_args(argv if argv is not None else sys.argv[1:])
     _transport_mode = args.transport
     _allow_local = args.allow_local
     _ignore_robots = args.ignore_robots

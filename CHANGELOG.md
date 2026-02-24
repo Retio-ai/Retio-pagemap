@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-02-24
+
+### Added
+
+- **`video` page type** — New page classifier signals for YouTube (`youtube.com/watch`, `youtu.be`), Vimeo, and generic video pages. URL signals (30pts), `og:type="video.*"` meta signal (25pts), DOM signal (`<video>`, `ytd-player`), JSON-LD `VideoObject` signal (40pts). Threshold 20
+- **VideoObject JSON-LD metadata parser** — `_parse_json_ld_video()` extracts name, description, duration, upload_date, channel (from author field), thumbnail_url. `interactionStatistic` parsing: WatchAction→view_count, LikeAction→like_count, CommentAction→comment_count, DislikeAction→dislike_count. Registered in `_JSONLD_PARSERS`, `_OG_FIELD_MAP`, `_ITEMPROP_FIELD_MAP`
+- **Video compressor** — `_compress_for_video()` formats metadata with K/M suffix for large numbers (`1.5M views`, `25.0K likes`). Budget-aware description inclusion. Text-line fallback when metadata is sparse
+- **DOM price fallback for Product schema** — `_extract_price_from_dom_chunks()` scans HtmlChunk attributes for Amazon price patterns (`a-price`, `a-offscreen` classes) and currency symbol regex (`$€£¥₩` + digits). Shipping/handling false positive filtering. Called when JSON-LD/itemprop/OG sources lack price
+- **Product compressor price fallback** — Phase 4 scans `pruned_html` for `class="...price..."` patterns when metadata has no price
+- **48 new tests** — `test_qr_v070_improvements.py` covering AOM article exemption, video page classification, VideoObject metadata, video compression, Product content rescue, DOM price fallback
+
+### Changed
+
+- **Article compressor → budget-based** — Replaced fixed "title + max 2 paragraphs" with `_calibrate_chars_per_token()` budget-based extraction. 3-phase approach: metadata → chunk-based structural extraction (heading/body) → text-line fallback. Outputs richer content for article pages (Wikipedia 84→400+ tok)
+- **AOM filter: Readability-inspired article `<p>` exemption** — `<p>` tags inside `<article>`/`<main>` with `non_link_text > 80` chars survive moderate link-density penalty (Wikipedia reference links `[1][2]` no longer cause paragraph removal). High density (>0.8) still penalized. `<div>`, `<li>` and short text retain existing behavior
+- **Product schema content rescue** — AOM content rescue now triggers for `schema_name == "Product"` regardless of remaining text length (previously required `< 100 chars`). Restores link-density-removed elements containing price patterns
+- **Wikipedia domain mapping generalized** — `DOMAIN_SCHEMA_MAP` changed from `"ko.wikipedia.org"` to `"wikipedia.org"` (covers all language variants: en, ko, ja, fr, etc.)
+- **Schema override dispatch** — `_SCHEMA_OVERRIDES` frozenset allows WikiArticle schema to use wiki compressor even when page_type is `article`
+- **Video domain mappings** — `youtube.com`, `youtu.be`, `vimeo.com` → `VideoObject` in `DOMAIN_SCHEMA_MAP` and `_JSONLD_TYPE_TO_SCHEMA`
+- **`pagemap serve` argument forwarding** — `parse_args()` → `parse_known_args()`, remaining args forwarded to server via `_server_argv`. `server.main(argv=)` accepts explicit argv parameter. `pagemap serve --transport http --port 8000` now works
+- **`--help` epilog fix** — Removed duplicate `build` in epilog examples (`%(prog)s build --url` → `%(prog)s --url`, since `%(prog)s` already includes `build` in subparser context)
+- **`retio-pagemap --help` restored** — Removed `add_help=False` from `_parse_server_args()` so MCP server entry point shows usage information
+- **README version updated** — Deployment Status table: `v0.5.2` → `v0.7.0`
+- 3983 → 4014 tests passing (+31 net, +48 new, -17 test updates)
+
+### Fixed
+
+- **session_manager pool.acquire resource leak** — Added try/except around `install_ssrf_route_guard()` after `pool.acquire()`. On exception, `pool.release()` is called to prevent semaphore slot permanent occupation during long-running HTTP deployments
+- **Card detection entity leak** — Added `_html.unescape(part_text)` in `_detect_cards_from_chunks()` Strategy 1. Fixes `&amp;` entities leaking into agent output (exposed by Product content rescue expansion, e.g., "H&amp;M" → "H&M")
+
 ## [0.7.0] - 2026-02-24
 
 ### Added
@@ -63,7 +93,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Tests
 
-- **5 new test suites** — `test_cli_smoke.py` (CLI 엔드투엔드), `test_fuzz.py` (퍼징), `test_output_quality.py` (출력 품질 검증), `test_pipeline_integration.py` (파이프라인 통합), `test_golden_sites.py` (골든 사이트 entity 검증). +614 tests (3369→3983)
+- **5 new test suites** — `test_cli_smoke.py` (CLI end-to-end), `test_fuzz.py` (fuzzing), `test_output_quality.py` (output quality validation), `test_pipeline_integration.py` (pipeline integration), `test_golden_sites.py` (golden site entity verification). +614 tests (3369→3983)
 
 ## [0.6.0] - 2026-02-23
 
@@ -266,21 +296,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Applied ruff format to entire codebase
-- Excluded internal config.yaml from public release
+- Excluded development config from public release
 
 ## [0.1.2] - 2026-02-17
 
 ### Fixed
 
-- **sdist에 MCP Registry 인증 토큰 포함 문제 수정** (`.mcpregistry_github_token`, `.mcpregistry_registry_token`)
-- sdist exclude 목록 대폭 강화: `todo/`, `.playwright-mcp/`, `.mcpregistry_*`, `.env`, `README.md`(내부용) 등 제외
-- `.gitignore`에 `.mcpregistry_*`, `.playwright-mcp/` 추가
+- **Credentials accidentally included in sdist** — MCP Registry auth token files removed from distribution
+- sdist exclude list hardened: `todo/`, `.playwright-mcp/`, credential files, `.env`, internal README excluded
+- `.gitignore` updated with credential file patterns
 
 ### Changed
 
-- `pyproject.toml` readme를 `README.md`(내부용) → `README_PUBLIC.md`(공개용)로 수정 — v0.1.0~v0.1.1에서 내부용 README가 PyPI 패키지 설명에 노출되던 문제 해결
+- `pyproject.toml` readme target changed from `README.md` (private) → `README_PUBLIC.md` (public) — fixes PyPI page showing internal README in v0.1.0~v0.1.1
 
-## [0.1.1] - 2026-02-17 (yanked — sdist에 인증 토큰 포함)
+## [0.1.1] - 2026-02-17 (yanked — credentials included in sdist)
 
 ### Added
 
@@ -290,10 +320,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Known Issues
 
-- sdist에 `.mcpregistry_github_token`, `.mcpregistry_registry_token` 포함됨 (v0.1.2에서 수정)
-- `pyproject.toml` readme가 내부용 `README.md`를 가리키고 있어 PyPI 페이지에 내부 README 노출됨
+- Credential files accidentally included in sdist (fixed in v0.1.2)
+- `pyproject.toml` readme pointed to internal README, exposing it on PyPI page
 
-## [0.1.0] - 2026-02-16
+## [0.1.0] - 2026-02-16 (yanked — credentials included in sdist)
 
 ### Added
 

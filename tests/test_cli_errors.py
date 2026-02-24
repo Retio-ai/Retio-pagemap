@@ -314,11 +314,11 @@ class TestMainTopLevelHandler:
     def test_keyboard_interrupt_exit_130(self, capsys):
         from pagemap.cli import main
 
-        with patch("pagemap.cli.argparse.ArgumentParser.parse_args") as mock_parse:
+        with patch("pagemap.cli.argparse.ArgumentParser.parse_known_args") as mock_parse:
             mock_args = MagicMock()
             mock_args.command = "build"
             mock_args.verbose = False
-            mock_parse.return_value = mock_args
+            mock_parse.return_value = (mock_args, [])
 
             # Inject commands dict that raises KeyboardInterrupt
             with (
@@ -337,11 +337,11 @@ class TestMainTopLevelHandler:
     def test_system_exit_preserved(self):
         from pagemap.cli import main
 
-        with patch("pagemap.cli.argparse.ArgumentParser.parse_args") as mock_parse:
+        with patch("pagemap.cli.argparse.ArgumentParser.parse_known_args") as mock_parse:
             mock_args = MagicMock()
             mock_args.command = "build"
             mock_args.verbose = False
-            mock_parse.return_value = mock_args
+            mock_parse.return_value = (mock_args, [])
 
             with (
                 patch("pagemap.cli.cmd_build", side_effect=SystemExit(42)),
@@ -355,11 +355,11 @@ class TestMainTopLevelHandler:
     def test_generic_exception_exit_1(self, capsys):
         from pagemap.cli import main
 
-        with patch("pagemap.cli.argparse.ArgumentParser.parse_args") as mock_parse:
+        with patch("pagemap.cli.argparse.ArgumentParser.parse_known_args") as mock_parse:
             mock_args = MagicMock()
             mock_args.command = "build"
             mock_args.verbose = False
-            mock_parse.return_value = mock_args
+            mock_parse.return_value = (mock_args, [])
 
             with (
                 patch("pagemap.cli.cmd_build", side_effect=RuntimeError("unexpected crash")),
@@ -377,11 +377,11 @@ class TestMainTopLevelHandler:
     def test_verbose_shows_traceback(self, capsys):
         from pagemap.cli import main
 
-        with patch("pagemap.cli.argparse.ArgumentParser.parse_args") as mock_parse:
+        with patch("pagemap.cli.argparse.ArgumentParser.parse_known_args") as mock_parse:
             mock_args = MagicMock()
             mock_args.command = "build"
             mock_args.verbose = True
-            mock_parse.return_value = mock_args
+            mock_parse.return_value = (mock_args, [])
 
             with (
                 patch("pagemap.cli.cmd_build", side_effect=RuntimeError("unexpected crash")),
@@ -400,11 +400,11 @@ class TestMainTopLevelHandler:
     def test_ssrf_error_exit_1(self, capsys):
         from pagemap.cli import main
 
-        with patch("pagemap.cli.argparse.ArgumentParser.parse_args") as mock_parse:
+        with patch("pagemap.cli.argparse.ArgumentParser.parse_known_args") as mock_parse:
             mock_args = MagicMock()
             mock_args.command = "build"
             mock_args.verbose = False
-            mock_parse.return_value = mock_args
+            mock_parse.return_value = (mock_args, [])
 
             with (
                 patch("pagemap.cli.cmd_build", side_effect=SSRFError("blocked url")),

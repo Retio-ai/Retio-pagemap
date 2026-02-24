@@ -10,6 +10,7 @@ Zero regex, zero lxml, zero I/O -- json.loads + dict lookups only.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable
 from typing import Any
 
@@ -266,6 +267,94 @@ def _parse_json_ld_news_article(parsed_data: list[Any]) -> dict[str, Any]:
         img_url = _extract_image_url(article)
         if img_url:
             result["image_url"] = img_url
+
+        return result
+    return {}
+
+
+# --- JSON-LD parsing: VideoObject ---
+
+_VIDEO_TYPES = ("VideoObject",)
+
+_INTERACTION_TYPE_MAP: dict[str, str] = {
+    "WatchAction": "view_count",
+    "LikeAction": "like_count",
+    "CommentAction": "comment_count",
+    "DislikeAction": "dislike_count",
+}
+
+
+def _parse_interaction_statistics(stats: Any) -> dict[str, int]:
+    """Parse interactionStatistic array from VideoObject."""
+    result: dict[str, int] = {}
+    if not isinstance(stats, list):
+        stats = [stats] if isinstance(stats, dict) else []
+    for stat in stats:
+        if not isinstance(stat, dict):
+            continue
+        interaction_type = stat.get("interactionType")
+        if isinstance(interaction_type, dict):
+            interaction_type = interaction_type.get("@type", "")
+        elif isinstance(interaction_type, str):
+            # Strip schema.org URL prefix if present
+            interaction_type = interaction_type.rsplit("/", 1)[-1]
+        else:
+            continue
+        field = _INTERACTION_TYPE_MAP.get(interaction_type)
+        if field:
+            count = _to_int(stat.get("userInteractionCount"))
+            if count is not None:
+                result[field] = count
+    return result
+
+
+def _parse_json_ld_video(parsed_data: list[Any]) -> dict[str, Any]:
+    """Extract VideoObject fields from pre-parsed JSON-LD data.
+
+    Based on Google Video structured data spec:
+    Required: name, thumbnailUrl, uploadDate
+    Recommended: description, duration, contentUrl, embedUrl
+    """
+    for data in parsed_data:
+        video = _find_type_in_jsonld(data, _VIDEO_TYPES)
+        if not video:
+            continue
+
+        result: dict[str, Any] = {}
+
+        if video.get("name"):
+            result["name"] = sanitize_text(str(video["name"]).strip(), max_len=256)
+
+        if video.get("description"):
+            result["description"] = sanitize_text(str(video["description"]).strip(), max_len=500)
+
+        if video.get("uploadDate"):
+            result["upload_date"] = str(video["uploadDate"])
+
+        if video.get("duration"):
+            result["duration"] = str(video["duration"])
+
+        # Channel from author (Person or Organization)
+        channel = _extract_person_or_org_name(video.get("author"))
+        if channel:
+            result["channel"] = channel
+
+        # Interaction statistics (views, likes, comments)
+        stats = video.get("interactionStatistic")
+        if stats:
+            result.update(_parse_interaction_statistics(stats))
+
+        # Thumbnail URL
+        thumb = video.get("thumbnailUrl")
+        if isinstance(thumb, list):
+            thumb = thumb[0] if thumb else None
+        url = _is_valid_url(thumb)
+        if url:
+            result["thumbnail_url"] = url
+
+        img_url = _extract_image_url(video)
+        if img_url and "thumbnail_url" not in result:
+            result["thumbnail_url"] = img_url
 
         return result
     return {}
@@ -641,6 +730,11 @@ _ITEMPROP_FIELD_MAP: dict[str, dict[str, str]] = {
         "telephone": "telephone",
         "priceRange": "price_range",
     },
+    "VideoObject": {
+        "name": "name",
+        "uploadDate": "upload_date",
+        "duration": "duration",
+    },
 }
 
 
@@ -706,6 +800,12 @@ _OG_FIELD_MAP: dict[str, dict[str, str]] = {
         "og:title": "title",
         "og:description": "summary",
     },
+    "VideoObject": {
+        "og:title": "name",
+        "og:description": "description",
+        "og:image": "thumbnail_url",
+        "og:site_name": "channel",
+    },
 }
 
 
@@ -747,7 +847,48 @@ _JSONLD_PARSERS: dict[str, Callable[[list[Any]], dict[str, Any]]] = {
     "FAQPage": _parse_json_ld_faq_page,
     "Event": _parse_json_ld_event,
     "LocalBusiness": _parse_json_ld_local_business,
+    "VideoObject": _parse_json_ld_video,
 }
+
+
+# --- DOM-based price fallback for Product ---
+
+_DOM_PRICE_RE = re.compile(
+    r"(?:₩|원|\$|€|£|¥|₩)\s*[\d,]+(?:\.\d{2})?|\d[\d,]+(?:\.\d{2})?\s*(?:원|円)",
+)
+_SHIPPING_KEYWORDS = re.compile(r"(?:shipping|handling|delivery|배송|운임)", re.IGNORECASE)
+
+
+def _extract_price_from_dom_chunks(heading_chunks: list[HtmlChunk]) -> float | None:
+    """Extract price from DOM chunks using class/text pattern matching.
+
+    Checks for Amazon-style a-price / a-offscreen classes, then falls back
+    to price pattern in text content.
+    """
+    candidates: list[tuple[float, bool]] = []  # (price, is_price_class)
+    for chunk in heading_chunks:
+        cls = chunk.attrs.get("class", "")
+        chunk_id = chunk.attrs.get("id", "")
+        text = chunk.text.strip()
+        if not text:
+            continue
+        # Skip shipping/handling prices
+        combined = f"{cls} {chunk_id} {text}"
+        if _SHIPPING_KEYWORDS.search(combined):
+            continue
+        # Priority: elements with price-related class names
+        is_price_class = any(kw in cls.lower() or kw in chunk_id.lower() for kw in ("a-price", "a-offscreen", "price"))
+        match = _DOM_PRICE_RE.search(text)
+        if match:
+            val = _to_float(re.sub(r"[^\d.,]", "", match.group()))
+            if val is not None and val > 0:
+                candidates.append((val, is_price_class))
+    # Prefer price-class matches
+    price_class_candidates = [p for p, is_cls in candidates if is_cls]
+    if price_class_candidates:
+        return price_class_candidates[0]
+    all_candidates = [p for p, _ in candidates]
+    return all_candidates[0] if all_candidates else None
 
 
 # --- Public API ---
@@ -819,6 +960,12 @@ def extract_metadata(
         itemlist_items = _parse_json_ld_itemlist(parsed_data)
         if itemlist_items:
             result["items"] = itemlist_items
+
+    # DOM price fallback for Product schema
+    if schema_name == "Product" and "price" not in result:
+        dom_price = _extract_price_from_dom_chunks(heading_chunks)
+        if dom_price is not None:
+            result["price"] = dom_price
 
     # Attach breadcrumbs if found
     if breadcrumbs:

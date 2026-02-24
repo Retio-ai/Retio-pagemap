@@ -38,6 +38,7 @@ class SchemaName(StrEnum):
     FAQ_PAGE = "FAQPage"
     EVENT = "Event"
     LOCAL_BUSINESS = "LocalBusiness"
+    VIDEO_OBJECT = "VideoObject"
     GENERIC = "Generic"
 
 
@@ -59,6 +60,7 @@ class PageType(StrEnum):
     ERROR = "error"
     DOCUMENTATION = "documentation"
     LANDING = "landing"
+    VIDEO = "video"
     UNKNOWN = "unknown"
 
 

@@ -105,6 +105,7 @@ _JSONLD_TYPE_TO_PAGE: dict[str, str] = {
     "AutoRepair": "landing",
     "Dentist": "landing",
     "RealEstateAgent": "landing",
+    "VideoObject": "video",
 }
 
 
@@ -159,6 +160,8 @@ THRESHOLDS: dict[str, int] = {
     "dashboard": 20,
     "settings": 20,
     "landing": 25,
+    # Video pages
+    "video": 20,
     # Anti-bot / captcha / WAF block pages
     "blocked": 20,
 }
@@ -264,6 +267,22 @@ _URL_SIGNALS: list[SignalDef] = [
     ),
     SignalDef("url_api_ref", {"documentation": 25}, check_url=lambda u: "/api-reference" in u or "/api-docs" in u),
     # ---- landing ----
+    # ---- video ----
+    SignalDef(
+        "url_youtube_watch",
+        {"video": 30, "documentation": -15},
+        check_url=lambda u: "youtube.com/watch" in u or "youtu.be/" in u,
+    ),
+    SignalDef(
+        "url_vimeo_video",
+        {"video": 25},
+        check_url=lambda u: "vimeo.com/" in u and not _is_root_url(u),
+    ),
+    SignalDef(
+        "url_video_path",
+        {"video": 15},
+        check_url=lambda u: "/video/" in u or "/videos/" in u,
+    ),
     SignalDef("url_root", {"landing": 30, "listing": -10}, check_url=lambda u: _is_root_url(u)),
     # ---- blocked (captcha/WAF) ----
     SignalDef("url_sorry", {"blocked": 30}, check_url=lambda u: "/sorry/" in u),
@@ -313,6 +332,11 @@ _META_SIGNALS: list[SignalDef] = [
     ),
     # ---- og:type ----
     SignalDef("meta_og_article", {"article": 20}, check_meta=lambda h: _og_type_is(h, "article")),
+    SignalDef(
+        "meta_og_video",
+        {"video": 25, "documentation": -10},
+        check_meta=lambda h: _og_type_startswith(h, "video"),
+    ),
     # ---- blocked (captcha/WAF) ----
     SignalDef(
         "meta_title_blocked",
@@ -340,6 +364,7 @@ _JSONLD_WEIGHTS: dict[str, int] = {
     "help_faq": 40,
     "form": 35,
     "checkout": 40,
+    "video": 40,
 }
 
 # ---------------------------------------------------------------------------
@@ -432,6 +457,12 @@ _DOM_SIGNALS: list[SignalDef] = [
         "dom_version_selector",
         {"documentation": 15},
         check_dom=lambda h: "version" in h and ("<select" in h or "dropdown" in h),
+    ),
+    # ---- video ----
+    SignalDef(
+        "dom_video_player",
+        {"video": 20},
+        check_dom=lambda h: "<video" in h or "ytd-player" in h or "video-player" in h,
     ),
     # ---- article (MediaWiki sites) ----
     SignalDef(
@@ -577,6 +608,12 @@ def _og_type_is(raw_html: str, expected: str) -> bool:
     """Check if og:type meta tag matches expected value."""
     m = _OG_TYPE_RE.search(raw_html)
     return m is not None and m.group(1).lower() == expected.lower()
+
+
+def _og_type_startswith(raw_html: str, prefix: str) -> bool:
+    """Check if og:type meta tag starts with prefix (e.g. 'video' for 'video.other')."""
+    m = _OG_TYPE_RE.search(raw_html)
+    return m is not None and m.group(1).lower().startswith(prefix.lower())
 
 
 _TAG_RE = re.compile(r"<[^>]+>")

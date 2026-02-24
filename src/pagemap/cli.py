@@ -427,10 +427,10 @@ def _build_offline(output_dir: Path) -> None:
 
 
 def cmd_serve(args: argparse.Namespace) -> None:
-    """Start MCP server."""
+    """Start MCP server, forwarding any extra args to the server."""
     from .server import main
 
-    main()
+    main(argv=getattr(args, "_server_argv", []))
 
 
 def cmd_collect(args: argparse.Namespace) -> None:
@@ -861,11 +861,11 @@ def main() -> None:
     # Always available
     _build_epilog = """\
 examples:
-  %(prog)s build --url https://example.com               Build from live URL
-  %(prog)s build --url https://example.com --format json  Output JSON to stdout
-  %(prog)s build --url https://example.com -o result.json Save to single file
-  %(prog)s build --url https://example.com -o out/        Save to directory
-  %(prog)s build --snapshots                              Build from all snapshots
+  %(prog)s --url https://example.com               Build from live URL
+  %(prog)s --url https://example.com --format json  Output JSON to stdout
+  %(prog)s --url https://example.com -o result.json Save to single file
+  %(prog)s --url https://example.com -o out/        Save to directory
+  %(prog)s --snapshots                              Build from all snapshots
 """
     p_build = subparsers.add_parser(
         "build",
@@ -890,7 +890,10 @@ examples:
         help="Output format to stdout (mutually exclusive with --output)",
     )
 
-    subparsers.add_parser("serve", help="Start MCP server")
+    subparsers.add_parser(
+        "serve",
+        help="Start MCP server (extra args forwarded to server, e.g. --transport http --port 8000)",
+    )
 
     commands = {"build": cmd_build, "serve": cmd_serve}
 
@@ -974,7 +977,13 @@ examples:
         commands["convert"] = cmd_convert
         commands["benchmark"] = cmd_benchmark
 
-    args = parser.parse_args()
+    args, remaining = parser.parse_known_args()
+
+    # Forward remaining args to server when using 'serve' command
+    if args.command == "serve":
+        args._server_argv = remaining
+    elif remaining:
+        parser.error(f"unrecognized arguments: {' '.join(remaining)}")
 
     level = logging.DEBUG if args.verbose else logging.INFO
     logging.basicConfig(level=level, format="%(levelname)s: %(message)s")

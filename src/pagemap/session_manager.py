@@ -334,9 +334,14 @@ class HttpSessionManager:
 
             # 4. Acquire fresh session (dead, recycled, or first call)
             sess = await self._pool.acquire(entry.session_id)
-            from .server import _validate_url
+            try:
+                from .server import _validate_url
 
-            await sess.install_ssrf_route_guard(_validate_url)
+                await sess.install_ssrf_route_guard(_validate_url)
+            except Exception:
+                with suppress(Exception):
+                    await self._pool.release(entry.session_id)
+                raise
             entry.browser_session = sess
             entry.browser_acquired_at = time.monotonic()
             entry.navigation_count += 1

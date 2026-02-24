@@ -259,7 +259,8 @@ Try these prompts with any MCP-compatible AI client:
 - "Navigate to the sale section, filter by price under $50, and list the items."
 
 **Content Extraction**
-- "Read this news article and summarize the main story."
+- "Read this Wikipedia article and summarize the key points."
+- "What's the view count and upload date of this YouTube video?"
 - "Extract all image URLs from this product page."
 
 ---

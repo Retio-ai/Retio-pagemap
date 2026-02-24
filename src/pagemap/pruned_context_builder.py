@@ -735,6 +735,7 @@ def _detect_cards_from_chunks(chunks: list[HtmlChunk]) -> list[dict[str, Any]]:
         li_parts = _LI_SPLIT_RE.split(chunk.html)
         for part in li_parts[1:]:  # skip pre-<li> content
             part_text = _HTML_TAG_RE.sub(" ", part)
+            part_text = _html.unescape(part_text)
             part_text = _ANY_WHITESPACE_RE.sub(" ", part_text).strip()
             if not part_text or len(part_text) < 5:
                 continue
@@ -1224,6 +1225,18 @@ def _compress_for_product(
         if len(d) > 15:
             parts.append(d[:200])
 
+    # Phase 4: price fallback — scan pruned_html for price class patterns
+    if "price" not in used and not sections["price"]:
+        _price_class_match = re.search(
+            r'class="[^"]*(?:a-price|a-offscreen|price)[^"]*"[^>]*>([^<]+)',
+            pruned_html,
+            re.IGNORECASE,
+        )
+        if _price_class_match:
+            price_text = _price_class_match.group(1).strip()
+            if price_text and PRICE_PATTERN.search(price_text):
+                parts.append(price_text)
+
     result = "\n".join(parts)
 
     if count_tokens(result) > max_tokens:
@@ -1235,34 +1248,97 @@ def _compress_for_product(
 def _compress_for_article(
     pruned_html: str,
     max_tokens: int,
+    chunks: list[HtmlChunk] | None = None,
+    metadata: dict | None = None,
     lc: LocaleConfig | None = None,
 ) -> str:
-    """Compression for article/news pages: title + first paragraph + meta."""
+    """Budget-based compression for article/news pages.
+
+    Phase 1: metadata title.
+    Phase 2: chunk-based structural extraction (heading + body blocks).
+    Phase 3: text-line fallback with budget.
+    """
     if lc is None:
         lc = get_locale(None)
+    parts: list[str] = []
+
+    # Phase 1: metadata
+    if metadata:
+        title = metadata.get("headline") or metadata.get("title") or metadata.get("name")
+        if title:
+            parts.append(f"{lc.label_title}: {title}")
+        if metadata.get("author"):
+            parts.append(f"Author: {metadata['author']}")
+        if metadata.get("date_published"):
+            parts.append(metadata["date_published"])
+
+    # Phase 2: chunk-based (budget)
     lines = _extract_text_lines(pruned_html)
+    cpt = _calibrate_chars_per_token(lines, min_len=5, max_line_len=300)
+    char_budget = int(max_tokens * cpt * 0.95)
+    running_chars = sum(len(p) + 1 for p in parts)
 
-    parts = []
-    title_found = False
-    para_count = 0
-    max_paras = 2
+    if chunks:
+        current_heading: str | None = None
+        body_count = 0
+        for chunk in chunks:
+            if chunk.chunk_type == ChunkType.HEADING:
+                heading_text = chunk.text.strip()
+                if not heading_text:
+                    continue
+                text = f"## {heading_text}"
+                cost = len(text) + 1
+                if running_chars + cost > char_budget:
+                    break
+                parts.append(text)
+                running_chars += cost
+                current_heading = heading_text
+                body_count = 0
+            elif chunk.chunk_type == ChunkType.TEXT_BLOCK and current_heading is not None:
+                if body_count >= 3:
+                    continue
+                block_text = chunk.text.strip()
+                if not block_text:
+                    continue
+                text = block_text[:300]
+                cost = len(text) + 1
+                if running_chars + cost > char_budget:
+                    break
+                parts.append(text)
+                running_chars += cost
+                body_count += 1
+    else:
+        # Phase 3: text-line fallback with budget
+        title_found = bool(parts)  # already have title from metadata
+        for line in lines:
+            if len(line) < 3:
+                continue
+            if not title_found and len(line) > 10:
+                text = f"{lc.label_title}: {line}"
+                cost = len(text) + 1
+                if running_chars + cost > char_budget:
+                    break
+                parts.append(text)
+                running_chars += cost
+                title_found = True
+                continue
+            if _DATE_PATTERN_RE.search(line):
+                cost = len(line) + 1
+                if running_chars + cost > char_budget:
+                    break
+                parts.append(line)
+                running_chars += cost
+                continue
+            if title_found and len(line) > 30:
+                text = line[:300]
+                cost = len(text) + 1
+                if running_chars + cost > char_budget:
+                    break
+                parts.append(text)
+                running_chars += cost
 
-    for line in lines:
-        if len(line) < 3:
-            continue
-        # First substantial line is likely the title
-        if not title_found and len(line) > 10:
-            parts.append(f"{lc.label_title}: {line}")
-            title_found = True
-            continue
-        # Date-like
-        if _DATE_PATTERN_RE.search(line):
-            parts.append(line)
-            continue
-        # Paragraphs
-        if title_found and para_count < max_paras and len(line) > 30:
-            parts.append(line[:300])
-            para_count += 1
+    if not parts:
+        return _compress_default(pruned_html, max_tokens)
 
     result = "\n".join(parts)
     if count_tokens(result) > max_tokens:
@@ -1613,7 +1689,7 @@ def _compress_listing_dispatch(ctx: CompressorContext) -> str:
 
 
 def _compress_article_dispatch(ctx: CompressorContext) -> str:
-    return _compress_for_article(ctx.pruned_html, ctx.max_tokens, lc=ctx.lc)
+    return _compress_for_article(ctx.pruned_html, ctx.max_tokens, chunks=ctx.chunks, metadata=ctx.metadata, lc=ctx.lc)
 
 
 def _compress_default_dispatch(ctx: CompressorContext) -> str:
@@ -2383,6 +2459,90 @@ def _compress_for_wiki(
     return result
 
 
+# ---------------------------------------------------------------------------
+# Video page compressor
+# ---------------------------------------------------------------------------
+
+
+def _format_count(n: int) -> str:
+    """Format a large number with K/M suffix."""
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}K"
+    return str(n)
+
+
+def _compress_for_video(
+    pruned_html: str,
+    max_tokens: int,
+    metadata: dict | None = None,
+    lc: LocaleConfig | None = None,
+) -> str:
+    """Compression for video pages: structured metadata output."""
+    if lc is None:
+        lc = get_locale(None)
+    parts: list[str] = []
+
+    if metadata:
+        if metadata.get("name"):
+            parts.append(f"{lc.label_title}: {metadata['name']}")
+        if metadata.get("channel"):
+            parts.append(f"Channel: {metadata['channel']}")
+        if metadata.get("upload_date"):
+            parts.append(f"Published: {metadata['upload_date']}")
+        if metadata.get("duration"):
+            parts.append(f"Duration: {metadata['duration']}")
+        # Interaction stats
+        stat_parts: list[str] = []
+        if metadata.get("view_count") is not None:
+            stat_parts.append(f"{_format_count(metadata['view_count'])} views")
+        if metadata.get("like_count") is not None:
+            stat_parts.append(f"{_format_count(metadata['like_count'])} likes")
+        if metadata.get("comment_count") is not None:
+            stat_parts.append(f"{_format_count(metadata['comment_count'])} comments")
+        if stat_parts:
+            parts.append(" | ".join(stat_parts))
+        # Description (budget-aware)
+        if metadata.get("description"):
+            lines = _extract_text_lines(pruned_html)
+            cpt = _calibrate_chars_per_token(lines, min_len=5, max_line_len=300)
+            char_budget = int(max_tokens * cpt * 0.95)
+            running_chars = sum(len(p) + 1 for p in parts)
+            desc = str(metadata["description"])
+            remaining = char_budget - running_chars
+            if remaining > 50:
+                parts.append(desc[:remaining])
+
+    if not parts:
+        # Text-line fallback
+        lines = _extract_text_lines(pruned_html)
+        cpt = _calibrate_chars_per_token(lines, min_len=5, max_line_len=300)
+        char_budget = int(max_tokens * cpt * 0.95)
+        running_chars = 0
+        for line in lines:
+            if len(line) < 5:
+                continue
+            text = line[:300]
+            cost = len(text) + 1
+            if running_chars + cost > char_budget:
+                break
+            parts.append(text)
+            running_chars += cost
+
+    if not parts:
+        return _compress_default(pruned_html, max_tokens)
+
+    result = "\n".join(parts)
+    if count_tokens(result) > max_tokens:
+        result = _truncate_to_tokens(result, max_tokens)
+    return result
+
+
+def _compress_video_dispatch(ctx: CompressorContext) -> str:
+    return _compress_for_video(ctx.pruned_html, ctx.max_tokens, metadata=ctx.metadata, lc=ctx.lc)
+
+
 # Dispatch wrappers for schema-aware compressors
 
 
@@ -2402,6 +2562,7 @@ _SCHEMA_COMPRESSORS: dict[str, Callable[[CompressorContext], str]] = {
     "SaaSPage": _compress_saas_dispatch,
     "GovernmentPage": _compress_government_dispatch,
     "WikiArticle": _compress_wiki_dispatch,
+    "VideoObject": _compress_video_dispatch,
 }
 
 
@@ -2422,6 +2583,7 @@ _COMPRESSORS: dict[str, Callable[[CompressorContext], str]] = {
     "error": _compress_error_dispatch,
     "documentation": _compress_documentation_dispatch,
     "landing": _compress_landing_dispatch,
+    "video": _compress_video_dispatch,
 }
 
 
@@ -2547,11 +2709,17 @@ def build_pruned_context(
         doc=_doc,
         enable_lang_filter=enable_lang_filter,
     )
-    compressor = _COMPRESSORS.get(page_type)
-    if compressor is None:
-        compressor = _SCHEMA_COMPRESSORS.get(schema_name, _compress_default_dispatch)
-        if compressor is not _compress_default_dispatch:
-            logger.debug("Schema compressor: %s (page_type=%s)", schema_name, page_type)
+    # Schema overrides take priority (e.g. WikiArticle overrides article compressor)
+    _SCHEMA_OVERRIDES = frozenset({"WikiArticle"})
+    if schema_name in _SCHEMA_OVERRIDES and schema_name in _SCHEMA_COMPRESSORS:
+        compressor = _SCHEMA_COMPRESSORS[schema_name]
+        logger.debug("Schema override: %s (page_type=%s)", schema_name, page_type)
+    else:
+        compressor = _COMPRESSORS.get(page_type)
+        if compressor is None:
+            compressor = _SCHEMA_COMPRESSORS.get(schema_name, _compress_default_dispatch)
+            if compressor is not _compress_default_dispatch:
+                logger.debug("Schema compressor: %s (page_type=%s)", schema_name, page_type)
     context = compressor(ctx)
     # Release DOM reference (memory)
     ctx.doc = None

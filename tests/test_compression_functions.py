@@ -192,7 +192,8 @@ class TestCompressForArticle:
         result = _compress_for_article(src, max_tokens=500)
         assert "2024-10-22" in result
 
-    def test_max_2_paragraphs(self):
+    def test_budget_includes_multiple_paragraphs(self):
+        """Budget-based article compressor includes paragraphs within budget."""
         src = html(
             "<h1>Title of the Article Here</h1>"
             "<p>First paragraph with enough content for testing here.</p>"
@@ -202,7 +203,8 @@ class TestCompressForArticle:
         result = _compress_for_article(src, max_tokens=500)
         assert "First" in result
         assert "Second" in result
-        assert "Third" not in result
+        # Budget-based: third para should also be included within 500 token budget
+        assert "Third" in result
 
     def test_truncation_300(self):
         long_para = "x" * 500

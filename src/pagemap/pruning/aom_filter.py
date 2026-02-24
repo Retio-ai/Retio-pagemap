@@ -85,6 +85,20 @@ _FONT_SIZE_ZERO_RE = re.compile(r"font-size\s*:\s*0(?:\.0+)?(?:px|em|rem|%)?(?:\
 # Price pattern for Product schema noise override (Phase 3.3)
 _PRICE_IN_NOISE_RE = re.compile(r"(?:₩|원|\$|€|£|¥)\s*[\d,]+|\d{2,3}(?:,\d{3})+", re.IGNORECASE)
 
+# Readability-inspired: article/main ancestor tags for <p> exemption
+_ARTICLE_ANCESTOR_TAGS = frozenset({"article", "main"})
+
+
+def _is_inside_article_or_main(el: lxml.html.HtmlElement) -> bool:
+    """Check if element has an <article> or <main> ancestor."""
+    parent = el.getparent()
+    while parent is not None:
+        tag = parent.tag.lower() if isinstance(parent.tag, str) else ""
+        if tag in _ARTICLE_ANCESTOR_TAGS:
+            return True
+        parent = parent.getparent()
+    return False
+
 
 @dataclass
 class AomFilterStats:
@@ -340,6 +354,14 @@ def _compute_weight(
             link_text_len = sum(len((a.text_content() or "").strip()) for a in el.iter("a"))
             if link_text_len > 0:
                 density = link_text_len / total_len
+                # Readability-inspired: long paragraphs inside article/main
+                # survive moderate link density (e.g. Wikipedia reference links)
+                if tag == "p" and _is_inside_article_or_main(el):
+                    non_link_len = total_len - link_text_len
+                    if non_link_len > 80:
+                        if density > _LINK_DENSITY_HIGH:
+                            return _LINK_DENSITY_HIGH_WEIGHT, f"article-p-link-dense({density:.2f})"
+                        return 0.9, "article-content-p"
                 if density > _LINK_DENSITY_HIGH:
                     return _LINK_DENSITY_HIGH_WEIGHT, f"link-density-high({density:.2f})"
                 if density > _LINK_DENSITY_MODERATE:
@@ -414,11 +436,14 @@ def aom_filter(
         stats.removed_xpaths.add(xpath)
         stats.record(reason)
 
-    # Content rescue: if remaining text is < 100 chars, restore link-density
-    # removals that contain price patterns (likely product grids).
+    # Content rescue: restore link-density removals containing price patterns.
+    # For Product schema: always rescue price elements (Amazon prices often
+    # appear in containers removed by link-density penalty).
+    # For other schemas: only rescue when remaining text < 100 chars.
     # NEVER restore security-critical removals (display:none, aria-hidden, etc.)
     remaining_text = (doc.text_content() or "").strip()
-    if len(remaining_text) < 100 and _link_density_removed:
+    _should_rescue = len(remaining_text) < 100 or schema_name == "Product"
+    if _should_rescue and _link_density_removed:
         for el, parent, idx in _link_density_removed:
             el_text = (el.text_content() or "").strip()
             if el_text and _PRICE_IN_NOISE_RE.search(el_text):
