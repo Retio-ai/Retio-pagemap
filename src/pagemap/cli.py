@@ -849,6 +849,82 @@ def _run_sim_benchmark(args: argparse.Namespace, data_dir: Path, mode: str) -> N
     )
 
 
+def _get_server_options_help() -> str:
+    """Extract server option help text from _parse_server_args.
+
+    Lazily imports server module only when serve --help is requested.
+    """
+    import io
+    from contextlib import redirect_stdout
+
+    from .server import _parse_server_args
+
+    buf = io.StringIO()
+    try:
+        with redirect_stdout(buf):
+            _parse_server_args(["--help"])
+    except SystemExit:
+        pass
+
+    raw = buf.getvalue()
+    # Extract lines after "options:" header, skipping -h/--help entry
+    lines = raw.splitlines()
+    start = None
+    for i, line in enumerate(lines):
+        if line.rstrip() == "options:":
+            start = i + 1
+            break
+    if start is None:
+        return raw
+
+    result: list[str] = []
+    skip_h = False
+    for line in lines[start:]:
+        stripped = line.lstrip()
+        if stripped.startswith("-h,") or stripped.startswith("-h ") or stripped == "-h":
+            skip_h = True
+            continue
+        if skip_h:
+            if stripped.startswith("--") or stripped == "":
+                skip_h = False
+            else:
+                continue
+        result.append(line)
+    return "\n".join(result).strip("\n")
+
+
+class _ServeHelpAction(argparse.Action):
+    """Custom help action for 'serve' that appends dynamic server options."""
+
+    def __init__(
+        self,
+        option_strings,
+        dest=argparse.SUPPRESS,
+        default=argparse.SUPPRESS,
+        help=None,
+    ):
+        super().__init__(
+            option_strings=option_strings,
+            dest=dest,
+            default=default,
+            nargs=0,
+            help=help,
+        )
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        parser.print_help()
+        try:
+            server_opts = _get_server_options_help()
+            if server_opts:
+                print(f"\nforwarded server options:\n{server_opts}")
+        except Exception:
+            print(
+                "\n(could not load server options — run 'pagemap serve' to check dependencies)",
+                file=sys.stderr,
+            )
+        parser.exit()
+
+
 def main() -> None:
     """CLI entry point."""
     parser = argparse.ArgumentParser(
@@ -890,9 +966,23 @@ examples:
         help="Output format to stdout (mutually exclusive with --output)",
     )
 
-    subparsers.add_parser(
+    p_serve = subparsers.add_parser(
         "serve",
-        help="Start MCP server (extra args forwarded to server, e.g. --transport http --port 8000)",
+        help="Start MCP server (extra args forwarded to server)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""\
+examples:
+  %(prog)s                                Start with stdio transport (default)
+  %(prog)s --transport http --port 8000   Start HTTP server on port 8000
+  %(prog)s --allow-local                  Allow localhost/private IP access""",
+        add_help=False,
+    )
+    p_serve.add_argument(
+        "-h",
+        "--help",
+        action=_ServeHelpAction,
+        default=argparse.SUPPRESS,
+        help="show this help message and exit",
     )
 
     commands = {"build": cmd_build, "serve": cmd_serve}

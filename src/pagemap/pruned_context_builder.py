@@ -65,6 +65,10 @@ PRICE_PATTERN = re.compile(
     r"|\d[\d,]+\s*元"
     r"|\d{2,3}(?:,\d{3})+)" + r"|" + "|".join(re.escape(t) for t in PRICE_LABEL_TERMS),
 )
+_PRICE_CLASS_RE = re.compile(
+    r"""class=(?P<q>["'])[^"']*(?:a-price|a-offscreen|price)[^"']*(?P=q)[^>]*>(?:\s*<[^>]+>)*\s*(?P<price>[^<]+)""",
+    re.IGNORECASE,
+)
 RATING_PATTERN = re.compile(
     r"(?:★|⭐|평점|별점|\d+\.\d+\s*[/점]|\d+(?:\.\d+)?점|리뷰\s*\d+"
     r"|評価|レビュー|étoile|Bewertung|Sterne"
@@ -1227,15 +1231,17 @@ def _compress_for_product(
 
     # Phase 4: price fallback — scan pruned_html for price class patterns
     if "price" not in used and not sections["price"]:
-        _price_class_match = re.search(
-            r'class="[^"]*(?:a-price|a-offscreen|price)[^"]*"[^>]*>([^<]+)',
-            pruned_html,
-            re.IGNORECASE,
-        )
+        _price_class_match = _PRICE_CLASS_RE.search(pruned_html)
         if _price_class_match:
-            price_text = _price_class_match.group(1).strip()
+            price_text = _price_class_match.group("price").strip()
             if price_text and PRICE_PATTERN.search(price_text):
                 parts.append(price_text)
+                # Feedback: inject into metadata dict for downstream consumers
+                if metadata is not None and "price" not in metadata:
+                    with contextlib.suppress(ValueError):
+                        _m = _PRICE_NUMERIC_RE.search(price_text)
+                        if _m:
+                            metadata["price"] = float(_m.group().replace(",", ""))
 
     result = "\n".join(parts)
 
@@ -1871,8 +1877,118 @@ def _compress_for_form(pruned_html: str, max_tokens: int) -> str:
     return result
 
 
-def _compress_for_dashboard(pruned_html: str, max_tokens: int) -> str:
+def _is_news_portal(pruned_html: str, *, doc: Any = None) -> bool:
+    """Detect news portal pattern in dashboard-classified pages."""
+    if doc is not None:
+        # Single-pass DOM detection (handles nested articles correctly)
+        article_count = 0
+        headline_link_count = 0
+        for el in doc.iter():
+            if not isinstance(el.tag, str):
+                continue
+            if el.tag == "article":
+                article_count += 1
+            elif el.tag in ("h2", "h3"):
+                if any(isinstance(c.tag, str) and c.tag == "a" for c in el):
+                    headline_link_count += 1
+        return article_count >= 3 or headline_link_count >= 3
+    # Fallback: simple string counting (rare — doc almost always available)
+    return pruned_html.lower().count("<article") >= 3
+
+
+def _compress_for_news_portal(pruned_html: str, max_tokens: int, *, doc: Any = None) -> str:
+    """News portal: numbered headline list with optional summaries."""
+    headlines: list[tuple[str, str]] = []  # (headline, summary)
+
+    if doc is not None:
+        # Strategy A: Extract from <article> elements via DOM
+        seen: set[str] = set()
+        for el in doc.iter():
+            if not (isinstance(el.tag, str) and el.tag == "article"):
+                continue
+            # Find first h2/h3 descendant; track position for summary search
+            headline_text = ""
+            headline_el = None
+            for h in el.iter():
+                if isinstance(h.tag, str) and h.tag in ("h2", "h3"):
+                    headline_text = (h.text_content() or "").strip()
+                    headline_el = h
+                    break
+            if not headline_text or len(headline_text) < 5:
+                continue
+            key = headline_text.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            # Optional summary: first <p> that appears after the headline in
+            # document order (avoids picking up bylines/dates before the title)
+            summary = ""
+            past_headline = False
+            for p in el.iter():
+                if p is headline_el:
+                    past_headline = True
+                    continue
+                if not past_headline:
+                    continue
+                if isinstance(p.tag, str) and p.tag == "p":
+                    s = (p.text_content() or "").strip()
+                    if s and len(s) >= 10:
+                        summary = s
+                        break
+            headlines.append((headline_text[:200], summary[:200]))
+
+        # Strategy B: standalone h2/h3 with <a> children (no article wrappers)
+        if not headlines:
+            seen_b: set[str] = set()
+            for el in doc.iter():
+                if not (isinstance(el.tag, str) and el.tag in ("h2", "h3")):
+                    continue
+                if not any(isinstance(c.tag, str) and c.tag == "a" for c in el):
+                    continue
+                text = (el.text_content() or "").strip()
+                if not text or len(text) < 5:
+                    continue
+                key = text.lower()
+                if key not in seen_b:
+                    seen_b.add(key)
+                    headlines.append((text[:200], ""))
+
+    if not headlines:
+        # doc=None: detection succeeded via string fallback but DOM extraction
+        # unavailable — _compress_default is still better than dashboard keyword filter.
+        # Also covers articles that contain no h2/h3 headlines.
+        return _compress_default(pruned_html, max_tokens)
+
+    # Budget-aware numbered list (same pattern as all other compressors)
+    lines = _extract_text_lines(pruned_html)
+    cpt = _calibrate_chars_per_token(lines, min_len=5, max_line_len=200)
+    char_budget = int(max_tokens * cpt * 0.95)
+
+    parts: list[str] = []
+    running_chars = 0
+    for i, (headline, summary) in enumerate(headlines, 1):
+        entry = f"{i}. {headline}"
+        if summary:
+            entry += f"\n   {summary}"
+        cost = len(entry) + 1
+        if running_chars + cost > char_budget:
+            break
+        parts.append(entry)
+        running_chars += cost
+
+    if not parts:
+        return _compress_default(pruned_html, max_tokens)
+
+    result = "\n".join(parts)
+    if count_tokens(result) > max_tokens:
+        result = _truncate_to_tokens(result, max_tokens)
+    return result
+
+
+def _compress_for_dashboard(pruned_html: str, max_tokens: int, *, doc: Any = None) -> str:
     """Dashboard: key metrics, table summaries (header+row count), navigation."""
+    if _is_news_portal(pruned_html, doc=doc):
+        return _compress_for_news_portal(pruned_html, max_tokens, doc=doc)
     lines = _extract_text_lines(pruned_html)
     cpt = _calibrate_chars_per_token(lines, min_len=5, max_line_len=300)
     char_budget = int(max_tokens * cpt * 0.95)
@@ -2116,7 +2232,7 @@ def _compress_form_dispatch(ctx: CompressorContext) -> str:
 
 
 def _compress_dashboard_dispatch(ctx: CompressorContext) -> str:
-    return _compress_for_dashboard(ctx.pruned_html, ctx.max_tokens)
+    return _compress_for_dashboard(ctx.pruned_html, ctx.max_tokens, doc=ctx.doc)
 
 
 def _compress_help_faq_dispatch(ctx: CompressorContext) -> str:
@@ -2507,7 +2623,11 @@ def _compress_for_video(
         if metadata.get("description"):
             lines = _extract_text_lines(pruned_html)
             cpt = _calibrate_chars_per_token(lines, min_len=5, max_line_len=300)
-            char_budget = int(max_tokens * cpt * 0.95)
+            # NOTE: CPT is calibrated on pruned_html text lines which may be
+            # English-heavy (~4 chars/token).  Video descriptions are often CJK
+            # (~1.5 chars/token), so we use a conservative 0.85 safety factor.
+            # The final _truncate_to_tokens() guard catches any overshoot.
+            char_budget = int(max_tokens * cpt * 0.85)
             running_chars = sum(len(p) + 1 for p in parts)
             desc = str(metadata["description"])
             remaining = char_budget - running_chars
@@ -2518,6 +2638,8 @@ def _compress_for_video(
         # Text-line fallback
         lines = _extract_text_lines(pruned_html)
         cpt = _calibrate_chars_per_token(lines, min_len=5, max_line_len=300)
+        # 0.95 (not 0.85): text lines are the sole content source here,
+        # so the budget should be as permissive as possible.
         char_budget = int(max_tokens * cpt * 0.95)
         running_chars = 0
         for line in lines:
@@ -2564,6 +2686,8 @@ _SCHEMA_COMPRESSORS: dict[str, Callable[[CompressorContext], str]] = {
     "WikiArticle": _compress_wiki_dispatch,
     "VideoObject": _compress_video_dispatch,
 }
+
+_SCHEMA_OVERRIDES: frozenset[str] = frozenset({"WikiArticle", "VideoObject"})
 
 
 _COMPRESSORS: dict[str, Callable[[CompressorContext], str]] = {
@@ -2668,6 +2792,7 @@ def build_pruned_context(
                 result.heading_chunks,
                 schema_name,
                 source_hint=_source_hint,
+                pruned_html=pruned_html,
             )
             if metadata:
                 logger.info("Structured metadata: %s", list(metadata.keys()))
@@ -2709,8 +2834,7 @@ def build_pruned_context(
         doc=_doc,
         enable_lang_filter=enable_lang_filter,
     )
-    # Schema overrides take priority (e.g. WikiArticle overrides article compressor)
-    _SCHEMA_OVERRIDES = frozenset({"WikiArticle"})
+    # Schema overrides take priority (e.g. WikiArticle, VideoObject override page_type compressor)
     if schema_name in _SCHEMA_OVERRIDES and schema_name in _SCHEMA_COMPRESSORS:
         compressor = _SCHEMA_COMPRESSORS[schema_name]
         logger.debug("Schema override: %s (page_type=%s)", schema_name, page_type)

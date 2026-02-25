@@ -72,6 +72,37 @@ class TestUrlRequired:
 # ── #9c: --help improvements ────────────────────────────────────
 
 
+class TestServeHelp:
+    def test_serve_help_contains_server_options(self, capsys):
+        """serve --help should display forwarded server options."""
+        from pagemap.cli import main
+
+        with pytest.raises(SystemExit) as exc_info, patch.object(sys, "argv", ["pagemap", "serve", "--help"]):
+            main()
+        assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        assert "--transport" in captured.out
+        assert "--port" in captured.out
+        assert "--allow-local" in captured.out
+
+    def test_serve_help_no_duplicate_help(self, capsys):
+        """Server -h/--help should not appear in forwarded section."""
+        from pagemap.cli import main
+
+        with pytest.raises(SystemExit), patch.object(sys, "argv", ["pagemap", "serve", "--help"]):
+            main()
+        captured = capsys.readouterr()
+        assert captured.out.count("-h, --help") == 1
+
+    def test_get_server_options_help_not_empty(self):
+        """_get_server_options_help should return non-empty text."""
+        from pagemap.cli import _get_server_options_help
+
+        text = _get_server_options_help()
+        assert len(text) > 0
+        assert "--transport" in text
+
+
 class TestHelpImprovements:
     def test_build_help_has_epilog(self):
         """Build parser should have examples in epilog."""

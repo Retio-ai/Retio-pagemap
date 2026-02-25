@@ -22,10 +22,12 @@ from hypothesis import given, settings  # noqa: E402
 from hypothesis import strategies as st  # noqa: E402
 
 from pagemap.pruning.aom_filter import (
+    _ARTICLE_ANCESTOR_TAGS,
     AomFilterStats,
     _compute_weight,
     _count_noise_matches,
     _is_body_direct_child,
+    _is_inside_article_or_main,
     aom_filter,
     derive_pruned_regions,
 )
@@ -373,3 +375,122 @@ class TestAomFilterStats:
         stats.record("semantic-nav")
         assert stats.removed_nodes == 2
         assert stats.removal_reasons["semantic-nav"] == 2
+
+
+# ---------------------------------------------------------------------------
+# TestContentRescueDetachedParent (Fix 1)
+# ---------------------------------------------------------------------------
+
+
+class TestContentRescueDetachedParent:
+    """Content rescue must skip elements whose parent was detached."""
+
+    def test_detached_parent_no_rescue(self):
+        """<nav> is removed (weight 0.0) → its descendants are detached.
+
+        A child div with price text + high link density should NOT be rescued
+        because the parent <nav> is no longer in the tree.
+        """
+        # Build DOM: nav contains a high-link-density div with price text
+        # The nav will be removed by semantic weight 0.0, detaching all descendants.
+        doc = lxml.html.document_fromstring(
+            html(
+                "<nav>"
+                '  <div class="prices">'
+                '    <a href="#">₩30,000 some padding text to exceed fifty characters of link content easily</a>'
+                "  </div>"
+                "</nav>"
+                "<p>Short</p>"
+            )
+        )
+        stats = aom_filter(doc, schema_name="Product")
+        # nav should be removed
+        assert doc.find(".//nav") is None
+        # The div with price text should NOT be rescued (parent detached)
+        assert stats.content_rescue_count == 0
+        # The price div should not be in the final DOM
+        assert doc.find('.//div[@class="prices"]') is None
+
+    def test_attached_parent_rescue_succeeds(self):
+        """When parent stays in the tree, rescue should still work."""
+        # A link-density div directly under body with price text
+        # Body is never removed, so rescue should succeed
+        link_text = "Buy now click here see more details shop today " * 3  # long link text
+        doc = lxml.html.document_fromstring(html(f"<div><a href='#'>{link_text}</a> ₩50,000</div><p>x</p>"))
+        stats = aom_filter(doc, schema_name="Product")
+        # Should rescue the div (parent=body is attached)
+        assert stats.content_rescue_count == 1
+
+
+# ---------------------------------------------------------------------------
+# TestArticleMainPreCompute (Fix 2)
+# ---------------------------------------------------------------------------
+
+
+class TestArticleMainPreCompute:
+    """Pre-computed set matches _is_inside_article_or_main() for all elements."""
+
+    def test_set_matches_walk(self):
+        """Pre-built set gives same result as ancestor walk for every element."""
+        doc = lxml.html.document_fromstring(
+            html(
+                "<article>" + "".join(f"<p>Paragraph {i}</p>" for i in range(10)) + "</article>"
+                "<div><p>Outside paragraph</p></div>"
+            )
+        )
+
+        # Build the set the same way aom_filter() does
+        descendants: set[lxml.html.HtmlElement] = set()
+        for container in doc.iter():
+            if isinstance(container.tag, str) and container.tag.lower() in _ARTICLE_ANCESTOR_TAGS:
+                descendants.update(container.iterdescendants())
+
+        # Check every element in the tree
+        for el in doc.iter():
+            set_result = el in descendants
+            walk_result = _is_inside_article_or_main(el)
+            assert set_result == walk_result, f"Mismatch for <{el.tag}>: set={set_result}, walk={walk_result}"
+
+    def test_article_p_exemption_preserved(self):
+        """<p> inside <article> with long non-link text survives aom_filter()."""
+        long_text = "This is a very long paragraph with important content " * 3
+        doc = lxml.html.document_fromstring(html(f"<article><p>{long_text} <a href='#'>ref</a></p></article>"))
+        stats = aom_filter(doc)
+        # The <p> should survive (article-content-p exemption)
+        assert doc.find(".//article//p") is not None
+        assert stats.removed_nodes == 0
+
+
+# ---------------------------------------------------------------------------
+# TestStatsAfterRescue (Fix 3)
+# ---------------------------------------------------------------------------
+
+
+class TestStatsAfterRescue:
+    """removed_nodes stat must be corrected after content rescue."""
+
+    def test_invariant_after_rescue(self):
+        """sum(removal_reasons.values()) == removed_nodes after rescue."""
+        # Build cards with link-heavy content containing price patterns
+        cards = []
+        for i in range(3):
+            link_text = f"Product {i} details click here buy now view more info shop " * 2
+            cards.append(f"<div><a href='#'>{link_text}</a> ₩{30 + i},000</div>")
+        doc = lxml.html.document_fromstring(html("".join(cards) + "<p>x</p>"))
+        stats = aom_filter(doc, schema_name="Product")
+
+        # Ensure rescue actually happened (otherwise invariant is vacuously true)
+        assert stats.content_rescue_count > 0, "Test precondition: rescue must occur"
+        # Invariant: sum of per-reason counts == removed_nodes
+        assert sum(stats.removal_reasons.values()) == stats.removed_nodes
+        # All counts must be non-negative
+        assert all(v >= 0 for v in stats.removal_reasons.values())
+        assert stats.removed_nodes >= 0
+
+    def test_invariant_no_rescue(self):
+        """When no rescue happens, invariant still holds."""
+        doc = lxml.html.document_fromstring(html("<nav>Navigation links</nav><p>Main content here</p>"))
+        stats = aom_filter(doc)
+        assert stats.content_rescue_count == 0
+        assert sum(stats.removal_reasons.values()) == stats.removed_nodes
+        assert stats.removed_nodes >= 1

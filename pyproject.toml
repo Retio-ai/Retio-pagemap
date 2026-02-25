@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "retio-pagemap"
-version = "0.7.1"
+version = "0.7.2"
 description = "Structured web page representation for AI agents — 97% HTML token reduction"
 requires-python = ">=3.11"
 license = {text = "AGPL-3.0-only"}

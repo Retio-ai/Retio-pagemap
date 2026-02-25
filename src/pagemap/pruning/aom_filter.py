@@ -116,7 +116,11 @@ class AomFilterStats:
         self.removal_reasons[reason] = self.removal_reasons.get(reason, 0) + 1
 
 
-_GRID_CONTAINER_TAGS = frozenset({"div", "section", "ul", "ol", "main", "article"})
+# HN regression fix: <table>/<tbody> must participate in grid detection so that
+# table-based content listings (HN, Craigslist, forums) get whitelist protection
+# from link-density penalties.  Guards (≥3 same-fingerprint children, link
+# density > 0.5, text > 50 chars) prevent false positives on layout/nav tables.
+_GRID_CONTAINER_TAGS = frozenset({"div", "section", "ul", "ol", "main", "article", "table", "tbody"})
 _MIN_REPEATING_CHILDREN = 3
 _MAX_FINGERPRINT_CLASSES = 3
 
@@ -247,6 +251,7 @@ def _compute_weight(
     schema_name: str | None = None,
     grid_whitelist: set[str] | None = None,
     tree: Any = None,
+    article_main_descendants: set[lxml.html.HtmlElement] | None = None,
 ) -> tuple[float, str]:
     """Compute AOM weight for an element.
 
@@ -356,7 +361,11 @@ def _compute_weight(
                 density = link_text_len / total_len
                 # Readability-inspired: long paragraphs inside article/main
                 # survive moderate link density (e.g. Wikipedia reference links)
-                if tag == "p" and _is_inside_article_or_main(el):
+                if tag == "p" and (
+                    (el in article_main_descendants)
+                    if article_main_descendants is not None
+                    else _is_inside_article_or_main(el)
+                ):
                     non_link_len = total_len - link_text_len
                     if non_link_len > 80:
                         if density > _LINK_DENSITY_HIGH:
@@ -387,6 +396,12 @@ def aom_filter(
 
     tree = doc.getroottree()
 
+    # Pre-compute article/main descendants for O(1) lookup (Fix 2)
+    _article_main_descendants: set[lxml.html.HtmlElement] = set()
+    for _container in doc.iter():
+        if isinstance(_container.tag, str) and _container.tag.lower() in _ARTICLE_ANCESTOR_TAGS:
+            _article_main_descendants.update(_container.iterdescendants())
+
     # Collect elements to remove (can't modify tree during iteration)
     to_remove: list[tuple[lxml.html.HtmlElement, str]] = []
 
@@ -400,13 +415,19 @@ def aom_filter(
         if tag in ("body", "html", "main"):
             continue
 
-        weight, reason = _compute_weight(el, schema_name, grid_whitelist=grid_whitelist, tree=tree)
+        weight, reason = _compute_weight(
+            el,
+            schema_name,
+            grid_whitelist=grid_whitelist,
+            tree=tree,
+            article_main_descendants=_article_main_descendants,
+        )
         if weight < threshold:
             to_remove.append((el, reason))
 
     # Track link-density removals for content rescue
-    _link_density_removed: list[tuple[lxml.html.HtmlElement, lxml.html.HtmlElement, int, lxml.html.HtmlElement]] = []
-    # (element_copy, parent, index_in_parent, original_el) — only for link-density reasons
+    _link_density_removed: list[tuple[lxml.html.HtmlElement, lxml.html.HtmlElement, int, str]] = []
+    # (element, parent, index_in_parent, reason) — only for link-density reasons
 
     # Remove collected elements (parent-first to avoid double removal)
     for el, reason in to_remove:
@@ -430,7 +451,7 @@ def aom_filter(
         # Save link-density removals for possible content rescue
         if reason.startswith("link-density"):
             idx = list(parent).index(el)
-            _link_density_removed.append((el, parent, idx))
+            _link_density_removed.append((el, parent, idx, reason))
 
         parent.remove(el)
         stats.removed_xpaths.add(xpath)
@@ -443,15 +464,38 @@ def aom_filter(
     # NEVER restore security-critical removals (display:none, aria-hidden, etc.)
     remaining_text = (doc.text_content() or "").strip()
     _should_rescue = len(remaining_text) < 100 or schema_name == "Product"
+    rescued_reasons: list[str] = []
     if _should_rescue and _link_density_removed:
-        for el, parent, idx in _link_density_removed:
+        for el, parent, idx, reason in _link_density_removed:
             el_text = (el.text_content() or "").strip()
             if el_text and _PRICE_IN_NOISE_RE.search(el_text):
+                # Guard: skip if parent was detached during removal phase.
+                # lxml doesn't raise ValueError for detached elements — it
+                # returns a path rooted at the detached subtree (e.g. "/nav/div").
+                # In-tree paths always start with "/html".
+                try:
+                    parent_path = tree.getpath(parent)
+                except ValueError:
+                    logger.debug("Content rescue: skipping — parent detached")
+                    continue
+                if not parent_path.startswith("/html"):
+                    logger.debug("Content rescue: skipping — parent detached")
+                    continue
                 # Re-insert at original position (clamped to parent length)
                 insert_idx = min(idx, len(parent))
                 parent.insert(insert_idx, el)
                 stats.content_rescue_count += 1
+                rescued_reasons.append(reason)
                 logger.debug("Content rescue: restored element with price data")
+
+    # Correct stats: rescued nodes should not count as removed
+    if rescued_reasons:
+        stats.removed_nodes -= len(rescued_reasons)
+        for r in rescued_reasons:
+            if r in stats.removal_reasons:
+                stats.removal_reasons[r] -= 1
+                if stats.removal_reasons[r] <= 0:
+                    del stats.removal_reasons[r]
 
     logger.debug(
         "AOM filter: %d/%d nodes removed, %d grid-whitelisted, %d rescued (%s)",

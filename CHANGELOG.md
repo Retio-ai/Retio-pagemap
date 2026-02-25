@@ -9,6 +9,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-02-25
+
+### Security
+
+- **`_find_type_in_jsonld()` recursion depth limit** — Added `max_depth=5` parameter to prevent `RecursionError` from maliciously nested `@graph` structures (DoS vector)
+- **metadata.py field sanitization** — Applied `sanitize_text()` to `currency`, `telephone`, `price_range`, `datePublished`, `upload_date`, `duration`, `start_date`/`end_date`, BreadcrumbList `name`, and `_parse_h1()` return value — eliminates prompt injection vector from 8+ previously unsanitized fields
+- **OG image/thumbnail URL validation** — Applied `_is_valid_url()` to `image_url`/`thumbnail_url` OG fields; `javascript:` and `data:` URLs no longer pass through
+
+### Added
+
+- **`_extract_price_from_html()`** — lxml DOM-based last-resort price extractor from raw/pruned HTML; priority: `a-offscreen` text > price-class `text_content()` > `aria-label` (handles Amazon nested span structures)
+- **`_extract_video_meta_from_dom()`** — Class-name and regex-based video metadata extraction from heading chunks (channel, view_count, duration); called as last-resort fallback for VideoObject schema
+- **`_is_news_portal()` / `_compress_for_news_portal()`** — Detects news portal pattern (≥3 `<article>` elements or ≥3 headline links) in dashboard-classified pages; dedicated numbered headline list compressor with optional per-article summaries (BBC News improvement)
+- **`pagemap serve --help` forwarded options** — `_ServeHelpAction` + `_get_server_options_help()` dynamically append server options (e.g. `--transport`, `--port`, `--allow-local`) to `pagemap serve --help` output
+- **3 new test files** — `test_hn_regression.py`, `test_news_portal_compression.py`, `test_pruned_context_builder_fixes.py`
+
+### Fixed
+
+- **HN/forum table-based grid whitelist** — Added `table`/`tbody` to `_GRID_CONTAINER_TAGS`; table-based content listings (Hacker News, forums) now receive link-density penalty exemption (fixes HN content regression: 1,010 → 511 tok in v0.7.1)
+- **AOM content rescue detached parent** — Added `tree.getpath(parent)` check before re-inserting rescued elements; skips rescue when parent was detached during removal phase (prevents silent ghost subtree insertion)
+- **`removed_nodes` stat overcounting** — Rescued nodes are now subtracted from `removed_nodes` and `removal_reasons` counters (previously inflated telemetry)
+- **`_extract_price_from_dom_chunks()` empty-text fallback** — Added `aria-label` and `data-*` attribute fallbacks when chunk text is empty
+- **`_to_float()` European number format** — `"1.500,99"` now correctly parses as `1500.99` instead of `1.5`
+- **`_to_int()` silent truncation** — Changed from `int(float)` to `round(float)`: `"4.9"` → `5` instead of `4` (fixes silent corruption in reviewCount etc.)
+- **`_extract_price_from_offers()` zero-price falsy** — `lowPrice or price` pattern replaced with explicit `None` check; price=0 is preserved correctly
+- **`_extract_image_url()` ImageObject dict** — Added support for `"image": {"@type": "ImageObject", "url": "..."}` pattern (previously missed)
+- **`extract_metadata()` pruned_html parameter** — Product and VideoObject schemas receive pruned HTML for lxml-based price extraction fallback; VideoObject also gets DOM-based metadata fallback
+
+### Changed
+
+- **`_is_inside_article_or_main()` O(1) lookup** — Pre-computes `_article_main_descendants` set before filtering loop; passes to `_compute_weight()` via new `article_main_descendants` parameter. Eliminates O(nodes × depth) traversal on large documents
+- **`_compress_for_dashboard()` news portal delegation** — Now accepts `doc` parameter and delegates to `_compress_for_news_portal()` when `_is_news_portal()` detects news portal structure
+- **`VideoObject` added to `_SCHEMA_OVERRIDES`** — VideoObject schema now overrides page_type-based compressor selection; `_SCHEMA_OVERRIDES` moved to module level (eliminates per-call frozenset recreation)
+- **Phase 4 product price regex** — Replaced inline regex with pre-compiled `_PRICE_CLASS_RE` (named groups, handles single-quote class attributes); extracted price injected back into metadata dict for downstream consumers
+- **VideoObject itemprop `author` → `channel`** — Added `"author": "channel"` to `_ITEMPROP_FIELD_MAP["VideoObject"]`
+- **VideoObject OG `og:site_name` removed** — Removed `og:site_name` → `channel` mapping (was incorrectly using site name e.g. "YouTube" as channel name)
+- **Video description CJK budget factor** — Reduced from 0.95 to 0.85 to account for CJK-heavy descriptions (~1.5 chars/token vs English ~4 chars/token); `_truncate_to_tokens()` guard handles overshoot
+- 4014 → 4194 tests passing (+180)
+
 ## [0.7.1] - 2026-02-24
 
 ### Added

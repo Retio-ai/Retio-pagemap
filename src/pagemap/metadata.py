@@ -4,18 +4,23 @@
 """Structured metadata extraction from pre-parsed HtmlChunks.
 
 Cascade priority: JSON-LD > itemprop > OG meta > h1 fallback.
-Zero regex, zero lxml, zero I/O -- json.loads + dict lookups only.
+Cascade priority: JSON-LD > itemprop > OG meta > h1 fallback.
+Uses lxml for last-resort price extraction from pruned HTML (Amazon nested spans).
 """
 
 from __future__ import annotations
 
+import html as _html
 import json
+import logging
 import re
 from collections.abc import Callable
 from typing import Any
 
 from pagemap.pruning import ChunkType, HtmlChunk
 from pagemap.sanitizer import sanitize_text
+
+logger = logging.getLogger(__name__)
 
 # --- Helpers ---
 
@@ -24,7 +29,11 @@ def _to_float(v: Any) -> float | None:
     if v is None:
         return None
     try:
-        s = str(v).replace(",", "").strip()
+        s = str(v).strip()
+        if "." in s and "," in s and s.rfind(",") > s.rfind("."):
+            s = s.replace(".", "").replace(",", ".")
+        else:
+            s = s.replace(",", "")
         return float(s)
     except (ValueError, TypeError):
         return None
@@ -32,7 +41,7 @@ def _to_float(v: Any) -> float | None:
 
 def _to_int(v: Any) -> int | None:
     f = _to_float(v)
-    return int(f) if f is not None else None
+    return round(f) if f is not None else None
 
 
 def _is_valid_url(url: Any) -> str | None:
@@ -45,6 +54,9 @@ def _is_valid_url(url: Any) -> str | None:
 def _extract_image_url(data: dict) -> str | None:
     """Extract and validate image URL from JSON-LD data."""
     img = data.get("image")
+    if isinstance(img, dict):
+        u = img.get("url")
+        return _is_valid_url(u if u is not None else img.get("contentUrl"))
     if isinstance(img, list):
         return _is_valid_url(img[0]) if img else None
     return _is_valid_url(img)
@@ -64,18 +76,20 @@ def _extract_person_or_org_name(val: Any, max_len: int = 200) -> str | None:
 # --- JSON-LD generic type finder ---
 
 
-def _find_type_in_jsonld(data: Any, type_names: tuple[str, ...]) -> dict | None:
+def _find_type_in_jsonld(data: Any, type_names: tuple[str, ...], max_depth: int = 5) -> dict | None:
     """Find first object with matching @type in JSON-LD data (handles @graph, arrays, list types)."""
+    if max_depth <= 0:
+        return None
     if isinstance(data, list):
         for item in data:
-            found = _find_type_in_jsonld(item, type_names)
+            found = _find_type_in_jsonld(item, type_names, max_depth - 1)
             if found:
                 return found
         return None
     if not isinstance(data, dict):
         return None
     if "@graph" in data:
-        return _find_type_in_jsonld(data["@graph"], type_names)
+        return _find_type_in_jsonld(data["@graph"], type_names, max_depth - 1)
     schema_type = data.get("@type", "")
     if isinstance(schema_type, list):
         if any(t in type_names for t in schema_type):
@@ -117,14 +131,18 @@ def _extract_price_from_offers(offers: Any) -> dict[str, Any]:
     offer_type = offers.get("@type", "")
 
     if offer_type == "AggregateOffer":
-        result["price"] = _to_float(offers.get("lowPrice") or offers.get("price"))
+        lp = offers.get("lowPrice")
+        result["price"] = _to_float(lp if lp is not None else offers.get("price"))
         inner = offers.get("offers")
         if isinstance(inner, list) and inner:
-            result["price"] = _to_float(inner[0].get("price")) or result.get("price")
+            inner_price = _to_float(inner[0].get("price"))
+            result["price"] = inner_price if inner_price is not None else result.get("price")
     else:
         result["price"] = _to_float(offers.get("price"))
 
-    result["currency"] = offers.get("priceCurrency")
+    pc = offers.get("priceCurrency")
+    if pc:
+        result["currency"] = sanitize_text(str(pc).strip(), max_len=200)
     return {k: v for k, v in result.items() if v is not None}
 
 
@@ -255,7 +273,7 @@ def _parse_json_ld_news_article(parsed_data: list[Any]) -> dict[str, Any]:
             result["author"] = author
 
         if article.get("datePublished"):
-            result["date_published"] = str(article["datePublished"])
+            result["date_published"] = sanitize_text(str(article["datePublished"]).strip(), max_len=200)
 
         publisher = _extract_person_or_org_name(article.get("publisher"))
         if publisher:
@@ -329,10 +347,10 @@ def _parse_json_ld_video(parsed_data: list[Any]) -> dict[str, Any]:
             result["description"] = sanitize_text(str(video["description"]).strip(), max_len=500)
 
         if video.get("uploadDate"):
-            result["upload_date"] = str(video["uploadDate"])
+            result["upload_date"] = sanitize_text(str(video["uploadDate"]).strip(), max_len=200)
 
         if video.get("duration"):
-            result["duration"] = str(video["duration"])
+            result["duration"] = sanitize_text(str(video["duration"]).strip(), max_len=200)
 
         # Channel from author (Person or Organization)
         channel = _extract_person_or_org_name(video.get("author"))
@@ -356,6 +374,11 @@ def _parse_json_ld_video(parsed_data: list[Any]) -> dict[str, Any]:
         if img_url and "thumbnail_url" not in result:
             result["thumbnail_url"] = img_url
 
+        logger.debug(
+            "VideoObject JSON-LD: extracted=%s missing=%s",
+            sorted(result.keys()),
+            sorted({"name", "description", "upload_date", "duration", "channel", "thumbnail_url"} - result.keys()),
+        )
         return result
     return {}
 
@@ -390,7 +413,7 @@ def _parse_json_ld_breadcrumblist(parsed_data: list[Any]) -> list[dict[str, Any]
             item = el.get("item")
             if isinstance(item, dict):
                 if item.get("name"):
-                    crumb["name"] = str(item["name"])
+                    crumb["name"] = sanitize_text(str(item["name"]).strip(), max_len=200)
                 url = _is_valid_url(item.get("@id") or item.get("url"))
                 if url:
                     crumb["url"] = url
@@ -401,7 +424,7 @@ def _parse_json_ld_breadcrumblist(parsed_data: list[Any]) -> list[dict[str, Any]
 
             # name can also be at element level
             if "name" not in crumb and el.get("name"):
-                crumb["name"] = str(el["name"])
+                crumb["name"] = sanitize_text(str(el["name"]).strip(), max_len=200)
 
             if crumb.get("name"):
                 crumbs.append(crumb)
@@ -538,9 +561,9 @@ def _parse_json_ld_event(parsed_data: list[Any]) -> dict[str, Any]:
             result["name"] = sanitize_text(str(event["name"]).strip(), max_len=256)
 
         if event.get("startDate"):
-            result["start_date"] = str(event["startDate"])
+            result["start_date"] = sanitize_text(str(event["startDate"]).strip(), max_len=200)
         if event.get("endDate"):
-            result["end_date"] = str(event["endDate"])
+            result["end_date"] = sanitize_text(str(event["endDate"]).strip(), max_len=200)
 
         location = _extract_event_location(event.get("location"))
         if location:
@@ -666,10 +689,10 @@ def _parse_json_ld_local_business(parsed_data: list[Any]) -> dict[str, Any]:
             result["name"] = sanitize_text(str(biz["name"]).strip(), max_len=256)
 
         if biz.get("telephone"):
-            result["telephone"] = str(biz["telephone"]).strip()
+            result["telephone"] = sanitize_text(str(biz["telephone"]).strip(), max_len=200)
 
         if biz.get("priceRange"):
-            result["price_range"] = str(biz["priceRange"]).strip()
+            result["price_range"] = sanitize_text(str(biz["priceRange"]).strip(), max_len=200)
 
         url = _is_valid_url(biz.get("url"))
         if url:
@@ -732,6 +755,7 @@ _ITEMPROP_FIELD_MAP: dict[str, dict[str, str]] = {
     },
     "VideoObject": {
         "name": "name",
+        "author": "channel",
         "uploadDate": "upload_date",
         "duration": "duration",
     },
@@ -804,7 +828,6 @@ _OG_FIELD_MAP: dict[str, dict[str, str]] = {
         "og:title": "name",
         "og:description": "description",
         "og:image": "thumbnail_url",
-        "og:site_name": "channel",
     },
 }
 
@@ -821,6 +844,10 @@ def _parse_og_meta(meta_chunks: list[HtmlChunk], schema_name: str) -> dict[str, 
                 value = chunk.attrs[og_key]
                 if field_name == "price":
                     result[field_name] = _to_float(value)
+                elif field_name in ("image_url", "thumbnail_url"):
+                    validated = _is_valid_url(_html.unescape(str(value)))
+                    if validated:
+                        result[field_name] = validated
                 else:
                     result[field_name] = sanitize_text(str(value), max_len=200)
     return result
@@ -835,7 +862,7 @@ def _parse_h1(heading_chunks: list[HtmlChunk]) -> str | None:
         if chunk.tag == "h1" and chunk.text:
             text = chunk.text.strip()
             if 3 < len(text) < 300:
-                return text
+                return sanitize_text(text, max_len=300)
     return None
 
 
@@ -859,6 +886,119 @@ _DOM_PRICE_RE = re.compile(
 _SHIPPING_KEYWORDS = re.compile(r"(?:shipping|handling|delivery|배송|운임)", re.IGNORECASE)
 
 
+def _extract_price_from_html(html: str) -> float | None:
+    """Last-resort price extraction from raw/pruned HTML using lxml DOM traversal.
+
+    Handles nested Amazon price structures and aria-label fallbacks.
+    Priority: a-offscreen text > price-class text_content > aria-label.
+    """
+    if not html:
+        return None
+    try:
+        from lxml.html import fromstring
+
+        doc = fromstring(html)
+    except Exception:
+        return None
+
+    offscreen: list[float] = []
+    class_content: list[float] = []
+    aria: list[float] = []
+
+    for el in doc.iter():
+        cls = (el.get("class") or "").lower()
+        if not any(kw in cls for kw in ("a-price", "a-offscreen", "price")):
+            continue
+
+        # 1. a-offscreen: Amazon's accessible price (always full text)
+        if "a-offscreen" in cls:
+            text = (el.text or "").strip()
+            if text and not _SHIPPING_KEYWORDS.search(text):
+                m = _DOM_PRICE_RE.search(text)
+                if m:
+                    val = _to_float(re.sub(r"[^\d.,]", "", m.group()))
+                    if val is not None and val > 0:
+                        offscreen.append(val)
+                        continue
+
+        # 2. text_content() for any price-classed element (handles nesting)
+        full_text = el.text_content().strip()
+        if full_text and not _SHIPPING_KEYWORDS.search(full_text):
+            m = _DOM_PRICE_RE.search(full_text)
+            if m:
+                val = _to_float(re.sub(r"[^\d.,]", "", m.group()))
+                if val is not None and val > 0:
+                    class_content.append(val)
+
+        # 3. aria-label fallback
+        aria_text = (el.get("aria-label") or "").strip()
+        if aria_text and not _SHIPPING_KEYWORDS.search(aria_text):
+            m = _DOM_PRICE_RE.search(aria_text)
+            if m:
+                val = _to_float(re.sub(r"[^\d.,]", "", m.group()))
+                if val is not None and val > 0:
+                    aria.append(val)
+
+    # Priority: a-offscreen > class text_content > aria-label
+    for candidates in (offscreen, class_content, aria):
+        if candidates:
+            return candidates[0]
+    return None
+
+
+# --- DOM-based video metadata fallback ---
+
+_CHANNEL_CLASS_KEYWORDS = ("channel-name", "owner-name", "ytd-channel-name", "uploader")
+_VIEW_COUNT_RE = re.compile(
+    r"([\d,.]+(?:\s[\d,.]+)*)\s*(?:views?|회\s*조회)|조회수\s*([\d,.]+(?:\s[\d,.]+)*)",
+    re.IGNORECASE,
+)
+_DURATION_CLASS_KEYWORDS = ("ytp-time-duration", "video-time")
+
+
+def _extract_video_meta_from_dom(heading_chunks: list[HtmlChunk]) -> dict[str, Any]:
+    """Best-effort extraction of video metadata from DOM chunks.
+
+    Scans heading_chunks for video-specific class names and text patterns.
+    This is a last-resort fallback after the JSON-LD → itemprop → OG cascade.
+
+    Note: heading_chunks only contains h1 elements and elements with itemprop
+    attributes (pipeline.py:109). A class-name match only helps when the DOM
+    element also carries an itemprop attribute that placed it in heading_chunks.
+    """
+    result: dict[str, Any] = {}
+    for chunk in heading_chunks:
+        cls = chunk.attrs.get("class", "").lower()
+        text = chunk.text.strip()
+        if not text:
+            continue
+
+        # Channel: require class-name match (text alone is too ambiguous)
+        if "channel" not in result and cls:
+            if any(kw in cls for kw in _CHANNEL_CLASS_KEYWORDS):
+                sanitized = sanitize_text(text, max_len=200)
+                if sanitized:
+                    result["channel"] = sanitized
+
+        # View count: class match OR text-only regex "N views" / "조회수 N"
+        if "view_count" not in result:
+            m = _VIEW_COUNT_RE.search(text)
+            if m:
+                raw = (m.group(1) or m.group(2) or "").strip()
+                count = _to_int(raw)
+                if count is not None:
+                    result["view_count"] = count
+
+        # Duration: require class-name match (too generic otherwise)
+        if "duration" not in result and cls:
+            if any(kw in cls for kw in _DURATION_CLASS_KEYWORDS):
+                sanitized = sanitize_text(text, max_len=200)
+                if sanitized:
+                    result["duration"] = sanitized
+
+    return result
+
+
 def _extract_price_from_dom_chunks(heading_chunks: list[HtmlChunk]) -> float | None:
     """Extract price from DOM chunks using class/text pattern matching.
 
@@ -870,8 +1010,20 @@ def _extract_price_from_dom_chunks(heading_chunks: list[HtmlChunk]) -> float | N
         cls = chunk.attrs.get("class", "")
         chunk_id = chunk.attrs.get("id", "")
         text = chunk.text.strip()
+
+        # When text is empty, try alternative sources before skipping
         if not text:
-            continue
+            # aria-label fallback
+            text = chunk.attrs.get("aria-label", "").strip()
+            if not text:
+                # data-* attribute fallback (e.g. data-a-price, data-price)
+                for attr_key, attr_val in chunk.attrs.items():
+                    if attr_key.startswith("data-") and "price" in attr_key.lower() and attr_val:
+                        text = str(attr_val).strip()
+                        break
+            if not text:
+                continue
+
         # Skip shipping/handling prices
         combined = f"{cls} {chunk_id} {text}"
         if _SHIPPING_KEYWORDS.search(combined):
@@ -899,6 +1051,7 @@ def extract_metadata(
     heading_chunks: list[HtmlChunk],
     schema_name: str,
     source_hint: str | None = None,
+    pruned_html: str | None = None,
 ) -> dict[str, Any]:
     """Extract structured metadata from pre-parsed HtmlChunks.
 
@@ -906,6 +1059,8 @@ def extract_metadata(
 
     If source_hint is provided (e.g. "json_ld"), tries the hinted source first
     and skips the remaining cascade if it yields sufficient results.
+
+    pruned_html: optional pruned HTML for lxml-based price extraction fallback.
     """
     # 1. Parse all JSON-LD chunks once
     parsed_data = _parse_jsonld_chunks(meta_chunks)
@@ -926,10 +1081,25 @@ def extract_metadata(
             if h1:
                 result[name_key] = h1
 
+        if schema_name == "VideoObject":
+            for k, v in _extract_video_meta_from_dom(heading_chunks).items():
+                if k not in result:
+                    result[k] = v
+
         if schema_name == "Product":
             itemlist_items = _parse_json_ld_itemlist(parsed_data)
             if itemlist_items:
                 result["items"] = itemlist_items
+
+            # DOM/HTML price fallback — JSON-LD Product without price
+            if "price" not in result:
+                dom_price = _extract_price_from_dom_chunks(heading_chunks)
+                if dom_price is not None:
+                    result["price"] = dom_price
+                elif pruned_html:
+                    html_price = _extract_price_from_html(pruned_html)
+                    if html_price is not None:
+                        result["price"] = html_price
 
         if breadcrumbs:
             result["breadcrumbs"] = breadcrumbs
@@ -966,6 +1136,16 @@ def extract_metadata(
         dom_price = _extract_price_from_dom_chunks(heading_chunks)
         if dom_price is not None:
             result["price"] = dom_price
+        elif pruned_html:
+            html_price = _extract_price_from_html(pruned_html)
+            if html_price is not None:
+                result["price"] = html_price
+
+    # DOM video metadata fallback for VideoObject schema
+    if schema_name == "VideoObject":
+        for k, v in _extract_video_meta_from_dom(heading_chunks).items():
+            if k not in result:
+                result[k] = v
 
     # Attach breadcrumbs if found
     if breadcrumbs:

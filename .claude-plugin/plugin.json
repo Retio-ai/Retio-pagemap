@@ -1,6 +1,6 @@
 {
   "name": "pagemap",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "description": "Browse and interact with any web page at 97% fewer tokens",
   "author": { "name": "Retio AI", "url": "https://github.com/Retio-ai" },
   "homepage": "https://github.com/Retio-ai/Retio-pagemap",

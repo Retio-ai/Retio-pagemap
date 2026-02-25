@@ -72,6 +72,13 @@ class TestCLISmoke:
         assert r.returncode != 0, f"stdout: {r.stdout}\nstderr: {r.stderr}"
         assert "mutually exclusive" in r.stderr.lower(), f"stderr: {r.stderr}"
 
+    def test_serve_help_shows_server_options(self):
+        """serve --help should list forwarded server options."""
+        r = self._run("serve", "--help")
+        assert r.returncode == 0, f"stderr: {r.stderr}"
+        assert "--transport" in r.stdout, f"stdout: {r.stdout}"
+        assert "--port" in r.stdout, f"stdout: {r.stdout}"
+
     # ── Network tests (require Playwright Chromium) ──────────────
 
     @pytest.mark.network
