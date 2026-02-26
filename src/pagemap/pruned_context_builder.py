@@ -52,6 +52,9 @@ DEFAULT_MAX_TOKENS = 1500
 # Pre-computed lowered option keywords for _compress_for_product
 _option_kw = tuple(t.lower() for t in OPTION_TERMS)
 
+# News schema names that trigger early news-portal detection (pre-AOM hint)
+_NEWS_SCHEMA_NAMES: frozenset[str] = frozenset({"NewsArticle", "Article", "ReportageNewsArticle"})
+
 # Patterns for extracting key information (multilingual)
 PRICE_PATTERN = re.compile(
     r"(?:₩\s*[\d,]+|\d[\d,]+\s*원"
@@ -170,6 +173,12 @@ _HTML_TAG_RE = re.compile(r"<[^>]+>")
 _MULTI_NEWLINE_RE = re.compile(r"\n{3,}")
 _HORIZ_SPACE_RE = re.compile(r"[ \t]+")
 _ANY_WHITESPACE_RE = re.compile(r"\s+")
+
+# CJK → digit boundary: insert space where CJK character directly precedes a digit.
+# Fixes text fusion from stripped inline elements (e.g., "상품323,140" → "상품 323,140").
+# Only CJK→digit direction; digit→CJK ("55,000원") is intentional and left unchanged.
+_CJK_RANGE = r"\u3040-\u30FF\u4E00-\u9FFF\uAC00-\uD7AF"
+_CJK_DIGIT_BOUNDARY_RE = re.compile(rf"([{_CJK_RANGE}])(\d)")
 _LI_SPLIT_RE = re.compile(r"<li[^>]*>", re.IGNORECASE)
 _KRW_PRICE_BARE_RE = re.compile(r"^\d{2,3}(?:,\d{3})+$")
 _DATE_PATTERN_RE = re.compile(r"\d{4}[.\-/]\d{1,2}[.\-/]\d{1,2}")
@@ -201,6 +210,16 @@ _FOOTER_NOISE_RE = re.compile(
 
 # Discount percentage pattern (e.g. "89%", "89% 할인", "30% OFF")
 _DISCOUNT_PCT_RE = re.compile(r"(\d{1,2})%\s*(?:할인|세일|OFF|off|引き|割引|rabatt|remise)?")
+
+# Form control / product variant patterns (size labels, stock, quantity)
+_FORM_CONTROL_RE = re.compile(
+    r"(?:"
+    r"(?:XXS|XS|S|M|L|XL|XXL|2XL|3XL|FREE)\s*[/,]"
+    r"|\b(?:수량|quantity|Qty)\b"
+    r"|\b(?:재고|in stock|out of stock|품절)\b"
+    r")",
+    re.IGNORECASE,
+)
 
 # Extract numeric price value from a price string for comparison
 _PRICE_NUMERIC_RE = re.compile(r"[\d,]+(?:\.\d+)?")
@@ -537,6 +556,7 @@ def _extract_text_lines(html: str) -> list[str]:
     text = _HTML_TAG_RE.sub("\n", cleaned)
     # Decode HTML entities left over after tag stripping
     text = _html.unescape(text)
+    text = _CJK_DIGIT_BOUNDARY_RE.sub(r"\1 \2", text)
     text = text.replace("\xa0", " ")
     text = _MULTI_NEWLINE_RE.sub("\n\n", text)
     text = _HORIZ_SPACE_RE.sub(" ", text)
@@ -1112,6 +1132,7 @@ def _compress_for_product(
     metadata: dict | None = None,
     lc: LocaleConfig | None = None,
     enable_lang_filter: bool = False,
+    doc: Any = None,
 ) -> str:
     """Aggressive compression for product detail pages.
 
@@ -1195,12 +1216,30 @@ def _compress_for_product(
         elif "rating" not in used and RATING_PATTERN.search(line):
             if line not in sections["rating"]:
                 sections["rating"].append(line)
-        elif any(kw in line_lower for kw in _option_kw):
+        elif any(kw in line_lower for kw in _option_kw) or _FORM_CONTROL_RE.search(line):
             sections["options"].append(line)
         elif "title" not in used and not sections["title"] and 10 < len(line) < 200:
             sections["title"].append(line)
         else:
             sections["other"].append(line)
+
+    # -- Phase 2c: DOM-based option extraction (select/option elements) --
+    if doc is not None and not sections["options"]:
+        for el in doc.iter():
+            if not isinstance(el.tag, str) or el.tag != "select":
+                continue
+            opts: list[str] = []
+            for opt in el:
+                if isinstance(opt.tag, str) and opt.tag == "option":
+                    val = (opt.text_content() or "").strip()
+                    if val and val.lower() not in ("선택", "select", "choose", "---", ""):
+                        opts.append(val)
+            if opts:
+                label = el.get("name", "") or el.get("id", "")
+                prefix = label or "options"
+                sections["options"].append(f"{prefix}: {', '.join(opts[:15])}")
+                if len(sections["options"]) >= 5:
+                    break
 
     # "원" post-processing -- only when price not from metadata
     if "price" not in used:
@@ -1225,8 +1264,9 @@ def _compress_for_product(
         parts.append(f"{lc.label_discount}: {sections['discount'][0]}")
     for o in sections["options"][:5]:
         parts.append(o)
-    for d in sections["other"][:5]:
-        if len(d) > 15:
+    _existing_lower = "\n".join(parts).lower()
+    for d in sections["other"][:10]:
+        if len(d) > 8 and d.lower() not in _existing_lower:
             parts.append(d[:200])
 
     # Phase 4: price fallback — scan pruned_html for price class patterns
@@ -1656,6 +1696,8 @@ class CompressorContext:
     card_strategy_hint: str | None = None
     doc: Any = None  # lxml.html.HtmlElement for DOM card detection (pre-parsed)
     enable_lang_filter: bool = False
+    schema_name: str = ""
+    raw_html: str = ""  # for fallback extraction on gutted DOMs
 
 
 def _compress_product_dispatch(ctx: CompressorContext) -> str:
@@ -1665,6 +1707,7 @@ def _compress_product_dispatch(ctx: CompressorContext) -> str:
         metadata=ctx.metadata,
         lc=ctx.lc,
         enable_lang_filter=ctx.enable_lang_filter,
+        doc=ctx.doc,
     )
 
 
@@ -1877,8 +1920,10 @@ def _compress_for_form(pruned_html: str, max_tokens: int) -> str:
     return result
 
 
-def _is_news_portal(pruned_html: str, *, doc: Any = None) -> bool:
+def _is_news_portal(pruned_html: str, *, doc: Any = None, schema_name: str = "") -> bool:
     """Detect news portal pattern in dashboard-classified pages."""
+    if schema_name in _NEWS_SCHEMA_NAMES:
+        return True
     if doc is not None:
         # Single-pass DOM detection (handles nested articles correctly)
         article_count = 0
@@ -1896,7 +1941,7 @@ def _is_news_portal(pruned_html: str, *, doc: Any = None) -> bool:
     return pruned_html.lower().count("<article") >= 3
 
 
-def _compress_for_news_portal(pruned_html: str, max_tokens: int, *, doc: Any = None) -> str:
+def _compress_for_news_portal(pruned_html: str, max_tokens: int, *, doc: Any = None, raw_html: str = "") -> str:
     """News portal: numbered headline list with optional summaries."""
     headlines: list[tuple[str, str]] = []  # (headline, summary)
 
@@ -1953,6 +1998,24 @@ def _compress_for_news_portal(pruned_html: str, max_tokens: int, *, doc: Any = N
                     seen_b.add(key)
                     headlines.append((text[:200], ""))
 
+    if not headlines and raw_html:
+        # Fallback: re-parse raw HTML for headlines lost to AOM pruning
+        try:
+            import lxml.html as _lxml_html
+
+            raw_doc = _lxml_html.fromstring(raw_html)
+            seen_raw: set[str] = set()
+            for el in raw_doc.iter():
+                if not isinstance(el.tag, str):
+                    continue
+                if el.tag in ("h2", "h3"):
+                    text = (el.text_content() or "").strip()
+                    if text and len(text) >= 10 and text.lower() not in seen_raw:
+                        seen_raw.add(text.lower())
+                        headlines.append((text[:200], ""))
+        except Exception:  # nosec B110
+            pass
+
     if not headlines:
         # doc=None: detection succeeded via string fallback but DOM extraction
         # unavailable — _compress_default is still better than dashboard keyword filter.
@@ -1985,10 +2048,12 @@ def _compress_for_news_portal(pruned_html: str, max_tokens: int, *, doc: Any = N
     return result
 
 
-def _compress_for_dashboard(pruned_html: str, max_tokens: int, *, doc: Any = None) -> str:
+def _compress_for_dashboard(
+    pruned_html: str, max_tokens: int, *, doc: Any = None, schema_name: str = "", raw_html: str = ""
+) -> str:
     """Dashboard: key metrics, table summaries (header+row count), navigation."""
-    if _is_news_portal(pruned_html, doc=doc):
-        return _compress_for_news_portal(pruned_html, max_tokens, doc=doc)
+    if _is_news_portal(pruned_html, doc=doc, schema_name=schema_name):
+        return _compress_for_news_portal(pruned_html, max_tokens, doc=doc, raw_html=raw_html)
     lines = _extract_text_lines(pruned_html)
     cpt = _calibrate_chars_per_token(lines, min_len=5, max_line_len=300)
     char_budget = int(max_tokens * cpt * 0.95)
@@ -2232,7 +2297,9 @@ def _compress_form_dispatch(ctx: CompressorContext) -> str:
 
 
 def _compress_dashboard_dispatch(ctx: CompressorContext) -> str:
-    return _compress_for_dashboard(ctx.pruned_html, ctx.max_tokens, doc=ctx.doc)
+    return _compress_for_dashboard(
+        ctx.pruned_html, ctx.max_tokens, doc=ctx.doc, schema_name=ctx.schema_name, raw_html=ctx.raw_html
+    )
 
 
 def _compress_help_faq_dispatch(ctx: CompressorContext) -> str:
@@ -2833,6 +2900,8 @@ def build_pruned_context(
         card_strategy_hint=_card_hint,
         doc=_doc,
         enable_lang_filter=enable_lang_filter,
+        schema_name=schema_name,
+        raw_html=raw_html,
     )
     # Schema overrides take priority (e.g. WikiArticle, VideoObject override page_type compressor)
     if schema_name in _SCHEMA_OVERRIDES and schema_name in _SCHEMA_COMPRESSORS:
@@ -2845,8 +2914,9 @@ def build_pruned_context(
             if compressor is not _compress_default_dispatch:
                 logger.debug("Schema compressor: %s (page_type=%s)", schema_name, page_type)
     context = compressor(ctx)
-    # Release DOM reference (memory)
+    # Release DOM reference and raw HTML (memory)
     ctx.doc = None
+    ctx.raw_html = ""
     if result is not None:
         result.doc = None
     t3 = _time.monotonic()

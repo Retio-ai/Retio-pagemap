@@ -29,11 +29,34 @@ def _to_float(v: Any) -> float | None:
     if v is None:
         return None
     try:
+        # Fast path: already numeric (skip string heuristics)
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            return float(v)
+
         s = str(v).strip()
-        if "." in s and "," in s and s.rfind(",") > s.rfind("."):
-            s = s.replace(".", "").replace(",", ".")
-        else:
+
+        if "." in s and "," in s:
+            # Mixed delimiters: check which comes last
+            if s.rfind(",") > s.rfind("."):
+                # European: "1.500,99" → period=thousands, comma=decimal
+                s = s.replace(".", "").replace(",", ".")
+            else:
+                # US: "1,500.99" → comma=thousands, period=decimal
+                s = s.replace(",", "")
+        elif "," in s:
+            # Commas only: treat as thousands separator
             s = s.replace(",", "")
+        elif "." in s:
+            # Periods only: heuristic based on digit grouping
+            parts = s.lstrip("-").split(".")
+            if len(parts) > 2:
+                # Multiple periods → all thousands ("1.500.000" → 1500000)
+                s = s.replace(".", "")
+            elif len(parts) == 2 and len(parts[1]) == 3:
+                # Exactly 3 digits after single period → thousands ("1.500" → 1500)
+                s = s.replace(".", "")
+            # else: decimal point ("1.5", "3.14", "29.99")
+
         return float(s)
     except (ValueError, TypeError):
         return None

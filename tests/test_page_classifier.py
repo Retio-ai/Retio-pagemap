@@ -244,8 +244,7 @@ class TestNewPageTypesWithDOM:
             <table><tr><td>Metric 1</td></tr></table>
             <table><tr><td>Metric 2</td></tr></table>
             <canvas id="chart1"></canvas>
-            <svg id="chart2"></svg>
-            <svg id="chart3"></svg>
+            <canvas id="chart2"></canvas>
         </body></html>"""
         result = classify_page(url, raw_html=html)
         assert result.page_type == "dashboard"
@@ -541,7 +540,7 @@ class TestDomCapBehavior:
         html = """<html><body>
             <table><tr><td>A</td></tr></table>
             <table><tr><td>B</td></tr></table>
-            <canvas></canvas><svg></svg><svg></svg><svg></svg>
+            <canvas></canvas><canvas></canvas>
             <nav role="navigation"><div class="sidebar">Nav</div></nav>
             <p>Dashboard content with metrics and analytics data.</p>
         </body></html>"""
@@ -558,7 +557,7 @@ class TestDomCapBehavior:
         </head><body>
             <table><tr><td>A</td></tr></table>
             <table><tr><td>B</td></tr></table>
-            <canvas></canvas><svg></svg><svg></svg><svg></svg>
+            <canvas></canvas><canvas></canvas>
             <nav role="navigation"><div class="sidebar">Nav</div></nav>
             <p>Enough visible content to pass the threshold check easily.</p>
         </body></html>"""
@@ -571,7 +570,7 @@ class TestDomCapBehavior:
         html = """<html><body>
             <table><tr><td>Metric A</td></tr></table>
             <table><tr><td>Metric B</td></tr></table>
-            <canvas></canvas><svg></svg><svg></svg><svg></svg>
+            <canvas></canvas><canvas></canvas>
             <nav role="navigation"><div class="sidebar">Sidebar</div></nav>
             <p>Dashboard with enough content to display metrics and analytics data for users.</p>
         </body></html>"""
@@ -656,11 +655,11 @@ _CROSS_TYPE_CASES = [
     ("https://www.amazon.com/dp/B09V3KXJPB", "product_detail"),  # 20+25=45
 ]
 
-# Heavy dashboard DOM: 2 tables + 3 SVGs + sidebar nav + enough text (>200 chars)
+# Heavy dashboard DOM: 2 tables + 2 canvases + sidebar nav + enough text (>200 chars)
 _HEAVY_DASHBOARD_HTML = """<html><body>
     <table><tr><td>Metric A value</td></tr></table>
     <table><tr><td>Metric B value</td></tr></table>
-    <canvas></canvas><svg></svg><svg></svg><svg></svg>
+    <canvas></canvas><canvas></canvas>
     <nav role="navigation"><div class="sidebar">Navigation</div></nav>
     <p>This page contains sufficient visible text content to avoid triggering the
     short-content error signal. The text needs to be longer than two hundred characters
@@ -734,3 +733,308 @@ class TestBlockedPageType:
     def test_modern_provider_datadome(self):
         html = '<html><body><div class="datadome-captcha"></div><p>Verify</p></body></html>'
         assert classify_page("https://example.com/page", raw_html=html).page_type == "blocked"
+
+
+# ---------------------------------------------------------------------------
+# Listing vs product_detail disambiguation
+# ---------------------------------------------------------------------------
+
+
+def _make_product_links(n: int) -> str:
+    """Generate n <a> tags with product-like hrefs."""
+    return "\n".join(f'<a href="/products/{i}">Product {i}</a>' for i in range(n))
+
+
+class TestListingVsProductDetail:
+    """Category/listing pages must not be misclassified as product_detail."""
+
+    def test_musinsa_categories_with_cart_and_links(self):
+        """Musinsa /categories/ + 15× cart keywords + 25 product links + JSON-LD Product → listing."""
+        url = "https://www.musinsa.com/categories/001"
+        cart_buttons = "<button>장바구니</button>\n" * 15
+        product_links = _make_product_links(25)
+        html = f"""<html><head>
+            <script type="application/ld+json">{{"@type": "Product", "name": "Sample"}}</script>
+        </head><body>
+            <h1>카테고리 목록</h1>
+            {cart_buttons}
+            {product_links}
+            <p>{"상품 목록 페이지입니다. " * 20}</p>
+        </body></html>"""
+        result = classify_page(url, raw_html=html)
+        assert result.page_type == "listing", (
+            f"Expected listing but got {result.page_type} (score={result.score}, signals={result.signals})"
+        )
+
+    def test_collections_with_itemlist_jsonld(self):
+        """/collections/ + ItemList JSON-LD → listing."""
+        url = "https://shop.com/collections/summer"
+        html = """<html><head>
+            <script type="application/ld+json">{"@type": "ItemList", "itemListElement": []}</script>
+        </head><body>
+            <h1>Summer Collection</h1>
+            <p>Browse our summer collection of products and accessories.</p>
+        </body></html>"""
+        result = classify_page(url, raw_html=html)
+        assert result.page_type == "listing"
+
+    def test_small_category_with_itemlist_jsonld(self):
+        """Small category page + ItemList JSON-LD → listing."""
+        url = "https://shop.com/category/shoes"
+        html = """<html><head>
+            <script type="application/ld+json">{"@type": "ItemList", "itemListElement": []}</script>
+        </head><body>
+            <h1>Shoes</h1>
+            <div class="grid">
+                <div class="card">Shoe 1</div>
+                <div class="card">Shoe 2</div>
+            </div>
+        </body></html>"""
+        result = classify_page(url, raw_html=html)
+        assert result.page_type == "listing"
+
+    def test_collection_url_only(self):
+        """/collection/ URL alone → listing."""
+        url = "https://shop.com/collection/winter-2026"
+        result = classify_page(url)
+        assert result.page_type == "listing"
+
+    def test_product_under_category_stays_product(self):
+        """Product nested under /category/ (has /product/) + JSON-LD Product + single cart → product_detail."""
+        url = "https://shop.com/category/shoes/product/123"
+        html = """<html><head>
+            <script type="application/ld+json">{"@type": "Product", "name": "Running Shoe"}</script>
+        </head><body>
+            <h1>Running Shoe</h1>
+            <button>Add to Cart</button>
+            <p>This premium running shoe features advanced cushioning technology for maximum comfort.</p>
+        </body></html>"""
+        result = classify_page(url, raw_html=html)
+        assert result.page_type == "product_detail", (
+            f"Expected product_detail but got {result.page_type} (score={result.score}, signals={result.signals})"
+        )
+
+    def test_musinsa_goods_stays_product(self):
+        """musinsa.com/goods/1234 → product_detail (backward compat)."""
+        url = "https://www.musinsa.com/goods/1234"
+        result = classify_page(url)
+        assert result.page_type == "product_detail"
+
+
+class TestJsonldPriority:
+    """JSON-LD page-level types take priority over item-level types."""
+
+    def test_product_before_itemlist(self):
+        """Page with Product block before ItemList block → listing (priority resolution)."""
+        url = "https://shop.com/page"
+        html = """<html><head>
+            <script type="application/ld+json">{"@type": "Product", "name": "Item 1"}</script>
+            <script type="application/ld+json">{"@type": "ItemList", "itemListElement": []}</script>
+        </head><body>
+            <p>Product listing page with multiple items displayed in a grid layout.</p>
+        </body></html>"""
+        result = classify_page(url, raw_html=html)
+        assert result.page_type == "listing"
+
+    def test_product_only_stays_product(self):
+        """Page with only Product block → product_detail (unchanged behavior)."""
+        url = "https://shop.com/page"
+        html = """<html><head>
+            <script type="application/ld+json">{"@type": "Product", "name": "Widget"}</script>
+        </head><body>
+            <p>A single product page with detailed description of the widget and its features.</p>
+        </body></html>"""
+        result = classify_page(url, raw_html=html)
+        assert result.page_type == "product_detail"
+
+
+# ---------------------------------------------------------------------------
+# @graph multi-type resolution
+# ---------------------------------------------------------------------------
+
+
+class TestGraphMultiType:
+    """@graph blocks with multiple types must expose ALL types to priority logic."""
+
+    def test_graph_with_product_and_itemlist(self):
+        """@graph containing both Product and ItemList → listing (page-level priority)."""
+        url = "https://shop.com/category/shoes"
+        html = """<html><head>
+            <script type="application/ld+json">{
+                "@graph": [
+                    {"@type": "Product", "name": "Shoe A"},
+                    {"@type": "ItemList", "itemListElement": []}
+                ]
+            }</script>
+        </head><body>
+            <p>Browse our collection of shoes with multiple items displayed.</p>
+        </body></html>"""
+        result = classify_page(url, raw_html=html)
+        assert result.page_type == "listing"
+
+    def test_graph_with_product_only(self):
+        """@graph containing only Product → product_detail."""
+        url = "https://shop.com/item/123"
+        html = """<html><head>
+            <script type="application/ld+json">{
+                "@graph": [
+                    {"@type": "Product", "name": "Widget"}
+                ]
+            }</script>
+        </head><body>
+            <p>A single product with detailed description and specifications.</p>
+        </body></html>"""
+        result = classify_page(url, raw_html=html)
+        assert result.page_type == "product_detail"
+
+
+# ---------------------------------------------------------------------------
+# Deterministic tie-breaking
+# ---------------------------------------------------------------------------
+
+
+class TestDeterministicTieBreaking:
+    """Equal scores must be resolved deterministically by type priority."""
+
+    def test_cos_tie_deterministic(self):
+        """COS /women/product.abc: PD=20, listing=20 → product_detail wins by priority."""
+        url = "https://www.cos.com/ko-kr/women/product.facade-straight-leg-jeans-dusty-blue.1205065015.html"
+        result = classify_page(url)
+        assert result.page_type == "product_detail"
+        assert result.runner_up_score == 20
+
+
+# ---------------------------------------------------------------------------
+# Landing JSON-LD weight
+# ---------------------------------------------------------------------------
+
+
+class TestLandingJsonld:
+    """JSON-LD types that map to 'landing' must contribute weight."""
+
+    def test_landing_event_jsonld(self):
+        """Non-root URL with Event JSON-LD → landing."""
+        url = "https://example.com/events/summer-fest"
+        html = """<html><head>
+            <script type="application/ld+json">{"@type": "Event", "name": "Summer Fest"}</script>
+        </head><body>
+            <p>Join us for the annual summer festival with live music and food.</p>
+        </body></html>"""
+        result = classify_page(url, raw_html=html)
+        assert result.page_type == "landing"
+
+    def test_landing_localbusiness_jsonld(self):
+        """Non-root URL with LocalBusiness JSON-LD → landing."""
+        url = "https://example.com/locations/downtown"
+        html = """<html><head>
+            <script type="application/ld+json">{"@type": "LocalBusiness", "name": "Downtown Office"}</script>
+        </head><body>
+            <p>Visit our downtown location for all your service needs.</p>
+        </body></html>"""
+        result = classify_page(url, raw_html=html)
+        assert result.page_type == "landing"
+
+    def test_landing_root_with_restaurant_jsonld(self):
+        """Root URL with Restaurant JSON-LD → landing, score >= 60."""
+        url = "https://restaurant.example.com/"
+        html = """<html><head>
+            <script type="application/ld+json">{"@type": "Restaurant", "name": "Chez Claude"}</script>
+        </head><body>
+            <p>Welcome to Chez Claude, fine dining in the heart of the city.</p>
+        </body></html>"""
+        result = classify_page(url, raw_html=html)
+        assert result.page_type == "landing"
+        assert result.score >= 60
+
+
+# ---------------------------------------------------------------------------
+# Signal-diversity tie-breaking
+# ---------------------------------------------------------------------------
+
+
+class TestSignalDiversityTieBreaking:
+    """When two types tie on score, the one with more primary signals wins."""
+
+    def test_article_beats_news_by_diversity(self):
+        """BBC Korean: /articles/ URL + og:type=article + JSON-LD ReportageNewsArticle → article wins."""
+        url = "https://www.bbc.com/korean/articles/cly824p3d2zo"
+        html = """<html><head>
+            <meta property="og:type" content="article" />
+            <script type="application/ld+json">{"@type": "ReportageNewsArticle"}</script>
+        </head><body>
+            <article>
+                <h1>BBC Korean Article Title</h1>
+                <p>Article body content with enough text for proper classification.
+                This needs to be sufficiently long to avoid the short content signal.</p>
+            </article>
+        </body></html>"""
+        result = classify_page(url, raw_html=html)
+        assert result.page_type == "article"
+        # Both score identically; article wins by signal diversity (2 primary vs 1)
+        assert result.runner_up == "news"
+        assert result.score == result.runner_up_score
+
+    def test_news_beats_article_by_diversity(self):
+        """/news/ URL + JSON-LD NewsArticle → news wins (2 primary vs 1)."""
+        url = "https://example.com/news/breaking-story"
+        html = """<html><head>
+            <script type="application/ld+json">{"@type": "NewsArticle"}</script>
+        </head><body>
+            <p>Breaking news content with sufficient text for classification.</p>
+        </body></html>"""
+        result = classify_page(url, raw_html=html)
+        assert result.page_type == "news"
+
+
+# ---------------------------------------------------------------------------
+# DOM false-positive regression tests
+# ---------------------------------------------------------------------------
+
+
+class TestDomFalsePositiveRegression:
+    """Tightened DOM signals must not fire on common false-positive patterns."""
+
+    def test_svg_icons_no_chart_signal(self):
+        """5 SVG icons should NOT trigger dom_chart_elements."""
+        url = "https://example.com/page"
+        html = """<html><body>
+            <svg class="icon"></svg><svg class="icon"></svg>
+            <svg class="icon"></svg><svg class="icon"></svg>
+            <svg class="icon"></svg>
+            <p>Page with icon SVGs but no canvas charts.</p>
+        </body></html>"""
+        result = classify_page(url, raw_html=html)
+        assert "dom_chart_elements" not in result.signals
+
+    def test_dropdown_css_no_version_selector(self):
+        """ "version" + "dropdown" CSS class should NOT trigger dom_version_selector."""
+        url = "https://example.com/page"
+        html = """<html><body>
+            <div class="dropdown">Menu</div>
+            <span>version 2.0</span>
+            <p>Page with dropdown CSS and version text but no select element.</p>
+        </body></html>"""
+        result = classify_page(url, raw_html=html)
+        assert "dom_version_selector" not in result.signals
+
+    def test_css_progress_no_step_indicator(self):
+        """ "progress" + "step" in CSS should NOT trigger dom_step_indicator."""
+        url = "https://example.com/page"
+        html = """<html><body>
+            <div class="progress">Loading</div>
+            <span>step 1</span>
+            <p>Page with progress bar and step text but no wizard widget.</p>
+        </body></html>"""
+        result = classify_page(url, raw_html=html)
+        assert "dom_step_indicator" not in result.signals
+
+    def test_nine_sections_no_many_sections(self):
+        """9 <section> elements should NOT trigger dom_many_sections."""
+        url = "https://example.com/page"
+        sections = "\n".join(f"<section>Section {i}</section>" for i in range(9))
+        html = f"""<html><body>
+            {sections}
+            <p>Page with 9 sections, below the threshold of 10.</p>
+        </body></html>"""
+        result = classify_page(url, raw_html=html)
+        assert "dom_many_sections" not in result.signals

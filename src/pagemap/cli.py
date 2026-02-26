@@ -106,23 +106,20 @@ def cmd_validate(args: argparse.Namespace) -> None:
     if args.url:
         urls = [args.url]
     elif args.all:
+        from .collect import _resolve_url_map
+
         urls = []
         for _site_id, site in config["sites"].items():
             if site.get("collection") == "manual_only":
                 continue
-            site_urls = site.get("urls", {})
-            if isinstance(site_urls, dict):
-                # Phase 1 format: {page_type: [urls]}
-                for page_type_urls in site_urls.values():
-                    urls.extend(page_type_urls[:1])
-            else:
-                urls.extend(site_urls[:2])
+            url_map = _resolve_url_map(site)
+            for page_urls in url_map.values():
+                urls.extend(page_urls[:1])
     else:
-        coupang_urls = config["sites"]["coupang"]["urls"]
-        if isinstance(coupang_urls, dict):
-            urls = list(coupang_urls.values())[0][:1]
-        else:
-            urls = coupang_urls[:1]
+        from .collect import _resolve_url_map
+
+        url_map = _resolve_url_map(config["sites"]["coupang"])
+        urls = list(url_map.values())[0][:1] if url_map else []
 
     results = asyncio.run(validate_urls(urls))
     print_validation_report(results)
@@ -867,11 +864,12 @@ def _get_server_options_help() -> str:
         pass
 
     raw = buf.getvalue()
-    # Extract lines after "options:" header, skipping -h/--help entry
+    # Extract lines after options header, skipping -h/--help entry
     lines = raw.splitlines()
     start = None
     for i, line in enumerate(lines):
-        if line.rstrip() == "options:":
+        stripped = line.rstrip()
+        if stripped in ("options:", "optional arguments:"):
             start = i + 1
             break
     if start is None:
@@ -917,7 +915,8 @@ class _ServeHelpAction(argparse.Action):
             server_opts = _get_server_options_help()
             if server_opts:
                 print(f"\nforwarded server options:\n{server_opts}")
-        except Exception:
+        except (ImportError, AttributeError, TypeError) as exc:
+            logging.debug("ServeHelpAction fallback: %s", exc)
             print(
                 "\n(could not load server options — run 'pagemap serve' to check dependencies)",
                 file=sys.stderr,

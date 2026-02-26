@@ -112,7 +112,7 @@ class TestSessionContextManager:
                 async with pool.session("s1"):
                     pass
                 # Semaphore should be released (can acquire again)
-                assert pool._semaphore._value == 2  # max_contexts restored
+                assert pool._available_slots == 2  # max_contexts restored
 
 
 class TestSessionExceptionReleases:
@@ -129,7 +129,7 @@ class TestSessionExceptionReleases:
                     async with pool.session("s1"):
                         raise RuntimeError("test error")
                 # Semaphore still released
-                assert pool._semaphore._value == 2
+                assert pool._available_slots == 2
 
 
 # ---------------------------------------------------------------------------
@@ -197,9 +197,9 @@ class TestReleaseNonexistent:
     async def test_no_semaphore_inflation(self, mock_pw):
         pw, browser = mock_pw
         async with BrowserPool(max_contexts=3) as pool:
-            sem_before = pool._semaphore._value
+            sem_before = pool._available_slots
             await pool.release("nonexistent")
-            assert pool._semaphore._value == sem_before
+            assert pool._available_slots == sem_before
 
 
 # ---------------------------------------------------------------------------
@@ -299,7 +299,7 @@ class TestReaperRemovesIdle:
                 with patch("pagemap.browser_pool._REAPER_INTERVAL", 0.05):
                     # acquire() holds semaphore slot (value 2→1)
                     await pool.acquire("s1")
-                    assert pool._semaphore._value == 1
+                    assert pool._available_slots == 1
                     pool._contexts["s1"].last_used_at = time.monotonic() - 1.0
 
                     # Restart reaper with fast interval
@@ -313,7 +313,7 @@ class TestReaperRemovesIdle:
                     await asyncio.sleep(0.2)
                     assert "s1" not in pool._contexts
                     # Semaphore slot must be restored
-                    assert pool._semaphore._value == 2
+                    assert pool._available_slots == 2
 
     async def test_reaper_no_over_release_for_session_cm(self, mock_pw):
         """Reaper must NOT release semaphore for session() CM entries."""
@@ -328,7 +328,7 @@ class TestReaperRemovesIdle:
                     async with pool.session("s1"):
                         pass
                     # Semaphore fully restored after CM exit
-                    assert pool._semaphore._value == 2
+                    assert pool._available_slots == 2
                     assert "s1" in pool._contexts
                     pool._contexts["s1"].last_used_at = time.monotonic() - 1.0
 
@@ -343,7 +343,7 @@ class TestReaperRemovesIdle:
                     await asyncio.sleep(0.2)
                     assert "s1" not in pool._contexts
                     # Semaphore must NOT inflate beyond max_contexts
-                    assert pool._semaphore._value == 2
+                    assert pool._available_slots == 2
 
 
 class TestReaperCrashRecovery:
@@ -430,3 +430,90 @@ class TestHealthCheck:
         async with BrowserPool(max_contexts=3) as pool:
             assert pool.active_count == 0
             assert pool.capacity == 3
+
+
+# ---------------------------------------------------------------------------
+# _available_slots tracking
+# ---------------------------------------------------------------------------
+
+
+class TestAvailableSlotsTracking:
+    """_available_slots counter tracks correctly through acquire/release cycles."""
+
+    async def test_initial_value(self, mock_pw):
+        pw, browser = mock_pw
+        async with BrowserPool(max_contexts=4) as pool:
+            assert pool._available_slots == 4
+
+    async def test_decrements_on_session_acquire(self, mock_pw):
+        pw, browser = mock_pw
+        with patch("pagemap.browser_pool.BrowserSession") as MockBS:
+            MockBS.return_value = _mock_browser_session()
+
+            async with BrowserPool(max_contexts=3) as pool, pool.session("s1"):
+                assert pool._available_slots == 2
+
+    async def test_restores_on_session_release(self, mock_pw):
+        pw, browser = mock_pw
+        with patch("pagemap.browser_pool.BrowserSession") as MockBS:
+            MockBS.return_value = _mock_browser_session()
+
+            async with BrowserPool(max_contexts=3) as pool:
+                async with pool.session("s1"):
+                    pass
+                assert pool._available_slots == 3
+
+    async def test_decrements_on_low_level_acquire(self, mock_pw):
+        pw, browser = mock_pw
+        with patch("pagemap.browser_pool.BrowserSession") as MockBS:
+            MockBS.return_value = _mock_browser_session()
+
+            async with BrowserPool(max_contexts=3) as pool:
+                await pool.acquire("s1")
+                assert pool._available_slots == 2
+                await pool.release("s1")
+
+    async def test_restores_on_low_level_release(self, mock_pw):
+        pw, browser = mock_pw
+        with patch("pagemap.browser_pool.BrowserSession") as MockBS:
+            MockBS.return_value = _mock_browser_session()
+
+            async with BrowserPool(max_contexts=3) as pool:
+                await pool.acquire("s1")
+                await pool.release("s1")
+                assert pool._available_slots == 3
+
+    async def test_multiple_acquire_release_cycles(self, mock_pw):
+        pw, browser = mock_pw
+        call_count = 0
+
+        def make_session(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            return _mock_browser_session()
+
+        with patch("pagemap.browser_pool.BrowserSession", side_effect=make_session):
+            async with BrowserPool(max_contexts=3) as pool:
+                assert pool._available_slots == 3
+
+                await pool.acquire("s1")
+                assert pool._available_slots == 2
+
+                await pool.acquire("s2")
+                assert pool._available_slots == 1
+
+                await pool.release("s1")
+                assert pool._available_slots == 2
+
+                await pool.release("s2")
+                assert pool._available_slots == 3
+
+    async def test_restores_on_acquire_create_failure(self, mock_pw):
+        pw, browser = mock_pw
+        with patch("pagemap.browser_pool.BrowserSession") as MockBS:
+            MockBS.return_value.start_from_pool = AsyncMock(side_effect=RuntimeError("boom"))
+
+            async with BrowserPool(max_contexts=3) as pool:
+                with pytest.raises(RuntimeError, match="boom"):
+                    await pool.acquire("s1")
+                assert pool._available_slots == 3

@@ -26,12 +26,13 @@ from pagemap.pruning.aom_filter import (
     AomFilterStats,
     _compute_weight,
     _count_noise_matches,
+    _detect_repeating_grids,
     _is_body_direct_child,
     _is_inside_article_or_main,
     aom_filter,
     derive_pruned_regions,
 )
-from tests._pruning_helpers import html, parse_el
+from tests._pruning_helpers import html, parse_doc, parse_el
 
 # ---------------------------------------------------------------------------
 # TestIsBodyDirectChild
@@ -494,3 +495,89 @@ class TestStatsAfterRescue:
         assert stats.content_rescue_count == 0
         assert sum(stats.removal_reasons.values()) == stats.removed_nodes
         assert stats.removed_nodes >= 1
+
+
+# ---------------------------------------------------------------------------
+# TestGridWhitelistAncestor — ancestor protection for grid containers
+# ---------------------------------------------------------------------------
+
+
+class TestGridWhitelistAncestor:
+    """Grid whitelist must protect ancestors of whitelisted containers."""
+
+    def test_grid_whitelist_ancestor_weight(self):
+        """_compute_weight() returns (0.8, 'grid-whitelist-ancestor') for an
+        element whose descendant is in the grid whitelist."""
+        # Build a DOM: body > div > div > ul (whitelisted grid)
+        doc, tree = parse_doc(
+            html(
+                "<div>"
+                "  <div>"
+                "    <ul>"
+                + "".join(f'<li><a href="/p/{i}">Product {i} name text padding here</a></li>' for i in range(5))
+                + "    </ul>"
+                "  </div>"
+                "</div>"
+            )
+        )
+        # The outer div has high link density — would normally be penalized
+        outer_div = doc.find(".//body/div")
+        assert outer_div is not None
+
+        # Simulate grid whitelist containing the <ul>
+        ul = doc.find(".//ul")
+        ul_xpath = tree.getpath(ul)
+        grid_whitelist = {ul_xpath}
+
+        weight, reason = _compute_weight(outer_div, grid_whitelist=grid_whitelist, tree=tree)
+        assert weight == 0.8
+        assert reason == "grid-whitelist-ancestor"
+
+    def test_grid_whitelist_ancestor_survives_aom(self):
+        """Integration: ancestor of whitelisted grid survives aom_filter()."""
+        # Build a product listing: main > div (high link density) > ul (grid)
+        items = "".join(
+            f'<li><a href="/p/{i}">Product {i} with enough text to exceed threshold easily</a></li>' for i in range(5)
+        )
+        doc = lxml.html.document_fromstring(html(f"<main><div><ul>{items}</ul></div></main>"))
+        # Detect grids and run AOM filter
+        grid_whitelist = _detect_repeating_grids(doc)
+        assert len(grid_whitelist) >= 1, "Precondition: grid should be detected"
+
+        aom_filter(doc, grid_whitelist=grid_whitelist)
+
+        # The outer div (ancestor of grid) should survive
+        main_div = doc.find(".//main/div")
+        assert main_div is not None, "Ancestor of whitelisted grid was incorrectly removed"
+        # The ul grid itself should survive
+        assert doc.find(".//ul") is not None
+
+
+# ---------------------------------------------------------------------------
+# TestMainDirectChildProtection — direct children of <main> are protected
+# ---------------------------------------------------------------------------
+
+
+class TestMainDirectChildProtection:
+    """Direct children of <main> must not be removed by AOM filter."""
+
+    def test_main_direct_child_not_removed(self):
+        """Direct child of <main> with 100% link density survives AOM."""
+        # Build a div directly under <main> with all-link content
+        link_text = "Product listing link text " * 5  # long link text for high density
+        doc = lxml.html.document_fromstring(html(f"<main><div><a href='/products'>{link_text}</a></div></main>"))
+        aom_filter(doc)
+        # The direct child div should survive
+        main_div = doc.find(".//main/div")
+        assert main_div is not None, "Direct child of <main> was incorrectly removed"
+
+    def test_main_grandchild_nav_still_removed(self):
+        """<nav> nested under <main>/<div> is still removed (not a direct child)."""
+        doc = lxml.html.document_fromstring(
+            html("<main><div><nav>Navigation links here</nav><p>Content</p></div></main>")
+        )
+        aom_filter(doc)
+        # The nav is a grandchild of main (main > div > nav), not a direct child
+        assert doc.find(".//nav") is None, "<nav> grandchild of <main> should still be removed"
+        # The direct child div should survive
+        assert doc.find(".//main/div") is not None

@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-02-26
+
+### Added
+
+- **Credit debit middleware** — `CreditMiddleware` ASGI middleware deducts credits per tool call before dispatching to the MCP handler. Integrates with `CreditRepositoryProtocol` (SQLite + in-memory). Returns HTTP 402 with RFC 9457 `problem+json` body when balance is insufficient
+- **Redis distributed rate limiter** — `RedisRateLimiter` implements token-bucket algorithm via a Lua script executed atomically on Redis. Replaces in-process `RateLimiter` for multi-worker deployments. `RateLimiterProtocol` allows runtime selection between in-memory and Redis backends
+- **CQP agent behavior signal events** — Two new telemetry event types for tracking agent tool usage patterns: `TOOL_CALL_SEQUENCE` (session-level tool sequence with timing deltas) and `TOOL_DISAGREEMENT` (consecutive-same-tool and same-URL-recall signals). TypedDict payloads + builder functions added to `telemetry/events.py`
+- **`OtlpHttpExporter`** — Cloud telemetry exporter with OTLP-JSON over HTTP, gzip compression, retryable 429/502/503/504 responses, `Retry-After` header parsing, exponential backoff + jitter
+- **`config.py` 3-layer telemetry config** — `TelemetryConfig` resolves settings from YAML file → environment variables → CLI flags in priority order. Supports `sample_rate`, `batch_size`, `flush_interval`
+- **`FanOutWriter`** — Multiplexes telemetry events to multiple writers (e.g., local JSONL + remote OTLP) simultaneously
+- **Paddle payment infrastructure** — `src/pagemap/paddle/` module: `webhook.py` (ASGI middleware, HMAC-SHA256 signature verification, 30 s replay tolerance, idempotency gate via `event_id`), `signature.py` (constant-time `hmac.compare_digest`), `credits.py` (`CreditRepositoryProtocol`, SQLite schema v2 with `CHECK ≥ 0`, `BEGIN IMMEDIATE` atomic writes), `products.py` (3 credit pack tiers: $10/500, $25/1500, $50/5000), `checkout.py` (`paddle-python-sdk` lazy import), `config.py` (`PaddleConfig` from env). 4 telemetry events: `PADDLE_WEBHOOK_RECEIVED`, `PADDLE_CREDITS_ADDED`, `PADDLE_WEBHOOK_INVALID`, `PADDLE_WEBHOOK_DUPLICATE`
+
+### Changed
+
+- **`_to_float()` European thousand-separator parsing** — Single-separator strings like `"1.500"` are now correctly parsed as `1500.0` when the separator is in a thousands position (3 digits follow). Previously returned `1.5`
+- **BBC News pre-AOM portal hint** — `bbc.co.uk` and `bbc.com` domains are now classified as news portals before AOM processing, ensuring the news portal compressor is applied even on pages where `<article>` count is low
+- **Inline element boundary spacing** — Inline tags (`<a>`, `<strong>`, `<em>`, `<span>`, `<b>`, `<i>`) now insert a space at their boundary during text extraction, preventing word concatenation artifacts (e.g., `"priceitem"` → `"price item"`)
+- **`product_detail` option UI preservation** — Option selector elements (size/color dropdowns, radio buttons) are now rescued from AOM removal for `product_detail` pages, recovering 47 → 100+ tokens of structured option information
+- **Page classifier: category listing fix** — Category index pages (e.g., `/category/women`) are now correctly classified as `listing` rather than `article`. Scoring weight for path-based listing signals increased
+- **Semaphore pool slot leak fixed** — `BrowserPool` no longer accesses `Semaphore._value` (private CPython attribute). Slot count is now tracked via an explicit `_available` counter, eliminating `AttributeError` on non-CPython runtimes and future CPython versions
+- **`ServeHelpAction` parsing stabilization** — `_ServeHelpAction.__call__` now catches `SystemExit` raised by argparse during help generation; help text is always printed even if the subparser raises
+- **Sensitive tests moved to `tests/private/`** — Auth, rate limiter, billing, telemetry, and SSRF telemetry test files relocated to `tests/private/` (excluded from public release). `release.sh` updated accordingly
+- 4377 → 4735 tests passing (+358)
+
+### Fixed
+
+- Unused variable assignments removed from `test_redis_rate_limiter.py` and `test_ssrf_telemetry.py`
+- Import sort order corrected in `rate_limiter.py`, `redis_rate_limiter.py`, and related test files (ruff I001)
+
 ## [0.7.2] - 2026-02-25
 
 ### Security

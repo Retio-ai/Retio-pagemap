@@ -8,6 +8,7 @@ from __future__ import annotations
 import lxml.html
 
 from pagemap.pruned_context_builder import (
+    _NEWS_SCHEMA_NAMES,
     _compress_for_dashboard,
     _compress_for_news_portal,
     _is_news_portal,
@@ -262,3 +263,108 @@ class TestDashboardIntegration:
         assert "total" in result.lower() or "revenue" in result.lower()
         # Should NOT have numbered list format
         assert "1." not in result
+
+
+# ---------------------------------------------------------------------------
+# TestNewsPortalSchemaHint
+# ---------------------------------------------------------------------------
+
+
+class TestNewsPortalSchemaHint:
+    def test_schema_newsarticle_triggers_detection(self):
+        """schema_name='NewsArticle' triggers news portal detection even with minimal HTML."""
+        html = "<html><body><p>Some dashboard content</p></body></html>"
+        assert _is_news_portal(html, schema_name="NewsArticle") is True
+
+    def test_schema_article_triggers_detection(self):
+        assert _is_news_portal("<html><body></body></html>", schema_name="Article") is True
+
+    def test_schema_reportage_triggers_detection(self):
+        assert _is_news_portal("<html><body></body></html>", schema_name="ReportageNewsArticle") is True
+
+    def test_schema_product_no_false_positive(self):
+        """schema_name='Product' should NOT trigger news portal detection."""
+        html = "<html><body><p>Some content</p></body></html>"
+        assert _is_news_portal(html, schema_name="Product") is False
+
+    def test_schema_empty_no_false_positive(self):
+        """Empty schema_name should not trigger."""
+        html = "<html><body><p>Some content</p></body></html>"
+        assert _is_news_portal(html, schema_name="") is False
+
+    def test_dashboard_with_schema_routes_to_news(self):
+        """_compress_for_dashboard with schema_name='NewsArticle' routes to news compressor."""
+        html = _build_bbc_html(5)
+        doc = _parse(html)
+        result = _compress_for_dashboard(html, max_tokens=500, doc=doc, schema_name="NewsArticle")
+        assert "1." in result
+        assert "2." in result
+
+    def test_news_schema_names_constant(self):
+        """Verify _NEWS_SCHEMA_NAMES has expected members."""
+        assert "NewsArticle" in _NEWS_SCHEMA_NAMES
+        assert "Article" in _NEWS_SCHEMA_NAMES
+        assert "ReportageNewsArticle" in _NEWS_SCHEMA_NAMES
+        assert "Product" not in _NEWS_SCHEMA_NAMES
+
+
+# ---------------------------------------------------------------------------
+# TestNewsPortalRawHtmlFallback
+# ---------------------------------------------------------------------------
+
+
+class TestNewsPortalRawHtmlFallback:
+    def test_gutted_dom_extracts_from_raw_html(self):
+        """When DOM articles are empty shells, raw_html re-parse extracts headlines."""
+        # Gutted DOM: articles with no h2/h3 (simulates post-AOM pruning)
+        gutted_html = (
+            "<html><body>"
+            "<article><p>stub</p></article>"
+            "<article><p>stub</p></article>"
+            "<article><p>stub</p></article>"
+            "</body></html>"
+        )
+        doc = _parse(gutted_html)
+        # Raw HTML has full BBC-like content
+        raw_html = _build_bbc_html(5)
+        result = _compress_for_news_portal(gutted_html, max_tokens=500, doc=doc, raw_html=raw_html)
+        # Headlines from raw_html should be extracted
+        assert "1." in result
+        assert _HEADLINES[0] in result
+
+    def test_no_raw_html_falls_to_default(self):
+        """When raw_html is empty and DOM has no headlines, falls back to _compress_default."""
+        gutted_html = (
+            "<html><body>"
+            "<article><p>Just some text content here for testing</p></article>"
+            "<article><p>More text content here for testing purposes</p></article>"
+            "<article><p>Even more text content here for the test</p></article>"
+            "</body></html>"
+        )
+        doc = _parse(gutted_html)
+        result = _compress_for_news_portal(gutted_html, max_tokens=500, doc=doc, raw_html="")
+        # Should produce output (from _compress_default) without crashing
+        assert len(result) > 0
+        # No numbered headline format
+        assert not result.startswith("1.")
+
+    def test_raw_html_short_headings_filtered(self):
+        """Headings shorter than 10 chars in raw_html are filtered out."""
+        gutted_html = (
+            "<html><body>"
+            "<article><p>stub</p></article>"
+            "<article><p>stub</p></article>"
+            "<article><p>stub</p></article>"
+            "</body></html>"
+        )
+        doc = _parse(gutted_html)
+        raw_html = (
+            "<html><body>"
+            "<h2>Short</h2>"  # < 10 chars, filtered
+            "<h2>This is a long enough headline for testing purposes</h2>"
+            "<h3>Another headline that is long enough to pass filter</h3>"
+            "</body></html>"
+        )
+        result = _compress_for_news_portal(gutted_html, max_tokens=500, doc=doc, raw_html=raw_html)
+        assert "Short" not in result
+        assert "This is a long enough headline" in result

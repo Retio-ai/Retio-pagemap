@@ -84,7 +84,7 @@ GOLDEN_CASES: list[GoldenCase] = [
     GoldenCase("29cm", "product_detail_page_000", frozenset({"product_detail"}), 30, True, ("트랙 재킷", "아디다스")),
     GoldenCase("29cm", "search_results_page_000", frozenset({"search_results"}), 5, False, ()),
     # ─── bbc_korean ────────────────────────────────────────────────
-    GoldenCase("bbc_korean", "page_000", frozenset({"article"}), 50, False, ("태권도", "주지사")),
+    GoldenCase("bbc_korean", "page_000", frozenset({"article", "news"}), 50, False, ("태권도", "주지사")),
     # ─── cos ───────────────────────────────────────────────────────
     GoldenCase("cos", "listing_page_000", None, 20, False, ()),
     GoldenCase("cos", "product_detail_page_000", frozenset({"product_detail"}), 30, True, ("FACADE",)),

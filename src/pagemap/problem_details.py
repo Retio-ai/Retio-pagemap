@@ -10,7 +10,7 @@ be imported safely from any layer.
 
 Key public API:
 
-- ``ProblemType``   — 15-member StrEnum error taxonomy.
+- ``ProblemType``   — 16-member StrEnum error taxonomy.
 - ``ProblemDetail`` — frozen dataclass (→ JSON / Starlette response / MCP text).
 - ``sanitize_detail()`` — scrub secrets & paths from error messages.
 - Factory functions (``from_exception``, ``from_rate_limit``, …) — build
@@ -39,7 +39,7 @@ MAX_DETAIL_LENGTH = 200
 
 
 class ProblemType(StrEnum):
-    """15-member error taxonomy for PageMap."""
+    """16-member error taxonomy for PageMap."""
 
     # Auth / security (HTTP middleware — Phase δ)
     AUTH_REQUIRED = "auth-required"
@@ -47,6 +47,7 @@ class ProblemType(StrEnum):
     SSRF_BLOCKED = "ssrf-blocked"
     ROBOTS_BLOCKED = "robots-blocked"
     RATE_LIMIT_EXCEEDED = "rate-limit-exceeded"
+    INSUFFICIENT_CREDITS = "insufficient-credits"
 
     # Browser / navigation (tool level)
     BROWSER_UNAVAILABLE = "browser-unavailable"
@@ -78,6 +79,7 @@ _TYPE_METADATA: dict[ProblemType, tuple[int, str, str]] = {
     ProblemType.SSRF_BLOCKED: (403, "URL Blocked", "Provide a valid http:// or https:// URL."),
     ProblemType.ROBOTS_BLOCKED: (403, "Blocked by robots.txt", "Try a different URL on the same site."),
     ProblemType.RATE_LIMIT_EXCEEDED: (429, "Rate Limit Exceeded", ""),
+    ProblemType.INSUFFICIENT_CREDITS: (402, "Insufficient Credits", "Purchase more credits to continue."),
     ProblemType.BROWSER_UNAVAILABLE: (503, "Browser Unavailable", "Call get_page_map to recover."),
     ProblemType.PAGE_TIMEOUT: (504, "Page Timed Out", ""),
     ProblemType.SERVER_BUSY: (503, "Server Busy", "Wait a moment, then retry."),
@@ -616,4 +618,26 @@ def from_server_busy(
         detail="Another tool call is in progress.",
         instance=instance,
         _tool_context=tool_context,
+    )
+
+
+def from_insufficient_credits(
+    *,
+    balance: int,
+    required: int,
+    client_id: str = "",
+    instance: str = "",
+) -> ProblemDetail:
+    """Build a 402 ProblemDetail for insufficient credit balance."""
+    status, title, _ = _TYPE_METADATA[ProblemType.INSUFFICIENT_CREDITS]
+    ext: dict[str, Any] = {"balance": balance, "required": required}
+    if client_id:
+        ext["client_id"] = client_id
+    return ProblemDetail(
+        type=ProblemType.INSUFFICIENT_CREDITS.uri,
+        title=title,
+        status=status,
+        detail=f"Insufficient credits: {balance} available, {required} required.",
+        instance=instance,
+        extensions=ext,
     )

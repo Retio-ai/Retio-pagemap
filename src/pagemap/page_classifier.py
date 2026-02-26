@@ -80,6 +80,9 @@ _JSONLD_RE = re.compile(
 _JSONLD_TYPE_TO_PAGE: dict[str, str] = {
     "Product": "product_detail",
     "IndividualProduct": "product_detail",
+    "ItemList": "listing",
+    "CollectionPage": "listing",
+    "OfferCatalog": "listing",
     "NewsArticle": "news",
     "Article": "article",
     "ReportageNewsArticle": "news",
@@ -109,33 +112,41 @@ _JSONLD_TYPE_TO_PAGE: dict[str, str] = {
 }
 
 
-def _resolve_jsonld_page_type(data: Any) -> str | None:
-    """Recursively find @type in JSON-LD and map to page type."""
+def _resolve_jsonld_page_type(data: Any) -> list[str]:
+    """Recursively find ALL @types in JSON-LD and map to page types."""
     if isinstance(data, list):
-        return next((r for item in data if (r := _resolve_jsonld_page_type(item))), None)
+        results: list[str] = []
+        for item in data:
+            results.extend(_resolve_jsonld_page_type(item))
+        return results
     if not isinstance(data, dict):
-        return None
+        return []
     if "@graph" in data:
         return _resolve_jsonld_page_type(data["@graph"])
     t = data.get("@type", "")
     types = t if isinstance(t, list) else [t]
-    return next(
-        (_JSONLD_TYPE_TO_PAGE[x] for x in types if x in _JSONLD_TYPE_TO_PAGE),
-        None,
-    )
+    return [_JSONLD_TYPE_TO_PAGE[x] for x in types if x in _JSONLD_TYPE_TO_PAGE]
+
+
+_PAGE_LEVEL_JSONLD_TYPES: frozenset[str] = frozenset({"listing", "search_results"})
 
 
 def _detect_jsonld_page_type(raw_html: str) -> str | None:
-    """Sniff JSON-LD @type from raw HTML and return page type or None."""
+    """Sniff JSON-LD @type from raw HTML. Page-level types win over item-level."""
+    candidates: list[str] = []
     for m in _JSONLD_RE.finditer(raw_html):
         try:
             data = json.loads(m.group(1))
         except (json.JSONDecodeError, TypeError):
             continue
-        result = _resolve_jsonld_page_type(data)
-        if result is not None:
-            return result
-    return None
+        candidates.extend(_resolve_jsonld_page_type(data))
+    if not candidates:
+        return None
+    # Page-level types take priority over item-level types
+    for c in candidates:
+        if c in _PAGE_LEVEL_JSONLD_TYPES:
+            return c
+    return candidates[0]
 
 
 # ---------------------------------------------------------------------------
@@ -172,6 +183,26 @@ _DEFAULT_THRESHOLD = 50
 # can accumulate up to 70 pts, overwhelming URL+JSON-LD for most types.
 # Capping at 40 keeps DOM influential but not dominant.
 _DOM_CAP = 40
+
+# Deterministic tie-breaking: lower value = higher priority (more specific).
+_TYPE_PRIORITY: dict[str, int] = {
+    "product_detail": 0,
+    "checkout": 1,
+    "login": 2,
+    "settings": 3,
+    "search_results": 4,
+    "video": 5,
+    "news": 6,
+    "article": 7,
+    "help_faq": 8,
+    "form": 9,
+    "documentation": 10,
+    "dashboard": 11,
+    "listing": 12,
+    "error": 13,
+    "blocked": 14,
+    "landing": 15,
+}
 
 # ---------------------------------------------------------------------------
 # Signal Registry — URL signals
@@ -218,10 +249,21 @@ _URL_SIGNALS: list[SignalDef] = [
     # ---- news ----
     SignalDef("url_news", {"news": 25, "article": 10}, check_url=lambda u: "/news/" in u),
     # ---- listing ----
-    SignalDef("url_list", {"listing": 20}, check_url=lambda u: "/list" in u and "/listing" not in u),
-    SignalDef("url_ranking", {"listing": 20}, check_url=lambda u: "/ranking" in u),
-    SignalDef("url_best", {"listing": 20}, check_url=lambda u: "/best" in u),
-    SignalDef("url_category", {"listing": 25}, check_url=lambda u: "/category/" in u or "/categories/" in u),
+    SignalDef(
+        "url_list", {"listing": 20, "product_detail": -5}, check_url=lambda u: "/list" in u and "/listing" not in u
+    ),
+    SignalDef("url_ranking", {"listing": 20, "product_detail": -5}, check_url=lambda u: "/ranking" in u),
+    SignalDef("url_best", {"listing": 20, "product_detail": -5}, check_url=lambda u: "/best" in u),
+    SignalDef(
+        "url_category",
+        {"listing": 25, "product_detail": -15},
+        check_url=lambda u: "/category/" in u or "/categories/" in u,
+    ),
+    SignalDef(
+        "url_collections",
+        {"listing": 25, "product_detail": -10},
+        check_url=lambda u: "/collections/" in u or "/collection/" in u,
+    ),
     SignalDef("url_nike_w", {"listing": 20}, check_url=lambda u: "/w/" in u and ("nike.com" in u or "nike." in u)),
     SignalDef(
         "url_gender_path",
@@ -359,13 +401,54 @@ _META_SIGNALS: list[SignalDef] = [
 # JSON-LD weight map — parsed once per page, not per-signal
 _JSONLD_WEIGHTS: dict[str, int] = {
     "product_detail": 40,
+    "listing": 40,
     "news": 40,
     "article": 40,
     "help_faq": 40,
     "form": 35,
     "checkout": 40,
     "video": 40,
+    "landing": 35,
 }
+
+# ---------------------------------------------------------------------------
+# DOM helpers (must be defined before _DOM_SIGNALS that reference them)
+# ---------------------------------------------------------------------------
+
+_CART_KEYWORDS: tuple[str, ...] = (
+    "add to cart",
+    "add to bag",
+    "add to basket",
+    "buy now",
+    "장바구니",
+    "카트에 담기",
+    "구매하기",
+    "바로구매",
+    "カートに入れる",
+    "今すぐ買う",
+    "ajouter au panier",
+    "in den warenkorb",
+    "加入购物车",
+    "立即购买",
+    "añadir al carrito",
+    "comprar ahora",
+)
+
+
+def _count_cart_keywords(html_lower: str) -> int:
+    """Count total occurrences of cart/buy keywords in lowered HTML."""
+    return sum(html_lower.count(kw) for kw in _CART_KEYWORDS)
+
+
+_PRODUCT_LINK_RE = re.compile(
+    r'<a\s[^>]*(?<![a-z-])href=["\'][^"\']*(?:/products?/|/items?/|/goods/|/dp/)[^"\']*["\']',
+)
+
+
+def _count_product_links(html_lower: str) -> int:
+    """Count <a> tags whose href contains product-like path segments."""
+    return len(_PRODUCT_LINK_RE.findall(html_lower))
+
 
 # ---------------------------------------------------------------------------
 # Signal Registry — DOM signals (raw HTML regex, <30ms)
@@ -402,7 +485,7 @@ _DOM_SIGNALS: list[SignalDef] = [
     SignalDef(
         "dom_step_indicator",
         {"checkout": 10},
-        check_dom=lambda h: "step" in h and ("progress" in h or "stepper" in h or "step-indicator" in h),
+        check_dom=lambda h: "step" in h and ("stepper" in h or "step-indicator" in h),
     ),
     # ---- form (not login) ----
     SignalDef(
@@ -414,7 +497,7 @@ _DOM_SIGNALS: list[SignalDef] = [
     SignalDef("dom_fieldset", {"form": 20}, check_dom=lambda h: h.count("<fieldset") >= 2),
     # ---- dashboard ----
     SignalDef("dom_many_tables", {"dashboard": 25, "article": -10}, check_dom=lambda h: h.count("<table") >= 2),
-    SignalDef("dom_chart_elements", {"dashboard": 25}, check_dom=lambda h: h.count("<canvas") + h.count("<svg") >= 3),
+    SignalDef("dom_chart_elements", {"dashboard": 25}, check_dom=lambda h: h.count("<canvas") >= 2),
     SignalDef(
         "dom_sidebar_nav",
         {"dashboard": 20},
@@ -456,7 +539,7 @@ _DOM_SIGNALS: list[SignalDef] = [
     SignalDef(
         "dom_version_selector",
         {"documentation": 15},
-        check_dom=lambda h: "version" in h and ("<select" in h or "dropdown" in h),
+        check_dom=lambda h: "version" in h and "<select" in h,
     ),
     # ---- video ----
     SignalDef(
@@ -479,32 +562,23 @@ _DOM_SIGNALS: list[SignalDef] = [
             and ("cta" in h or "call-to-action" in h or "get-started" in h or "sign-up" in h)
         ),
     ),
-    SignalDef("dom_many_sections", {"landing": 15}, check_dom=lambda h: h.count("<section") >= 5),
+    SignalDef("dom_many_sections", {"landing": 15}, check_dom=lambda h: h.count("<section") >= 10),
     # ---- product_detail (cart/buy keywords) ----
     SignalDef(
         "dom_add_to_cart",
         {"product_detail": 20},
-        check_dom=lambda h: any(
-            kw in h
-            for kw in (
-                "add to cart",
-                "add to bag",
-                "add to basket",
-                "buy now",
-                "장바구니",
-                "카트에 담기",
-                "구매하기",
-                "바로구매",
-                "カートに入れる",
-                "今すぐ買う",
-                "ajouter au panier",
-                "in den warenkorb",
-                "加入购物车",
-                "立即购买",
-                "añadir al carrito",
-                "comprar ahora",
-            )
-        ),
+        check_dom=lambda h: any(kw in h for kw in _CART_KEYWORDS),
+    ),
+    # ---- listing (many cart keywords / product links = grid page) ----
+    SignalDef(
+        "dom_many_cart_keywords",
+        {"listing": 15},
+        check_dom=lambda h: _count_cart_keywords(h) >= 10,
+    ),
+    SignalDef(
+        "dom_product_link_grid",
+        {"listing": 20},
+        check_dom=lambda h: _count_product_links(h) >= 20,
     ),
     # ---- blocked (captcha/WAF) ----
     # Cloudflare, reCAPTCHA, hCaptcha, Turnstile
@@ -570,6 +644,8 @@ _DOM_SIGNALS: list[SignalDef] = [
 
 # Combined registry for iteration
 SIGNAL_REGISTRY: list[SignalDef] = _URL_SIGNALS + _META_SIGNALS + _DOM_SIGNALS
+
+_SIGNAL_BY_NAME: dict[str, SignalDef] = {s.name: s for s in SIGNAL_REGISTRY}
 
 
 # ---------------------------------------------------------------------------
@@ -713,6 +789,21 @@ def classify_page(url: str, raw_html: str | None = None) -> ClassificationResult
             if total > _DOM_CAP:
                 scores[ptype] -= total - _DOM_CAP
 
+    # Signal diversity: count primary signals per type for tie-breaking.
+    primary_count: dict[str, int] = {}
+    for sig_name in fired:
+        if sig_name.startswith("meta_jsonld_"):
+            pt = sig_name[len("meta_jsonld_") :]
+            primary_count[pt] = primary_count.get(pt, 0) + 1
+            continue
+        sig_def = _SIGNAL_BY_NAME.get(sig_name)
+        if sig_def is None:
+            continue
+        pos = {k: v for k, v in sig_def.scores.items() if v > 0}
+        if pos:
+            best = max(pos, key=pos.get)  # type: ignore[arg-type]
+            primary_count[best] = primary_count.get(best, 0) + 1
+
     # Determine winner
     if not scores:
         return ClassificationResult(
@@ -724,8 +815,12 @@ def classify_page(url: str, raw_html: str | None = None) -> ClassificationResult
             runner_up_score=0,
         )
 
-    # Sort by score descending
-    sorted_types = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+    # Sort by score descending, then by signal diversity, then by type priority
+    sorted_types = sorted(
+        scores.items(),
+        key=lambda x: (x[1], primary_count.get(x[0], 0), -_TYPE_PRIORITY.get(x[0], 99)),
+        reverse=True,
+    )
     winner_type, winner_score = sorted_types[0]
 
     # Check threshold

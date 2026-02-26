@@ -102,6 +102,45 @@ class TestServeHelp:
         assert len(text) > 0
         assert "--transport" in text
 
+    def test_get_server_options_help_optional_arguments_header(self):
+        """_get_server_options_help should parse 'optional arguments:' header (Python <3.10)."""
+        from pagemap.cli import _get_server_options_help
+
+        fake_help = (
+            "usage: server [options]\n"
+            "\n"
+            "optional arguments:\n"
+            "  -h, --help     show this help message and exit\n"
+            "  --transport T  transport type\n"
+            "  --port PORT    port number\n"
+        )
+
+        def fake_parse(args):
+            import sys
+
+            sys.stdout.write(fake_help)
+            raise SystemExit(0)
+
+        with patch("pagemap.server._parse_server_args", fake_parse):
+            text = _get_server_options_help()
+        assert "--transport" in text
+        assert "--port" in text
+        # -h/--help should be stripped
+        assert "-h, --help" not in text
+
+    def test_serve_help_action_import_error_fallback(self, capsys):
+        """_ServeHelpAction should show fallback message on ImportError."""
+        from pagemap.cli import main
+
+        with (
+            pytest.raises(SystemExit),
+            patch.object(sys, "argv", ["pagemap", "serve", "--help"]),
+            patch("pagemap.cli._get_server_options_help", side_effect=ImportError("mocked missing dep")),
+        ):
+            main()
+        captured = capsys.readouterr()
+        assert "could not load server options" in captured.err
+
 
 class TestHelpImprovements:
     def test_build_help_has_epilog(self):

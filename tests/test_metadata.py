@@ -755,8 +755,32 @@ class TestToFloat:
         assert _to_float("1.500,99") == 1500.99
 
     def test_european_integer(self):
-        """'1.500' without comma is US decimal, not European thousands."""
-        assert _to_float("1.500") == 1.5
+        """'1.500' (3 digits after period) → European thousands = 1500."""
+        assert _to_float("1.500") == 1500
+
+    def test_decimal_non_three_digits(self):
+        """Non-3 trailing digits after period → decimal point."""
+        assert _to_float("1.5") == 1.5
+        assert _to_float("3.14") == 3.14
+        assert _to_float("29.99") == 29.99
+
+    def test_multiple_periods_thousands(self):
+        """Multiple periods → all are thousands separators."""
+        assert _to_float("1.500.000") == 1500000
+
+    def test_single_period_three_digits_thousands(self):
+        """Single period with exactly 3 trailing digits → thousands."""
+        assert _to_float("1.000") == 1000
+
+    def test_numeric_passthrough(self):
+        """Numeric inputs bypass string heuristics."""
+        assert _to_float(37.774) == 37.774
+        assert _to_float(1500) == 1500.0
+
+    def test_bool_not_numeric_shortcut(self):
+        """Booleans bypass numeric fast path and fail string conversion."""
+        assert _to_float(True) is None
+        assert _to_float(False) is None
 
     def test_zero(self):
         assert _to_float(0) == 0.0

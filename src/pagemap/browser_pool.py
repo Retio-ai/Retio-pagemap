@@ -102,6 +102,7 @@ class BrowserPool:
         self._playwright: Playwright | None = None
         self._browser: Browser | None = None
         self._semaphore: asyncio.Semaphore | None = None
+        self._available_slots: int = max_contexts
         self._contexts: dict[str, _PooledContext] = {}
         self._reaper_task: asyncio.Task | None = None
         self._shutdown_event = asyncio.Event()
@@ -140,6 +141,7 @@ class BrowserPool:
                 raise
 
         self._semaphore = asyncio.Semaphore(self._max_contexts)
+        self._available_slots = self._max_contexts
         self._shutdown_event.clear()
         self._start_reaper()
         logger.info(
@@ -172,6 +174,7 @@ class BrowserPool:
         """
         async with asyncio.timeout(_ACQUIRE_TIMEOUT):
             await self._semaphore.acquire()
+            self._available_slots -= 1
         try:
             sess = await self._create_or_get(session_id)
             yield sess
@@ -180,6 +183,7 @@ class BrowserPool:
             entry = self._contexts.get(session_id)
             if entry is not None:
                 entry.last_used_at = time.monotonic()
+            self._available_slots += 1
             self._semaphore.release()
 
     async def acquire(self, session_id: str) -> BrowserSession:
@@ -190,9 +194,11 @@ class BrowserPool:
         """
         async with asyncio.timeout(_ACQUIRE_TIMEOUT):
             await self._semaphore.acquire()
+            self._available_slots -= 1
         try:
             sess = await self._create_or_get(session_id)
         except Exception:
+            self._available_slots += 1
             self._semaphore.release()
             raise
         # Mark that this entry permanently holds a semaphore slot
@@ -210,6 +216,7 @@ class BrowserPool:
         with suppress(Exception):
             await entry.session.stop()
         if entry.holds_semaphore:
+            self._available_slots += 1
             self._semaphore.release()
         logger.info("Pool released session: %s", session_id)
 
@@ -218,9 +225,7 @@ class BrowserPool:
     def health(self) -> PoolHealth:
         """Return a snapshot of pool health."""
         browser_ok = self._browser is not None and self._browser.is_connected()
-        # Semaphore._value gives the number of *available* slots
-        sem_value = self._semaphore._value if self._semaphore else self._max_contexts
-        waiting = max(0, len(self._contexts) - (self._max_contexts - sem_value))
+        waiting = max(0, len(self._contexts) - (self._max_contexts - self._available_slots))
         return PoolHealth(
             active=len(self._contexts),
             max_contexts=self._max_contexts,
@@ -286,6 +291,7 @@ class BrowserPool:
                     with suppress(Exception):
                         await entry.session.stop()
                     if entry.holds_semaphore:
+                        self._available_slots += 1
                         self._semaphore.release()
                     logger.info("Reaper evicted idle session: %s", sid)
 

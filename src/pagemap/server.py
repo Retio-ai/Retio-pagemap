@@ -637,6 +637,41 @@ async def _check_robots(url: str) -> str | None:
     return None if allowed else reason
 
 
+# ── SSRF telemetry helper ─────────────────────────────────────────────
+
+
+def _emit_ssrf_telem(error: str, *, url: str, request_id: str = "", client_ip: str = "") -> None:
+    """Emit SSRF_BLOCKED or DNS_REBINDING_BLOCKED telemetry event (fire-and-forget)."""
+    try:
+        from .telemetry.events import (
+            DNS_REBINDING_BLOCKED,
+            SSRF_BLOCKED,
+            dns_rebinding_blocked,
+            ssrf_blocked,
+        )
+
+        if "DNS rebinding blocked:" in error:
+            # Parse resolved IP from error format:
+            # "DNS rebinding blocked: '{hostname}' resolved to {type} IP {ip}."
+            try:
+                resolved_ip = error.rstrip(".").rsplit(" ", 1)[-1]
+            except Exception:
+                resolved_ip = "unknown"
+            _telem(
+                DNS_REBINDING_BLOCKED,
+                dns_rebinding_blocked(url=url, resolved_ip=resolved_ip, client_ip=client_ip),
+                request_id=request_id,
+            )
+        else:
+            _telem(
+                SSRF_BLOCKED,
+                ssrf_blocked(url=url, reason=error, client_ip=client_ip),
+                request_id=request_id,
+            )
+    except Exception:  # nosec B110
+        pass
+
+
 # ── Error sanitization ───────────────────────────────────────────────
 
 
@@ -711,6 +746,15 @@ def _is_retryable_error(exc: Exception, action: str) -> bool:
 _TOOL_LOCK_TIMEOUT = 150.0  # > BATCH_OVERALL_TIMEOUT(120) + margin
 
 
+@dataclasses.dataclass(frozen=True, slots=True)
+class ToolCallRecord:
+    """Immutable record of a single tool invocation for CQP sequence tracking."""
+
+    tool_name: str
+    timestamp: float  # time.monotonic()
+    url: str | None = None  # Only for get_page_map / batch_get_page_map
+
+
 class ServerState:
     """Encapsulates all mutable server state: browser session + cache."""
 
@@ -761,6 +805,10 @@ class ServerState:
 
 _state = ServerState()
 
+# CQP: Tool call sequence tracking — session-keyed to support both STDIO and HTTP
+_tool_sequences: dict[str, list[ToolCallRecord]] = {}
+_MAX_TOOL_CALLS_PER_SESSION = 500
+
 # Session manager — initialized in main(); wraps _state for STDIO
 _session_manager = None  # StdioSessionManager | HttpSessionManager
 
@@ -790,6 +838,94 @@ def _telem(event_type: str, payload: dict, *, request_id: str = "", session_id: 
 
     enriched = {**payload, "session_id": session_id or _state.session_id}
     emit(event_type, enriched, trace_id=request_id)
+
+
+def _record_tool_call(tool_name: str, *, session_id: str, url: str | None = None, request_id: str = "") -> None:
+    """Record a tool call for CQP sequence tracking + emit disagreement signals (fire-and-forget)."""
+    try:
+        import time
+
+        seq = _tool_sequences.setdefault(session_id, [])
+        now = time.monotonic()
+        idx = len(seq)
+
+        # Skip detection if over budget (still append for accounting)
+        if idx < _MAX_TOOL_CALLS_PER_SESSION:
+            from .telemetry.events import TOOL_DISAGREEMENT, tool_disagreement
+
+            # Disagreement: consecutive_same_tool
+            if seq and seq[-1].tool_name == tool_name:
+                delta = now - seq[-1].timestamp
+                _telem(
+                    TOOL_DISAGREEMENT,
+                    tool_disagreement(
+                        signal_type="consecutive_same_tool",
+                        tool_name=tool_name,
+                        url=url or "",
+                        call_index=idx,
+                        time_since_last_same_s=round(delta, 3),
+                    ),
+                    request_id=request_id,
+                    session_id=session_id,
+                )
+
+            # Disagreement: same_url_recall (only for get_page_map)
+            if tool_name == "get_page_map" and url:
+                for prev in reversed(seq):
+                    if prev.tool_name == "get_page_map" and prev.url == url:
+                        delta = now - prev.timestamp
+                        _telem(
+                            TOOL_DISAGREEMENT,
+                            tool_disagreement(
+                                signal_type="same_url_recall",
+                                tool_name=tool_name,
+                                url=url,
+                                call_index=idx,
+                                time_since_last_same_s=round(delta, 3),
+                            ),
+                            request_id=request_id,
+                            session_id=session_id,
+                        )
+                        break
+
+        seq.append(ToolCallRecord(tool_name, now, url))
+    except Exception:  # nosec B110
+        pass
+
+
+def _emit_and_clear_sequences() -> None:
+    """Emit TOOL_CALL_SEQUENCE for each session and clear the tracking dict (shutdown path)."""
+    try:
+        from .telemetry.events import TOOL_CALL_SEQUENCE, tool_call_sequence
+        from .telemetry.privacy import sanitize_url
+
+        for sid, seq in _tool_sequences.items():
+            if not seq:
+                continue
+            first_ts = seq[0].timestamp
+            sanitized_seq = [
+                {
+                    "tool": r.tool_name,
+                    "delta_s": round(r.timestamp - first_ts, 3),
+                    "url": sanitize_url(r.url) if r.url else None,
+                }
+                for r in seq
+            ]
+            unique_tools = len({r.tool_name for r in seq})
+            duration = seq[-1].timestamp - first_ts
+            _telem(
+                TOOL_CALL_SEQUENCE,
+                tool_call_sequence(
+                    sequence=sanitized_seq,
+                    total_calls=len(seq),
+                    unique_tools=unique_tools,
+                    session_duration_s=round(duration, 3),
+                ),
+                session_id=sid,
+            )
+        _tool_sequences.clear()
+    except Exception:  # nosec B110
+        pass
 
 
 # ── RequestContext (imported from context.py, re-exported for compatibility) ──
@@ -884,6 +1020,7 @@ async def get_page_map(url: str | None = None, mcp_ctx: McpContext = None) -> st
         error = await _validate_url_with_dns(url)
         if error:
             logger.warning("SSRF blocked: request=%s url=%s reason=%s", ctx.request_id, url, error)
+            _emit_ssrf_telem(error, url=url, request_id=ctx.request_id, client_ip=ctx.client_ip)
             return f"Error: {error} Provide a valid http:// or https:// URL."
         # robots.txt check
         robots_error = await _check_robots(url)
@@ -898,6 +1035,7 @@ async def get_page_map(url: str | None = None, mcp_ctx: McpContext = None) -> st
     try:
         async with asyncio.timeout(_TOOL_LOCK_TIMEOUT):
             async with lock:
+                _record_tool_call("get_page_map", session_id=ctx.session_id, url=url, request_id=ctx.request_id)
                 return await _get_page_map_impl(url, ctx=ctx)
     except TimeoutError:
         logger.error("Tool lock acquisition timed out for get_page_map")
@@ -1016,6 +1154,7 @@ async def _get_page_map_impl(url: str | None = None, *, ctx: RequestContext | No
                 final_url,
                 post_error,
             )
+            _emit_ssrf_telem(post_error, url=final_url, request_id=request_id, client_ip=ctx.client_ip)
             return f"Error: Redirect led to blocked URL — {post_error} Navigate to a different URL using get_page_map."
 
         timer.finalize()
@@ -1267,6 +1406,7 @@ async def execute_action(ref: int, action: str = "click", value: str | None = No
     try:
         async with asyncio.timeout(_TOOL_LOCK_TIMEOUT):
             async with lock:
+                _record_tool_call("execute_action", session_id=ctx.session_id, request_id=ctx.request_id)
                 return await _execute_action_impl(ref, action, value, ctx=ctx)
     except TimeoutError:
         logger.error("Tool lock acquisition timed out for execute_action")
@@ -1415,6 +1555,7 @@ async def _execute_action_impl(
             popup_url = new_page.url
             ssrf_error = await _validate_url_with_dns(popup_url)
             if ssrf_error:
+                _emit_ssrf_telem(ssrf_error, url=popup_url, request_id=request_id, client_ip=ctx.client_ip)
                 with suppress(Exception):
                     await new_page.close()
                 dialogs = _collect_dialogs(session)
@@ -1454,6 +1595,7 @@ async def _execute_action_impl(
                     new_url,
                     ssrf_error,
                 )
+                _emit_ssrf_telem(ssrf_error, url=new_url, request_id=request_id, client_ip=ctx.client_ip)
                 # Navigate away to prevent content access
                 with suppress(Exception):
                     await page.goto("about:blank")
@@ -1583,6 +1725,7 @@ async def get_page_state(mcp_ctx: McpContext = None) -> str:
     try:
         async with asyncio.timeout(_TOOL_LOCK_TIMEOUT):
             async with lock:
+                _record_tool_call("get_page_state", session_id=ctx.session_id, request_id=ctx.request_id)
                 return await _get_page_state_impl(ctx=ctx)
     except TimeoutError:
         logger.error("Tool lock acquisition timed out for get_page_state")
@@ -1633,6 +1776,7 @@ async def take_screenshot(full_page: bool = False, mcp_ctx: McpContext = None) -
     try:
         async with asyncio.timeout(_TOOL_LOCK_TIMEOUT):
             async with lock:
+                _record_tool_call("take_screenshot", session_id=ctx.session_id, request_id=ctx.request_id)
                 return await _take_screenshot_impl(full_page, ctx=ctx)
     except TimeoutError:
         logger.error("Tool lock acquisition timed out for take_screenshot")
@@ -1697,6 +1841,7 @@ async def navigate_back(mcp_ctx: McpContext = None) -> str:
     try:
         async with asyncio.timeout(_TOOL_LOCK_TIMEOUT):
             async with lock:
+                _record_tool_call("navigate_back", session_id=ctx.session_id, request_id=ctx.request_id)
                 return await _navigate_back_impl(ctx=ctx)
     except TimeoutError:
         logger.error("Tool lock acquisition timed out for navigate_back")
@@ -1722,6 +1867,7 @@ async def _navigate_back_impl(*, ctx: RequestContext | None = None) -> str:
         ssrf_error = await _validate_url_with_dns(new_url)
         if ssrf_error:
             logger.warning("SSRF navigate_back blocked: url=%s reason=%s", new_url, ssrf_error)
+            _emit_ssrf_telem(ssrf_error, url=new_url, request_id=ctx.request_id, client_ip=ctx.client_ip)
             with suppress(Exception):
                 await session.page.goto("about:blank")
             ctx.cache.invalidate(InvalidationReason.SSRF_BLOCKED)
@@ -1774,6 +1920,7 @@ async def scroll_page(direction: str = "down", amount: str = "page", mcp_ctx: Mc
     try:
         async with asyncio.timeout(_TOOL_LOCK_TIMEOUT):
             async with lock:
+                _record_tool_call("scroll_page", session_id=ctx.session_id, request_id=ctx.request_id)
                 return await _scroll_page_impl(direction, amount, ctx=ctx)
     except TimeoutError:
         logger.error("Tool lock acquisition timed out for scroll_page")
@@ -1903,6 +2050,7 @@ async def fill_form(fields: list[FormField], mcp_ctx: McpContext = None) -> str:
     try:
         async with asyncio.timeout(_TOOL_LOCK_TIMEOUT):
             async with lock:
+                _record_tool_call("fill_form", session_id=ctx.session_id, request_id=ctx.request_id)
                 return await _fill_form_impl(fields, ctx=ctx)
     except TimeoutError:
         logger.error("Tool lock acquisition timed out for fill_form")
@@ -2041,6 +2189,7 @@ async def _fill_form_impl(fields: list[FormField], *, ctx: RequestContext | None
                 popup_url = new_page.url
                 ssrf_error = await _validate_url_with_dns(popup_url)
                 if ssrf_error:
+                    _emit_ssrf_telem(ssrf_error, url=popup_url, request_id=request_id, client_ip=ctx.client_ip)
                     with suppress(Exception):
                         await new_page.close()
                     return _format_fill_form_result(
@@ -2078,6 +2227,7 @@ async def _fill_form_impl(fields: list[FormField], *, ctx: RequestContext | None
                         new_url,
                         ssrf_error,
                     )
+                    _emit_ssrf_telem(ssrf_error, url=new_url, request_id=request_id, client_ip=ctx.client_ip)
                     with suppress(Exception):
                         await page.goto("about:blank")
                     ctx.cache.invalidate(InvalidationReason.SSRF_BLOCKED)
@@ -2181,6 +2331,7 @@ async def wait_for(
     try:
         async with asyncio.timeout(_TOOL_LOCK_TIMEOUT):
             async with lock:
+                _record_tool_call("wait_for", session_id=ctx.session_id, request_id=ctx.request_id)
                 return await _wait_for_impl(text, text_gone, timeout, ctx=ctx)
     except TimeoutError:
         logger.error("Tool lock acquisition timed out for wait_for")
@@ -2344,6 +2495,7 @@ async def batch_get_page_map(urls: list[str], max_concurrency: int = 5, mcp_ctx:
     try:
         async with asyncio.timeout(_TOOL_LOCK_TIMEOUT):
             async with lock:
+                _record_tool_call("batch_get_page_map", session_id=ctx.session_id, request_id=ctx.request_id)
                 return await _batch_get_page_map_impl(urls, max_concurrency, ctx=ctx)
     except TimeoutError:
         logger.error("Tool lock acquisition timed out for batch_get_page_map")
@@ -2379,6 +2531,7 @@ async def _batch_get_page_map_impl(urls: list[str], max_concurrency: int, *, ctx
         error = await _validate_url_with_dns(u)
         if error:
             pre_errors[u] = error
+            _emit_ssrf_telem(error, url=u, request_id=request_id, client_ip=ctx.client_ip)
         else:
             robots_error = await _check_robots(u)
             if robots_error:
@@ -2724,10 +2877,22 @@ async def _run_http_server(
         logger.info("In-memory repository (no --db-path)")
 
     # ── Rate limiter initialization ────────────────────────────────
-    from .rate_limiter import RateLimiter
+    from .rate_limiter import RateLimitConfig, RateLimiter
 
     if _rate_limiter is None:
-        _rate_limiter = RateLimiter()
+        rl_config = RateLimitConfig(enabled=True)
+        redis_url = os.environ.get("REDIS_URL", "")
+        if redis_url:
+            try:
+                from .redis_rate_limiter import RedisRateLimiter
+
+                _rate_limiter = await RedisRateLimiter.create(redis_url, rl_config)
+                logger.info("Redis rate limiter enabled")
+            except Exception as e:
+                logger.warning("Redis rate limiter init failed, using in-process: %s", e)
+                _rate_limiter = RateLimiter(rl_config)
+        else:
+            _rate_limiter = RateLimiter()
     logger.info("Rate limiter initialized")
 
     max_ctx = int(os.environ.get("PAGEMAP_MAX_CONTEXTS", "5"))
@@ -2742,20 +2907,41 @@ async def _run_http_server(
 
             # ── Middleware chain (outermost wraps first, executes first) ──
             # Wrapping order is reverse of execution: last wrap = outermost.
-            # Request flow: Gateway → RateLimit → Auth → SecurityHeaders → App
-            # ─────────────────────────────────────────────────────────────
+            # Request flow: Gateway → RateLimit → Paddle → Auth → Credit → SecurityHeaders → App
+            # ──────────────────────────────────────────────────────────────────────────────────
 
-            # 4. SecurityHeaders (innermost middleware, closest to app)
+            # 5. SecurityHeaders (innermost middleware, closest to app)
             from .security_headers import SecurityHeadersMiddleware
 
             starlette_app = SecurityHeadersMiddleware(starlette_app, require_tls=_require_tls)
             logger.info("SecurityHeaders middleware enabled (require_tls=%s)", _require_tls)
+
+            # 4. Credit (between Auth and SecurityHeaders)
+            from .credit_middleware import CreditMiddleware
+
+            starlette_app = CreditMiddleware(starlette_app, repository=_repository)
+            logger.info("Credit middleware enabled")
 
             # 3. Auth
             from .auth_middleware import AuthMiddleware
 
             starlette_app = AuthMiddleware(starlette_app, _repository)
             logger.info("Auth middleware enabled")
+
+            # 2b. Paddle webhook (between Auth and RateLimit)
+            from .paddle.config import PaddleConfig
+
+            _paddle_config = PaddleConfig.from_env()
+            if _paddle_config is not None:
+                from .paddle.webhook import PaddleWebhookHandler
+
+                starlette_app = PaddleWebhookHandler(
+                    starlette_app,
+                    _paddle_config,
+                    credit_repo=_repository,
+                    audit_repo=_repository,
+                )
+                logger.info("Paddle webhook handler enabled (env=%s)", _paddle_config.environment)
 
             # 2. RateLimit
             from .rate_limit_middleware import RateLimitMiddleware
@@ -2860,6 +3046,7 @@ def main(argv: list[str] | None = None):
 
         def _sync_cleanup(*_args):
             """Best-effort synchronous cleanup for atexit/signal handlers."""
+            _emit_and_clear_sequences()
             try:
                 from .telemetry import shutdown as _telem_shutdown
 

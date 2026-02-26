@@ -348,9 +348,12 @@ def _compute_weight(
         if grid_whitelist and tree is not None:
             try:
                 el_xpath = tree.getpath(el)
-                # Exempt if this element or any ancestor is whitelisted
+                # Exempt if this element is whitelisted, is a descendant
+                # of a whitelisted container, or is an ancestor of one
                 if el_xpath in grid_whitelist or any(el_xpath.startswith(wp + "/") for wp in grid_whitelist):
                     return 0.8, "grid-whitelist"
+                if any(wp.startswith(el_xpath + "/") for wp in grid_whitelist):
+                    return 0.8, "grid-whitelist-ancestor"
             except ValueError:
                 pass
         total_text = (el.text_content() or "").strip()
@@ -411,8 +414,11 @@ def aom_filter(
         stats.total_nodes += 1
 
         tag = el.tag.lower()
-        # Never remove body/html/main
+        # Never remove body/html/main or direct children of <main>
         if tag in ("body", "html", "main"):
+            continue
+        parent = el.getparent()
+        if parent is not None and isinstance(parent.tag, str) and parent.tag.lower() == "main":
             continue
 
         weight, reason = _compute_weight(

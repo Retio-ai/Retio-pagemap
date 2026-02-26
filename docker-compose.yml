@@ -3,7 +3,7 @@ services:
     build:
       context: .
       args:
-        PAGEMAP_VERSION: "0.7.2"
+        PAGEMAP_VERSION: "0.7.3"
     image: retio1001/pagemap:latest
     stdin_open: true
 
@@ -11,7 +11,7 @@ services:
     build:
       context: .
       args:
-        PAGEMAP_VERSION: "0.7.2"
+        PAGEMAP_VERSION: "0.7.3"
     image: retio1001/pagemap:latest
     command: ["--transport", "http", "--host", "0.0.0.0", "--port", "8000"]
     ports:

@@ -42,6 +42,7 @@ from pagemap.problem_details import (
     from_auth_missing,
     from_browser_dead,
     from_exception,
+    from_insufficient_credits,
     from_rate_limit,
     from_robots,
     from_server_busy,
@@ -536,6 +537,34 @@ class TestFromServerBusy:
         assert "Another tool call is in progress" in p.detail
 
 
+class TestFromInsufficientCredits:
+    def test_402_status(self):
+        p = from_insufficient_credits(balance=5, required=10)
+        assert p.status == 402
+        assert p.type == ProblemType.INSUFFICIENT_CREDITS.uri
+
+    def test_extensions_populated(self):
+        p = from_insufficient_credits(balance=5, required=10, client_id="client-1")
+        assert p.extensions["balance"] == 5
+        assert p.extensions["required"] == 10
+        assert p.extensions["client_id"] == "client-1"
+
+    def test_detail_message(self):
+        p = from_insufficient_credits(balance=2, required=3)
+        assert "2 available" in p.detail
+        assert "3 required" in p.detail
+
+    def test_no_client_id(self):
+        p = from_insufficient_credits(balance=0, required=3)
+        assert "client_id" not in p.extensions
+
+    def test_response_content_type(self):
+        p = from_insufficient_credits(balance=0, required=3)
+        resp = p.to_response()
+        assert resp.status_code == 402
+        assert resp.media_type == "application/problem+json"
+
+
 # ── 3e. Taxonomy Completeness Tests ─────────────────────────────────
 
 
@@ -556,8 +585,8 @@ class TestProblemType:
         for pt, (status, _, _) in _TYPE_METADATA.items():
             assert 100 <= status <= 599, f"Invalid status {status} for {pt}"
 
-    def test_exactly_15_types(self):
-        assert len(ProblemType) == 15
+    def test_exactly_16_types(self):
+        assert len(ProblemType) == 16
 
 
 class TestRecoveryHints:
