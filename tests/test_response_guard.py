@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 import pagemap.server as srv
 
 # ── _check_response_size unit tests ──────────────────────────────────
@@ -63,6 +65,7 @@ def test_exact_limit_passes_through():
 
 def test_telemetry_emitted_on_truncation():
     """Telemetry event is emitted when truncation occurs."""
+    pytest.importorskip("pagemap.telemetry")
     original = "x" * (srv.MAX_RESPONSE_SIZE_BYTES + 100)
     with patch.object(srv, "_telem") as mock_telem:
         srv._check_response_size(original, tool="get_page_map")

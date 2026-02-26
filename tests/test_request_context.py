@@ -300,6 +300,7 @@ class TestToolErrorIntegration:
     """TOOL_ERROR telemetry emission — complements test_agent_friendly_errors.py."""
 
     def test_safe_error_emits_tool_error(self):
+        pytest.importorskip("pagemap.telemetry")
         with patch("pagemap.server._telem") as mock_telem:
             _safe_error("get_page_map", ValueError("boom"))
             mock_telem.assert_called_once()
@@ -310,6 +311,7 @@ class TestToolErrorIntegration:
             assert payload["error_type"] == "ValueError"
 
     def test_safe_error_survives_telem_failure(self):
+        pytest.importorskip("pagemap.telemetry")
         with patch("pagemap.server._telem", side_effect=RuntimeError("telem down")):
             result = _safe_error("get_page_map", ValueError("boom"))
             # Must still return a string, not raise
@@ -318,6 +320,7 @@ class TestToolErrorIntegration:
 
     async def test_execute_action_emits_tool_error(self):
         """Inline TOOL_ERROR emission in _execute_action_impl (L1427-1432)."""
+        pytest.importorskip("pagemap.telemetry")
         separate_cache = PageMapCache()
         pm = _make_page_map()
         separate_cache.store(pm, None)

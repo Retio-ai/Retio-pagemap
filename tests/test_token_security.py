@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+import pytest
+
 from pagemap.token_security import (
     contains_token,
     scrub_and_report,
@@ -108,6 +110,7 @@ class TestScrubAndReport:
 
     @patch("pagemap.telemetry.emit")
     def test_emits_telemetry_on_detection(self, mock_emit):
+        pytest.importorskip("pagemap.telemetry")
         scrub_and_report(f"leak {_FAKE_KEY}", field="body")
 
         mock_emit.assert_called_once()

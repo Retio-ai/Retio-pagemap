@@ -8,6 +8,8 @@ from __future__ import annotations
 import os
 from unittest.mock import patch
 
+import pytest
+
 import pagemap.server as srv
 
 # ---------------------------------------------------------------------------
@@ -289,6 +291,7 @@ class TestTelemSessionId:
     """Tests for _telem() session_id parameter."""
 
     def test_telem_uses_state_session_id_by_default(self):
+        pytest.importorskip("pagemap.telemetry")
         with patch("pagemap.telemetry.emit") as mock_emit:
             srv._telem("test_event", {"key": "val"})
             call_args = mock_emit.call_args
@@ -296,6 +299,7 @@ class TestTelemSessionId:
             assert enriched["session_id"] == srv._state.session_id
 
     def test_telem_uses_provided_session_id(self):
+        pytest.importorskip("pagemap.telemetry")
         with patch("pagemap.telemetry.emit") as mock_emit:
             srv._telem("test_event", {"key": "val"}, session_id="custom-123")
             call_args = mock_emit.call_args
