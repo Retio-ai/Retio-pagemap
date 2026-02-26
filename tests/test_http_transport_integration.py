@@ -5,12 +5,18 @@
 
 from __future__ import annotations
 
+import importlib.util
 import os
 from unittest.mock import patch
 
 import pytest
 
 import pagemap.server as srv
+
+_skip_no_telemetry = pytest.mark.skipif(
+    importlib.util.find_spec("pagemap.telemetry") is None,
+    reason="pagemap.telemetry not available in public release",
+)
 
 # ---------------------------------------------------------------------------
 # CLI arg parsing tests
@@ -290,18 +296,18 @@ class TestTrustAllGuardrail:
 class TestTelemSessionId:
     """Tests for _telem() session_id parameter."""
 
-    def test_telem_uses_state_session_id_by_default(self):
-        pytest.importorskip("pagemap.telemetry")
-        with patch("pagemap.telemetry.emit") as mock_emit:
-            srv._telem("test_event", {"key": "val"})
-            call_args = mock_emit.call_args
-            enriched = call_args[0][1]
-            assert enriched["session_id"] == srv._state.session_id
+    @_skip_no_telemetry
+    @patch("pagemap.telemetry.emit")
+    def test_telem_uses_state_session_id_by_default(self, mock_emit):
+        srv._telem("test_event", {"key": "val"})
+        call_args = mock_emit.call_args
+        enriched = call_args[0][1]
+        assert enriched["session_id"] == srv._state.session_id
 
-    def test_telem_uses_provided_session_id(self):
-        pytest.importorskip("pagemap.telemetry")
-        with patch("pagemap.telemetry.emit") as mock_emit:
-            srv._telem("test_event", {"key": "val"}, session_id="custom-123")
-            call_args = mock_emit.call_args
-            enriched = call_args[0][1]
-            assert enriched["session_id"] == "custom-123"
+    @_skip_no_telemetry
+    @patch("pagemap.telemetry.emit")
+    def test_telem_uses_provided_session_id(self, mock_emit):
+        srv._telem("test_event", {"key": "val"}, session_id="custom-123")
+        call_args = mock_emit.call_args
+        enriched = call_args[0][1]
+        assert enriched["session_id"] == "custom-123"

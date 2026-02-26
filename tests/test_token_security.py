@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 from unittest.mock import patch
 
 import pytest
@@ -14,6 +15,11 @@ from pagemap.token_security import (
     scrub_and_report,
     scrub_from_text,
     scrub_headers,
+)
+
+_skip_no_telemetry = pytest.mark.skipif(
+    importlib.util.find_spec("pagemap.telemetry") is None,
+    reason="pagemap.telemetry not available in public release",
 )
 
 # A valid-format sk-pm key (52 chars: "sk-pm-v1-" + 43 base64url chars)
@@ -108,9 +114,9 @@ class TestScrubAndReport:
         text = "clean text"
         assert scrub_and_report(text) == text
 
+    @_skip_no_telemetry
     @patch("pagemap.telemetry.emit")
     def test_emits_telemetry_on_detection(self, mock_emit):
-        pytest.importorskip("pagemap.telemetry")
         scrub_and_report(f"leak {_FAKE_KEY}", field="body")
 
         mock_emit.assert_called_once()
