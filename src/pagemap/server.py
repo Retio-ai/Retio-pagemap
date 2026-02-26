@@ -834,10 +834,13 @@ async def _get_session():
 
 def _telem(event_type: str, payload: dict, *, request_id: str = "", session_id: str = "") -> None:
     """Emit a telemetry event. No-op when telemetry is disabled."""
-    from .telemetry import emit
+    try:
+        from .telemetry import emit
 
-    enriched = {**payload, "session_id": session_id or _state.session_id}
-    emit(event_type, enriched, trace_id=request_id)
+        enriched = {**payload, "session_id": session_id or _state.session_id}
+        emit(event_type, enriched, trace_id=request_id)
+    except Exception:  # nosec B110
+        pass
 
 
 def _record_tool_call(tool_name: str, *, session_id: str, url: str | None = None, request_id: str = "") -> None:
@@ -1027,9 +1030,13 @@ async def get_page_map(url: str | None = None, mcp_ctx: McpContext = None) -> st
         if robots_error:
             logger.info("Robots blocked: request=%s url=%s", ctx.request_id, url)
             from .robots_checker import RobotsChecker as _RC
-            from .telemetry.events import ROBOTS_BLOCKED, robots_blocked
 
-            _telem(ROBOTS_BLOCKED, robots_blocked(url=url, origin=_RC._origin(url)), request_id=ctx.request_id)
+            try:
+                from .telemetry.events import ROBOTS_BLOCKED, robots_blocked
+
+                _telem(ROBOTS_BLOCKED, robots_blocked(url=url, origin=_RC._origin(url)), request_id=ctx.request_id)
+            except Exception:  # nosec B110
+                pass
             return f"Error: {robots_error}. Try a different URL on the same site, or ask the user for guidance."
 
     try:
@@ -1066,9 +1073,12 @@ async def _get_page_map_impl(url: str | None = None, *, ctx: RequestContext | No
 
         # Step 1: Navigate if url provided → hard invalidation
         if url is not None:
-            from .telemetry.events import NAVIGATION_START
+            try:
+                from .telemetry.events import NAVIGATION_START
 
-            _telem(NAVIGATION_START, {"url": url}, request_id=request_id)
+                _telem(NAVIGATION_START, {"url": url}, request_id=request_id)
+            except Exception:  # nosec B110
+                pass
             timer.stage("navigation")
             await session.navigate(url)
             ctx.cache.invalidate(InvalidationReason.NAVIGATION)
@@ -1100,16 +1110,22 @@ async def _get_page_map_impl(url: str | None = None, *, ctx: RequestContext | No
                 tier = "A"
                 page_map = active_entry.page_map
                 cache.record_hit()
-                from .telemetry.events import CACHE_HIT
+                try:
+                    from .telemetry.events import CACHE_HIT
 
-                _telem(CACHE_HIT, {"tier": "A"}, request_id=request_id)
+                    _telem(CACHE_HIT, {"tier": "A"}, request_id=request_id)
+                except Exception:  # nosec B110
+                    pass
             elif fingerprints_structurally_equal(fingerprint, active_entry.fingerprint):
                 # TIER B: Content refresh — structure same, text changed
                 tier = "B"
                 timer.stage("content_refresh")
-                from .telemetry.events import CACHE_REFRESH
+                try:
+                    from .telemetry.events import CACHE_REFRESH
 
-                _telem(CACHE_REFRESH, {"tier": "B"}, request_id=request_id)
+                    _telem(CACHE_REFRESH, {"tier": "B"}, request_id=request_id)
+                except Exception:  # nosec B110
+                    pass
                 page_map = await asyncio.wait_for(
                     rebuild_content_only(
                         session=session,
@@ -1127,9 +1143,12 @@ async def _get_page_map_impl(url: str | None = None, *, ctx: RequestContext | No
         # TIER C: Full rebuild
         if page_map is None:
             timer.stage("build")
-            from .telemetry.events import FULL_BUILD
+            try:
+                from .telemetry.events import FULL_BUILD
 
-            _telem(FULL_BUILD, {"tier": "C"}, request_id=request_id)
+                _telem(FULL_BUILD, {"tier": "C"}, request_id=request_id)
+            except Exception:  # nosec B110
+                pass
             page_map = await asyncio.wait_for(
                 build_page_map_live(
                     session=session,
@@ -1163,19 +1182,22 @@ async def _get_page_map_impl(url: str | None = None, *, ctx: RequestContext | No
         cache.store(page_map, fingerprint)
 
         if tier != "A":
-            from .telemetry.events import PIPELINE_COMPLETED
+            try:
+                from .telemetry.events import PIPELINE_COMPLETED
 
-            _telem(
-                PIPELINE_COMPLETED,
-                {
-                    "tier": tier,
-                    "interactables": page_map.total_interactables,
-                    "pruned_tokens": page_map.pruned_tokens,
-                    "stage_timings": timer.elapsed_per_stage(),
-                    "page_type": getattr(page_map, "page_type", "unknown"),
-                },
-                request_id=request_id,
-            )
+                _telem(
+                    PIPELINE_COMPLETED,
+                    {
+                        "tier": tier,
+                        "interactables": page_map.total_interactables,
+                        "pruned_tokens": page_map.pruned_tokens,
+                        "stage_timings": timer.elapsed_per_stage(),
+                        "page_type": getattr(page_map, "page_type", "unknown"),
+                    },
+                    request_id=request_id,
+                )
+            except Exception:  # nosec B110
+                pass
 
         # Discard any dialogs that appeared during navigation/page-map build
         session.drain_dialogs()
@@ -1239,9 +1261,12 @@ async def _get_page_map_impl(url: str | None = None, *, ctx: RequestContext | No
         ctx.cache.invalidate(InvalidationReason.TIMEOUT)
         stage = report["timed_out_at"]
         hint = report["hint"]
-        from .telemetry.events import PIPELINE_TIMEOUT
+        try:
+            from .telemetry.events import PIPELINE_TIMEOUT
 
-        _telem(PIPELINE_TIMEOUT, {"timed_out_at": stage, "hint": hint}, request_id=request_id)
+            _telem(PIPELINE_TIMEOUT, {"timed_out_at": stage, "hint": hint}, request_id=request_id)
+        except Exception:  # nosec B110
+            pass
         return f"Error: Page Map build timed out after {PAGE_MAP_TIMEOUT_SECONDS}s (stage: {stage}). {hint}"
     except Exception as e:
         logger.error("get_page_map: request=%s failed", request_id)
@@ -1489,13 +1514,16 @@ async def _execute_action_impl(
         )
 
     logger.info("execute_action: request=%s ref=%d action=%s", request_id, ref, action)
-    from .telemetry.events import ACTION_START
+    try:
+        from .telemetry.events import ACTION_START
 
-    _telem(
-        ACTION_START,
-        {"ref": ref, "action": action, "role": target.role, "affordance": target.affordance},
-        request_id=request_id,
-    )
+        _telem(
+            ACTION_START,
+            {"ref": ref, "action": action, "role": target.role, "affordance": target.affordance},
+            request_id=request_id,
+        )
+    except Exception:  # nosec B110
+        pass
 
     async def _execute_action_core() -> str:
         """Core execute_action logic, wrapped by asyncio.wait_for."""
@@ -1571,9 +1599,12 @@ async def _execute_action_impl(
                 await session.switch_page(new_page)
                 ctx.cache.invalidate(InvalidationReason.NEW_TAB)
                 dialogs = _collect_dialogs(session)
-                from .telemetry.events import ACTION_RESULT as _AR
+                try:
+                    from .telemetry.events import ACTION_RESULT as _AR
 
-                _telem(_AR, {"change": "new_tab", "refs_expired": True}, request_id=request_id)
+                    _telem(_AR, {"change": "new_tab", "refs_expired": True}, request_id=request_id)
+                except Exception:  # nosec B110
+                    pass
                 return _build_action_result(
                     description=description,
                     current_url=popup_url,
@@ -1614,9 +1645,12 @@ async def _execute_action_impl(
                 new_url,
             )
             dialogs = _collect_dialogs(session)
-            from .telemetry.events import ACTION_RESULT as _AR2
+            try:
+                from .telemetry.events import ACTION_RESULT as _AR2
 
-            _telem(_AR2, {"change": "navigation", "refs_expired": True}, request_id=request_id)
+                _telem(_AR2, {"change": "navigation", "refs_expired": True}, request_id=request_id)
+            except Exception:  # nosec B110
+                pass
             return _build_action_result(
                 description=description,
                 current_url=new_url,
@@ -1645,11 +1679,16 @@ async def _execute_action_impl(
                         change = "major"
                         refs_expired = True
                         change_details.append(f"Page content changed ({reasons_str})")
-                        from .telemetry.events import ACTION_DOM_CHANGE
+                        try:
+                            from .telemetry.events import ACTION_DOM_CHANGE
 
-                        _telem(
-                            ACTION_DOM_CHANGE, {"severity": "major", "reasons": verdict.reasons}, request_id=request_id
-                        )
+                            _telem(
+                                ACTION_DOM_CHANGE,
+                                {"severity": "major", "reasons": verdict.reasons},
+                                request_id=request_id,
+                            )
+                        except Exception:  # nosec B110
+                            pass
                     elif verdict.severity == "minor":
                         logger.info(
                             "execute_action: request=%s dom_change=minor reasons=%s",
@@ -1657,14 +1696,20 @@ async def _execute_action_impl(
                             "; ".join(verdict.reasons),
                         )
                         change = "minor"
-                        from .telemetry.events import ACTION_DOM_CHANGE as _ADC
+                        try:
+                            from .telemetry.events import ACTION_DOM_CHANGE as _ADC
 
-                        _telem(_ADC, {"severity": "minor", "reasons": verdict.reasons}, request_id=request_id)
+                            _telem(_ADC, {"severity": "minor", "reasons": verdict.reasons}, request_id=request_id)
+                        except Exception:  # nosec B110
+                            pass
             dialogs = _collect_dialogs(session)
 
-            from .telemetry.events import ACTION_RESULT as _AR3
+            try:
+                from .telemetry.events import ACTION_RESULT as _AR3
 
-            _telem(_AR3, {"change": change, "refs_expired": refs_expired}, request_id=request_id)
+                _telem(_AR3, {"change": change, "refs_expired": refs_expired}, request_id=request_id)
+            except Exception:  # nosec B110
+                pass
 
             return _build_action_result(
                 description=description,
@@ -1983,9 +2028,12 @@ async def _scroll_page_impl(direction: str = "down", amount: str = "page", *, ct
         max_scroll = max(scroll_height - viewport_height, 1)
         scroll_percent = min(round(scroll_y / max_scroll * 100), 100)
 
-        from .telemetry.events import SCROLL as _SCROLL_EV
+        try:
+            from .telemetry.events import SCROLL as _SCROLL_EV
 
-        _telem(_SCROLL_EV, {"direction": direction, "pixels": pixels, "scroll_percent": scroll_percent})
+            _telem(_SCROLL_EV, {"direction": direction, "pixels": pixels, "scroll_percent": scroll_percent})
+        except Exception:  # nosec B110
+            pass
         at_top = scroll_y <= 0
         at_bottom = scroll_y >= scroll_height - viewport_height - 1
 
@@ -2262,16 +2310,24 @@ async def _fill_form_impl(fields: list[FormField], *, ctx: RequestContext | None
                     dom_warning = (
                         f"\n⚠ Page content changed ({reasons_str}). Refs are now expired. Call get_page_map to refresh."
                     )
-                    from .telemetry.events import FILL_FORM_DOM_CHANGE
+                    try:
+                        from .telemetry.events import FILL_FORM_DOM_CHANGE
 
-                    _telem(
-                        FILL_FORM_DOM_CHANGE, {"severity": "major", "reasons": verdict.reasons}, request_id=request_id
-                    )
+                        _telem(
+                            FILL_FORM_DOM_CHANGE,
+                            {"severity": "major", "reasons": verdict.reasons},
+                            request_id=request_id,
+                        )
+                    except Exception:  # nosec B110
+                        pass
                 elif verdict.severity == "minor":
                     dom_warning = "\n⚠ Page content updated. Consider calling get_page_map if interactions fail."
-                    from .telemetry.events import FILL_FORM_DOM_CHANGE as _FFDC
+                    try:
+                        from .telemetry.events import FILL_FORM_DOM_CHANGE as _FFDC
 
-                    _telem(_FFDC, {"severity": "minor", "reasons": verdict.reasons}, request_id=request_id)
+                        _telem(_FFDC, {"severity": "minor", "reasons": verdict.reasons}, request_id=request_id)
+                    except Exception:  # nosec B110
+                        pass
 
         result = _format_fill_form_result(
             completed,
@@ -2392,9 +2448,12 @@ async def _wait_for_impl(
                 await page.wait_for_function(js_expr, target_text, timeout=timeout_ms)
             except PlaywrightError as e:
                 if "timeout" in str(e).lower():
-                    from .telemetry.events import WAIT_FOR_RESULT as _WFR_T
+                    try:
+                        from .telemetry.events import WAIT_FOR_RESULT as _WFR_T
 
-                    _telem(_WFR_T, {"elapsed": timeout, "success": False, "mode": "appear"})
+                        _telem(_WFR_T, {"elapsed": timeout, "success": False, "mode": "appear"})
+                    except Exception:  # nosec B110
+                        pass
                     dialog_warning = _format_dialog_warnings(session.drain_dialogs())
                     return (
                         f'Timeout: Text "{display_text}" did not appear within {timeout}s.\n'
@@ -2405,9 +2464,12 @@ async def _wait_for_impl(
 
             elapsed = time.monotonic() - t0
             ctx.cache.invalidate(InvalidationReason.WAIT_FOR)
-            from .telemetry.events import WAIT_FOR_RESULT
+            try:
+                from .telemetry.events import WAIT_FOR_RESULT
 
-            _telem(WAIT_FOR_RESULT, {"elapsed": round(elapsed, 2), "success": True, "mode": "appear"})
+                _telem(WAIT_FOR_RESULT, {"elapsed": round(elapsed, 2), "success": True, "mode": "appear"})
+            except Exception:  # nosec B110
+                pass
 
             dialog_warning = _format_dialog_warnings(session.drain_dialogs())
             return (
@@ -2429,9 +2491,12 @@ async def _wait_for_impl(
                 await page.wait_for_function(js_expr, target_text, timeout=timeout_ms)
             except PlaywrightError as e:
                 if "timeout" in str(e).lower():
-                    from .telemetry.events import WAIT_FOR_RESULT as _WFR_G
+                    try:
+                        from .telemetry.events import WAIT_FOR_RESULT as _WFR_G
 
-                    _telem(_WFR_G, {"elapsed": timeout, "success": False, "mode": "gone"})
+                        _telem(_WFR_G, {"elapsed": timeout, "success": False, "mode": "gone"})
+                    except Exception:  # nosec B110
+                        pass
                     dialog_warning = _format_dialog_warnings(session.drain_dialogs())
                     return (
                         f'Timeout: Text "{display_text}" still visible after {timeout}s.\n'
@@ -2441,9 +2506,12 @@ async def _wait_for_impl(
 
             elapsed = time.monotonic() - t0
             ctx.cache.invalidate(InvalidationReason.WAIT_FOR)
-            from .telemetry.events import WAIT_FOR_RESULT as _WFR_GS
+            try:
+                from .telemetry.events import WAIT_FOR_RESULT as _WFR_GS
 
-            _telem(_WFR_GS, {"elapsed": round(elapsed, 2), "success": True, "mode": "gone"})
+                _telem(_WFR_GS, {"elapsed": round(elapsed, 2), "success": True, "mode": "gone"})
+            except Exception:  # nosec B110
+                pass
 
             dialog_warning = _format_dialog_warnings(session.drain_dialogs())
             return (
@@ -2537,9 +2605,13 @@ async def _batch_get_page_map_impl(urls: list[str], max_concurrency: int, *, ctx
             if robots_error:
                 pre_errors[u] = robots_error
                 from .robots_checker import RobotsChecker as _RC
-                from .telemetry.events import ROBOTS_BLOCKED, robots_blocked
 
-                _telem(ROBOTS_BLOCKED, robots_blocked(url=u, origin=_RC._origin(u)), request_id=request_id)
+                try:
+                    from .telemetry.events import ROBOTS_BLOCKED, robots_blocked
+
+                    _telem(ROBOTS_BLOCKED, robots_blocked(url=u, origin=_RC._origin(u)), request_id=request_id)
+                except Exception:  # nosec B110
+                    pass
             else:
                 valid_urls.append(u)
 
@@ -2552,9 +2624,12 @@ async def _batch_get_page_map_impl(urls: list[str], max_concurrency: int, *, ctx
         len(urls),
         len(valid_urls),
     )
-    from .telemetry.events import BATCH_START
+    try:
+        from .telemetry.events import BATCH_START
 
-    _telem(BATCH_START, {"urls_count": len(urls), "valid_count": len(valid_urls)}, request_id=request_id)
+        _telem(BATCH_START, {"urls_count": len(urls), "valid_count": len(valid_urls)}, request_id=request_id)
+    except Exception:  # nosec B110
+        pass
 
     # All URLs blocked — return pre-errors without creating a session
     if not valid_urls:
@@ -2634,13 +2709,16 @@ async def _batch_get_page_map_impl(urls: list[str], max_concurrency: int, *, ctx
         results.append({"url": u, "status": "error", "error": err})
 
     # Add processed results
-    from .telemetry.events import BATCH_URL_RESULT
+    try:
+        from .telemetry.events import BATCH_URL_RESULT as _BATCH_URL_RESULT
+    except Exception:  # nosec B110
+        _BATCH_URL_RESULT = ""
 
     success_count = 0
     for r in raw_results:
         if isinstance(r, BaseException):
             results.append({"url": "unknown", "status": "error", "error": str(r)})
-            _telem(BATCH_URL_RESULT, {"url": "unknown", "success": False}, request_id=request_id)
+            _telem(_BATCH_URL_RESULT, {"url": "unknown", "success": False}, request_id=request_id)
         else:
             url, is_error, result = r
             if is_error:
@@ -2648,16 +2726,19 @@ async def _batch_get_page_map_impl(urls: list[str], max_concurrency: int, *, ctx
             else:
                 results.append({"url": url, "status": "ok", "page_map": result})
                 success_count += 1
-            _telem(BATCH_URL_RESULT, {"url": url, "success": not is_error}, request_id=request_id)
+            _telem(_BATCH_URL_RESULT, {"url": url, "success": not is_error}, request_id=request_id)
 
     elapsed_ms = round((_time.monotonic() - start) * 1000)
-    from .telemetry.events import BATCH_COMPLETE
+    try:
+        from .telemetry.events import BATCH_COMPLETE
 
-    _telem(
-        BATCH_COMPLETE,
-        {"elapsed_ms": elapsed_ms, "success": success_count, "failed": len(results) - success_count},
-        request_id=request_id,
-    )
+        _telem(
+            BATCH_COMPLETE,
+            {"elapsed_ms": elapsed_ms, "success": success_count, "failed": len(results) - success_count},
+            request_id=request_id,
+        )
+    except Exception:  # nosec B110
+        pass
 
     result_json = json.dumps(
         {
@@ -3019,10 +3100,13 @@ def main(argv: list[str] | None = None):
     configure_logging(json_output=(_transport_mode == "http"), level="INFO")
 
     if args.telemetry:
-        from .telemetry import configure
-        from .telemetry.collector import TelemetryConfig
+        try:
+            from .telemetry import configure
+            from .telemetry.collector import TelemetryConfig
 
-        configure(TelemetryConfig(enabled=True))
+            configure(TelemetryConfig(enabled=True))
+        except Exception:  # nosec B110
+            pass
 
     if _allow_local:
         logger.warning(
