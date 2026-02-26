@@ -118,10 +118,13 @@ def prune_page(
         # Detect if page has <main>
         has_main = any(c.in_main for c in all_chunks)
 
-        from pagemap.telemetry import emit
-        from pagemap.telemetry.events import CHUNK_DECOMPOSE
+        try:
+            from pagemap.telemetry import emit
+            from pagemap.telemetry.events import CHUNK_DECOMPOSE
 
-        emit(CHUNK_DECOMPOSE, {"chunk_count": len(all_chunks), "has_main": has_main})
+            emit(CHUNK_DECOMPOSE, {"chunk_count": len(all_chunks), "has_main": has_main})
+        except Exception:  # nosec B110
+            pass
 
         # Step 5: Rule-based pruning
         decisions = prune_chunks(all_chunks, schema_name, has_main=has_main)

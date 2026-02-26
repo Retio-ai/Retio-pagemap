@@ -2968,38 +2968,44 @@ def build_pruned_context(
 
     _grid_wl_count = result.aom_filter_stats.grid_whitelist_count if result else 0
 
-    from pagemap.telemetry import emit
-    from pagemap.telemetry.events import (
-        CONTENT_RESCUE,
-        GRID_WHITELIST_APPLIED,
-        MCG_ACTIVATED,
-        PRUNED_CONTEXT_COMPLETE,
-    )
+    try:
+        from pagemap.telemetry import emit
+        from pagemap.telemetry.events import (
+            CONTENT_RESCUE,
+            GRID_WHITELIST_APPLIED,
+            MCG_ACTIVATED,
+            PRUNED_CONTEXT_COMPLETE,
+        )
 
-    if _mcg_activated:
-        emit(MCG_ACTIVATED, {"original_tokens": context_tokens, "rescued_tokens": token_count, "page_type": page_type})
-    if _grid_wl_count > 0:
-        emit(GRID_WHITELIST_APPLIED, {"container_count": _grid_wl_count})
-    _rescue_count = result.aom_filter_stats.content_rescue_count if result else 0
-    if _rescue_count > 0:
-        emit(CONTENT_RESCUE, {"rescued_count": _rescue_count})
+        if _mcg_activated:
+            emit(
+                MCG_ACTIVATED,
+                {"original_tokens": context_tokens, "rescued_tokens": token_count, "page_type": page_type},
+            )
+        if _grid_wl_count > 0:
+            emit(GRID_WHITELIST_APPLIED, {"container_count": _grid_wl_count})
+        _rescue_count = result.aom_filter_stats.content_rescue_count if result else 0
+        if _rescue_count > 0:
+            emit(CONTENT_RESCUE, {"rescued_count": _rescue_count})
 
-    emit(
-        PRUNED_CONTEXT_COMPLETE,
-        {
-            "tokens": token_count,
-            "budget": max_tokens,
-            "prune_ms": round((t1 - t0) * 1000, 1),
-            "meta_ms": round((t2 - t1) * 1000, 1),
-            "compress_ms": round((t3 - t2) * 1000, 1),
-            "template_status": _template_status,
-            "page_type": page_type,
-            "schema_name": schema_name,
-            "extraction_quality": _eqs,
-            "mcg_activated": _mcg_activated,
-            "grid_whitelist_count": _grid_wl_count,
-        },
-    )
+        emit(
+            PRUNED_CONTEXT_COMPLETE,
+            {
+                "tokens": token_count,
+                "budget": max_tokens,
+                "prune_ms": round((t1 - t0) * 1000, 1),
+                "meta_ms": round((t2 - t1) * 1000, 1),
+                "compress_ms": round((t3 - t2) * 1000, 1),
+                "template_status": _template_status,
+                "page_type": page_type,
+                "schema_name": schema_name,
+                "extraction_quality": _eqs,
+                "mcg_activated": _mcg_activated,
+                "grid_whitelist_count": _grid_wl_count,
+            },
+        )
+    except Exception:  # nosec B110
+        pass
 
     return context, token_count, metadata
 

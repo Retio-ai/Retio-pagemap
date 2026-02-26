@@ -512,19 +512,22 @@ def aom_filter(
         stats.removal_reasons,
     )
 
-    from pagemap.telemetry import emit
-    from pagemap.telemetry.events import AOM_FILTER_COMPLETE
+    try:
+        from pagemap.telemetry import emit
+        from pagemap.telemetry.events import AOM_FILTER_COMPLETE
 
-    emit(
-        AOM_FILTER_COMPLETE,
-        {
-            "total_nodes": stats.total_nodes,
-            "removed_nodes": stats.removed_nodes,
-            "removal_reasons": dict(stats.removal_reasons),
-            "grid_whitelist_count": stats.grid_whitelist_count,
-            "content_rescue_count": stats.content_rescue_count,
-        },
-    )
+        emit(
+            AOM_FILTER_COMPLETE,
+            {
+                "total_nodes": stats.total_nodes,
+                "removed_nodes": stats.removed_nodes,
+                "removal_reasons": dict(stats.removal_reasons),
+                "grid_whitelist_count": stats.grid_whitelist_count,
+                "content_rescue_count": stats.content_rescue_count,
+            },
+        )
+    except Exception:  # nosec B110
+        pass
 
     return stats
 

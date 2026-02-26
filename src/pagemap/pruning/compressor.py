@@ -163,9 +163,12 @@ def compress_html(html: str) -> str:
 
     _compressed = result.strip()
 
-    from pagemap.telemetry import emit
-    from pagemap.telemetry.events import COMPRESSION_COMPLETE
+    try:
+        from pagemap.telemetry import emit
+        from pagemap.telemetry.events import COMPRESSION_COMPLETE
 
-    emit(COMPRESSION_COMPLETE, {"before_len": _before_len, "after_len": len(_compressed)})
+        emit(COMPRESSION_COMPLETE, {"before_len": _before_len, "after_len": len(_compressed)})
+    except Exception:  # nosec B110
+        pass
 
     return _compressed

@@ -424,10 +424,13 @@ def preprocess(raw_html: str) -> tuple[list[HtmlChunk], lxml.html.HtmlElement]:
     if not cleaned:
         raise PruningError("HTML empty after Pass 1 cleaning")
 
-    from pagemap.telemetry import emit
-    from pagemap.telemetry.events import PREPROCESS_COMPLETE
+    try:
+        from pagemap.telemetry import emit
+        from pagemap.telemetry.events import PREPROCESS_COMPLETE
 
-    emit(PREPROCESS_COMPLETE, {"json_ld_count": len(json_ld), "og_count": len(og), "rsc_count": len(rsc)})
+        emit(PREPROCESS_COMPLETE, {"json_ld_count": len(json_ld), "og_count": len(og), "rsc_count": len(rsc)})
+    except Exception:  # nosec B110
+        pass
 
     try:
         parser = lxml.html.HTMLParser(recover=True, encoding="utf-8")
