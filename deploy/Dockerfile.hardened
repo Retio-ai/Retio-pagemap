@@ -1,33 +1,30 @@
 # Copyright (C) 2025-2026 Retio AI
 # SPDX-License-Identifier: AGPL-3.0-only
 
-# Multi-stage Chainguard-based hardened container for PageMap
-# Zero-CVE base image with automatic security patches
+# Hardened multi-stage container for PageMap
+# Based on python:slim with security hardening (non-root, minimal attack surface)
 
 ARG PAGEMAP_VERSION=0.0.0
 
 # ── Stage 1: Build ────────────────────────────────────────────────────
-FROM cgr.dev/chainguard/python:latest-dev AS builder
-USER root
+FROM python:3.14-slim-bookworm AS builder
 
-WORKDIR /build
+ARG PAGEMAP_VERSION
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
-# Install build dependencies
-COPY pyproject.toml README.md ./
-COPY src/ src/
+RUN uv venv /opt/pagemap && \
+    uv pip install --python /opt/pagemap/bin/python \
+        "retio-pagemap==${PAGEMAP_VERSION}"
 
-RUN mkdir -p /deps && pip install --no-cache-dir --target=/deps .
-
-# Install Playwright Chromium only
-ENV PLAYWRIGHT_BROWSERS_PATH=/browsers
-ENV PYTHONPATH=/deps
-RUN pip install --no-cache-dir --target=/deps playwright \
-    && python -m playwright install chromium --with-deps
+# Install Playwright Chromium
+ENV PATH="/opt/pagemap/bin:$PATH"
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers
+RUN playwright install --with-deps chromium
 
 # ── Stage 2: Runtime ─────────────────────────────────────────────────
-FROM cgr.dev/chainguard/python:latest
+FROM python:3.14-slim-bookworm
 
-# OCI image labels (https://github.com/opencontainers/image-spec/blob/main/annotations.md)
+# OCI image labels
 LABEL org.opencontainers.image.title="PageMap" \
       org.opencontainers.image.description="MCP server for efficient web page interaction — compressed, actionable page maps for AI agents" \
       org.opencontainers.image.version="${PAGEMAP_VERSION}" \
@@ -36,34 +33,41 @@ LABEL org.opencontainers.image.title="PageMap" \
       org.opencontainers.image.source="https://github.com/Retio-ai/pagemap" \
       org.opencontainers.image.documentation="https://github.com/Retio-ai/pagemap#readme" \
       org.opencontainers.image.licenses="AGPL-3.0-only" \
-      org.opencontainers.image.base.name="cgr.dev/chainguard/python:latest" \
-      io.retio.security.hardened="true" \
-      io.retio.security.base="chainguard-zero-cve"
+      io.retio.security.hardened="true"
 
-# Non-root user (Chainguard default UID 65532 'nonroot')
-USER nonroot
+# Copy runtime deps from builder
+COPY --from=builder /opt/pagemap /opt/pagemap
+COPY --from=builder /opt/pw-browsers /opt/pw-browsers
 
-WORKDIR /app
+# Install Chromium runtime dependencies only (no dev packages)
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        libnss3 libnspr4 libdbus-1-3 libatk1.0-0 libatk-bridge2.0-0 \
+        libcups2 libdrm2 libxkbcommon0 libatspi2.0-0 libxcomposite1 \
+        libxdamage1 libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 \
+        libcairo2 libasound2t64 libwayland-client0 && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Copy application and dependencies
-COPY --from=builder /deps /deps
-COPY --from=builder /browsers /browsers
-COPY src/ src/
-
-ENV PYTHONPATH=/deps:/app/src
-ENV PLAYWRIGHT_BROWSERS_PATH=/browsers
+ENV PATH="/opt/pagemap/bin:$PATH"
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV PAGEMAP_CONTAINER_MODE=1
 
-# Security: no new privileges
-# (enforced via docker run --security-opt no-new-privileges:true)
+# Non-root user for security
+RUN groupadd -r pagemap && useradd -r -g pagemap -m pagemap && \
+    chown -R pagemap:pagemap /opt/pw-browsers
+USER pagemap
+WORKDIR /home/pagemap
+
+# MCP Registry ownership verification
+LABEL io.modelcontextprotocol.server.name="io.github.Retio-ai/pagemap"
 
 EXPOSE 8080
+STOPSIGNAL SIGTERM
 
-# Health check using Python (no curl in distroless/Chainguard images)
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"
 
-ENTRYPOINT ["python", "-m", "pagemap"]
+ENTRYPOINT ["retio-pagemap"]
 CMD ["--transport", "streamable-http", "--port", "8080"]
