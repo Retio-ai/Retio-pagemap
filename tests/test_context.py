@@ -68,7 +68,9 @@ class TestContextFields:
 
     def test_field_count(self):
         fields = dataclasses.fields(RequestContext)
-        assert len(fields) == 7
+        assert (
+            len(fields) == 17
+        )  # S4: +auth_method, +user_id; S9: +scroll_merge_state; S3: +tenant_id; S5: +experiment_id, +experiment_variant; S2: +build_context; Phase 1: +multi_tab, +get_or_create_multi_tab
 
     def test_get_session_hidden_from_repr(self):
         ctx = _make_ctx()

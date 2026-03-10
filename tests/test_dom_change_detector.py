@@ -7,11 +7,14 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock
 
+import pytest
 from playwright.async_api import Error as PlaywrightError
 
 from pagemap.dom_change_detector import (
     DomFingerprint,
+    DomLandmarkVector,
     capture_dom_fingerprint,
+    compute_landmark_vector,
     detect_dom_changes,
     fingerprints_structurally_equal,
 )
@@ -364,3 +367,246 @@ class TestFingerprintsStructurallyEqual:
         a = _fp(has_dialog=False)
         b = _fp(has_dialog=True)
         assert fingerprints_structurally_equal(a, b) is False
+
+
+# =========================================================================
+# DomLandmarkVector — dataclass tests
+# =========================================================================
+
+
+class TestDomLandmarkVector:
+    """Tests for DomLandmarkVector serialization."""
+
+    def test_to_list_from_list_roundtrip(self):
+        """to_list → from_list → identical vector."""
+        vec = DomLandmarkVector(
+            content_ratio=0.75,
+            interaction_density=0.5,
+            structural_symmetry=0.8,
+            nesting_ratio=0.6,
+            repetition_period=12,
+        )
+        restored = DomLandmarkVector.from_list(vec.to_list())
+        assert restored == vec
+
+    def test_from_list_wrong_length(self):
+        """len != 5 → ValueError."""
+        with pytest.raises(ValueError, match="Expected 5"):
+            DomLandmarkVector.from_list([0.1, 0.2, 0.3])
+
+
+# =========================================================================
+# compute_landmark_vector — pure function tests
+# =========================================================================
+
+
+def _landmark_raw(
+    *,
+    total_landmarks: int = 7,
+    interactive_landmarks: int = 3,
+    main_chars: int = 500,
+    total_chars: int = 1000,
+    depth_sum: int = 60,
+    depth_count: int = 10,
+    max_depth: int = 8,
+    sym_match: int = 3,
+    sym_half: int = 4,
+    rep_period: int = 5,
+) -> dict:
+    """Build a raw JS dict with landmarkData."""
+    return {
+        "landmarkData": {
+            "totalLandmarks": total_landmarks,
+            "interactiveLandmarks": interactive_landmarks,
+            "mainChars": main_chars,
+            "totalChars": total_chars,
+            "depthSum": depth_sum,
+            "depthCount": depth_count,
+            "maxDepth": max_depth,
+            "symMatch": sym_match,
+            "symHalf": sym_half,
+            "repPeriod": rep_period,
+        }
+    }
+
+
+class TestComputeLandmarkVector:
+    """Pure function tests for compute_landmark_vector."""
+
+    def test_full_data(self):
+        """Complete landmarkData → correct 5-dimensional vector."""
+        vec = compute_landmark_vector(_landmark_raw())
+        assert vec is not None
+        assert vec.content_ratio == 0.5  # 500/1000
+        assert vec.interaction_density == round(3 / 7, 3)  # 3/7
+        assert vec.structural_symmetry == 0.75  # 3/4
+        assert vec.nesting_ratio == 0.75  # (60/10)/8
+        assert vec.repetition_period == 5
+
+    def test_missing_landmark_data(self):
+        """No landmarkData key → None."""
+        assert compute_landmark_vector({}) is None
+
+    def test_non_dict_landmark_data(self):
+        """landmarkData is not a dict → None."""
+        assert compute_landmark_vector({"landmarkData": "bad"}) is None
+        assert compute_landmark_vector({"landmarkData": 42}) is None
+
+    def test_empty_page(self):
+        """All zeros → safe defaults, symmetry=0.5 (indeterminate)."""
+        vec = compute_landmark_vector(
+            _landmark_raw(
+                total_landmarks=0,
+                interactive_landmarks=0,
+                main_chars=0,
+                total_chars=0,
+                depth_sum=0,
+                depth_count=0,
+                max_depth=0,
+                sym_match=0,
+                sym_half=0,
+                rep_period=0,
+            )
+        )
+        assert vec is not None
+        assert vec.content_ratio == 0.0
+        assert vec.interaction_density == 0.0
+        assert vec.structural_symmetry == 0.5
+        assert vec.nesting_ratio == 0.0
+        assert vec.repetition_period == 0
+
+    def test_division_safety(self):
+        """Zero divisors → no ZeroDivisionError."""
+        vec = compute_landmark_vector(
+            _landmark_raw(
+                total_chars=0,
+                total_landmarks=0,
+                max_depth=0,
+                depth_count=0,
+                sym_half=0,
+            )
+        )
+        assert vec is not None
+
+    def test_clamping_over(self):
+        """mainChars > totalChars → content_ratio clamped to 1.0."""
+        vec = compute_landmark_vector(_landmark_raw(main_chars=2000, total_chars=100))
+        assert vec is not None
+        assert vec.content_ratio == 1.0
+
+    def test_clamping_negative(self):
+        """Negative raw values → clamped to 0.0."""
+        raw = _landmark_raw()
+        raw["landmarkData"]["mainChars"] = -100
+        raw["landmarkData"]["interactiveLandmarks"] = -5
+        vec = compute_landmark_vector(raw)
+        assert vec is not None
+        assert vec.content_ratio == 0.0
+        assert vec.interaction_density == 0.0
+
+    def test_partial_landmark_data(self):
+        """Only some fields present → .get() defaults work."""
+        vec = compute_landmark_vector({"landmarkData": {"totalChars": 100}})
+        assert vec is not None
+        assert vec.content_ratio == 0.0
+        assert vec.repetition_period == 0
+
+    def test_rounding_precision(self):
+        """Results are rounded to 3 decimal places."""
+        vec = compute_landmark_vector(
+            _landmark_raw(
+                main_chars=1,
+                total_chars=3,  # 0.33333...
+                interactive_landmarks=1,
+                total_landmarks=3,  # 0.33333...
+            )
+        )
+        assert vec is not None
+        assert vec.content_ratio == 0.333
+        assert vec.interaction_density == 0.333
+
+
+# =========================================================================
+# capture with landmark — integration tests
+# =========================================================================
+
+
+class TestCaptureWithLandmark:
+    """Integration tests for landmark_vector in capture_dom_fingerprint."""
+
+    async def test_capture_includes_landmark_vector(self):
+        """JS result with landmarkData → fp.landmark_vector is not None."""
+        page = AsyncMock()
+        page.evaluate = AsyncMock(
+            return_value={
+                "interactiveCounts": {"button": 2},
+                "totalInteractives": 2,
+                "hasDialog": False,
+                "bodyChildCount": 3,
+                "title": "Test",
+                "contentHash": 123,
+                "spaSignals": {},
+                "landmarkData": {
+                    "totalLandmarks": 5,
+                    "interactiveLandmarks": 2,
+                    "mainChars": 300,
+                    "totalChars": 600,
+                    "depthSum": 30,
+                    "depthCount": 5,
+                    "maxDepth": 8,
+                    "symMatch": 2,
+                    "symHalf": 3,
+                    "repPeriod": 4,
+                },
+            }
+        )
+        fp = await capture_dom_fingerprint(page)
+        assert fp is not None
+        assert fp.landmark_vector is not None
+        assert fp.landmark_vector.content_ratio == 0.5
+        assert fp.landmark_vector.repetition_period == 4
+
+    async def test_capture_without_landmark_data_compat(self):
+        """Old JS result (no landmarkData) → landmark_vector=None, rest normal."""
+        page = AsyncMock()
+        page.evaluate = AsyncMock(
+            return_value={
+                "interactiveCounts": {"button": 1},
+                "totalInteractives": 1,
+                "hasDialog": False,
+                "bodyChildCount": 2,
+                "title": "Old",
+                "contentHash": 456,
+            }
+        )
+        fp = await capture_dom_fingerprint(page)
+        assert fp is not None
+        assert fp.landmark_vector is None
+        assert fp.title == "Old"
+        assert fp.total_interactives == 1
+
+    def test_structural_equal_ignores_landmark(self):
+        """Different landmark_vector → fingerprints_structurally_equal still True."""
+        vec_a = DomLandmarkVector(0.5, 0.3, 0.8, 0.6, 10)
+        vec_b = DomLandmarkVector(0.1, 0.9, 0.2, 0.4, 0)
+        a = _fp()
+        # Reconstruct with landmark_vector since _fp doesn't set it
+        a_with = DomFingerprint(
+            interactive_counts=a.interactive_counts,
+            total_interactives=a.total_interactives,
+            has_dialog=a.has_dialog,
+            body_child_count=a.body_child_count,
+            title=a.title,
+            content_hash=a.content_hash,
+            landmark_vector=vec_a,
+        )
+        b_with = DomFingerprint(
+            interactive_counts=a.interactive_counts,
+            total_interactives=a.total_interactives,
+            has_dialog=a.has_dialog,
+            body_child_count=a.body_child_count,
+            title=a.title,
+            content_hash=a.content_hash,
+            landmark_vector=vec_b,
+        )
+        assert fingerprints_structurally_equal(a_with, b_with) is True

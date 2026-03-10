@@ -1,0 +1,634 @@
+# Copyright (C) 2025-2026 Retio AI
+# SPDX-License-Identifier: AGPL-3.0-only
+
+"""AOM (Accessibility Object Model) based pre-filtering.
+
+HTML5 semantic tags → implicit ARIA role mapping is prioritized over
+explicit role attributes, because Korean sites rarely use ARIA annotations.
+
+Removes low-weight nodes (navigation, ads, banners, popups) from the DOM
+before chunk decomposition.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import logging
+import re
+from dataclasses import dataclass, field
+from typing import Any
+
+import lxml.html
+from lxml import etree
+
+logger = logging.getLogger(__name__)
+
+# ---- AOM weight thresholds ----
+_DEFAULT_THRESHOLD = 0.5  # below this = remove
+_FILTER_SIDEBAR_WEIGHT = 0.7  # aside/complementary with form controls
+_LINK_DENSITY_HIGH = 0.8  # ratio above this = heavy penalty
+_LINK_DENSITY_MODERATE = 0.5  # ratio above this = moderate penalty
+_LINK_DENSITY_HIGH_WEIGHT = 0.2  # weight assigned at high density
+_LINK_DENSITY_MODERATE_WEIGHT = 0.4  # weight assigned at moderate density
+_NOISE_PATTERN_WEIGHT = 0.2  # weight for 2+ noise class/id matches
+_NOISE_COUNT_THRESHOLD = 2  # min noise pattern matches to penalize
+_CONTENT_NOISE_OVERRIDE_WEIGHT = 0.7  # content + noise coexist
+_LINK_DENSITY_MIN_TEXT_LEN = 50  # skip density calc below this
+
+# HTML5 semantic tag → implicit ARIA role → default weight
+_SEMANTIC_WEIGHTS: dict[str, tuple[str, float]] = {
+    "main": ("main", 1.0),
+    "article": ("article", 1.0),
+    "section": ("region", 0.8),
+    "nav": ("navigation", 0.0),
+    "aside": ("complementary", 0.3),
+    "header": ("banner", 0.0),  # weight 0.0 only when body-direct child
+    "footer": ("contentinfo", 0.0),  # weight 0.0 only when body-direct child
+}
+
+# Class/ID noise patterns (English names common on Korean sites)
+_NOISE_PATTERNS = [
+    re.compile(r"\bad[-_]?\b", re.IGNORECASE),
+    re.compile(r"\badvertis", re.IGNORECASE),
+    re.compile(r"\bsponsor", re.IGNORECASE),
+    re.compile(r"\bbanner\b", re.IGNORECASE),
+    re.compile(r"\brecommend", re.IGNORECASE),
+    re.compile(r"\brelated\b", re.IGNORECASE),
+    re.compile(r"\bsidebar\b", re.IGNORECASE),
+    re.compile(r"\bpopup\b", re.IGNORECASE),
+    re.compile(r"\bmodal\b", re.IGNORECASE),
+    re.compile(r"\bcookie\b", re.IGNORECASE),
+    re.compile(r"\btracking\b", re.IGNORECASE),
+    re.compile(r"\boverlay\b", re.IGNORECASE),
+    re.compile(r"\bpromo", re.IGNORECASE),
+    re.compile(r"\bwidget\b", re.IGNORECASE),
+    re.compile(r"\btoast\b", re.IGNORECASE),
+    re.compile(r"\bsnackbar\b", re.IGNORECASE),
+]
+
+# Positive content class/ID patterns (content containers worth keeping)
+_CONTENT_PATTERNS = [
+    re.compile(r"\barticle\b", re.IGNORECASE),
+    re.compile(r"\bcontent\b", re.IGNORECASE),
+    re.compile(r"\bentry\b", re.IGNORECASE),
+    re.compile(r"\bpost\b", re.IGNORECASE),
+    re.compile(r"\bstory\b", re.IGNORECASE),
+    re.compile(r"\bproduct\b", re.IGNORECASE),
+    re.compile(r"\bitem\b", re.IGNORECASE),
+    re.compile(r"\bgoods\b", re.IGNORECASE),
+]
+
+# Pre-compiled patterns for inline style checks (Phase 6.3b)
+_DISPLAY_NONE_RE = re.compile(r"display\s*:\s*none", re.IGNORECASE)
+_VISIBILITY_HIDDEN_RE = re.compile(r"visibility\s*:\s*hidden", re.IGNORECASE)
+_OPACITY_ZERO_RE = re.compile(r"opacity\s*:\s*0(?:\.0+)?(?:\s*[;!]|\s*$)", re.IGNORECASE)
+_FONT_SIZE_ZERO_RE = re.compile(r"font-size\s*:\s*0(?:\.0+)?(?:px|em|rem|%)?(?:\s*[;!]|\s*$)", re.IGNORECASE)
+
+# Hidden DOM injection patterns (Phase 6.4 — 6 additional CSS hiding techniques)
+_OFFSCREEN_POSITION_RE = re.compile(r"(?:left|top|right)\s*:\s*-\d{4,}px", re.IGNORECASE)
+_CLIP_HIDDEN_RE = re.compile(
+    r"(?:clip\s*:\s*rect\s*\(\s*0[\s,]+0[\s,]+0[\s,]+0\s*\)|clip-path\s*:\s*inset\s*\(\s*100%\s*\))",
+    re.IGNORECASE,
+)
+_TEXT_INDENT_RE = re.compile(r"text-indent\s*:\s*-\d{4,}px", re.IGNORECASE)
+_TRANSFORM_OFFSCREEN_RE = re.compile(r"transform\s*:.*translate[XY]?\s*\(\s*-\d{4,}px", re.IGNORECASE)
+_SR_ONLY_RE = re.compile(
+    r"(?=.*overflow\s*:\s*hidden)(?=.*(?:width|height)\s*:\s*1px)(?=.*position\s*:\s*absolute)",
+    re.IGNORECASE | re.DOTALL,
+)
+_ZERO_DIMENSION_RE = re.compile(
+    r"(?=.*(?:width|height)\s*:\s*0(?:px)?\s*(?:[;!]|$))(?=.*overflow\s*:\s*hidden)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+# Price pattern for Product schema noise override (Phase 3.3)
+_PRICE_IN_NOISE_RE = re.compile(r"(?:₩|원|\$|€|£|¥)\s*[\d,]+|\d{2,3}(?:,\d{3})+", re.IGNORECASE)
+
+# Text density signal constants (Phase C-1)
+_TEXT_DENSITY_MIN_HTML_SIZE = 200
+_TEXT_DENSITY_THRESHOLD = 0.1
+_TEXT_DENSITY_WEIGHT = 0.3
+
+# Content rescue patterns (Phase C-2) — expanded beyond price-only
+_H1_RESCUE_RE = re.compile(r"<h1\b", re.IGNORECASE)
+_RATING_RESCUE_RE = re.compile(
+    r"(?:★|⭐|\d+\.\d+\s*/\s*\d+|\d+\.\d+점|ratingValue|평점|별점|rating|stars?)",
+    re.IGNORECASE,
+)
+_REVIEW_COUNT_RESCUE_RE = re.compile(
+    r"(?:리뷰\s*\d+|reviews?\s*\(?\d+|reviewCount|\d+\s*(?:reviews?|리뷰|개의\s*평가))",
+    re.IGNORECASE,
+)
+
+# Readability-inspired: article/main ancestor tags for <p> exemption
+_ARTICLE_ANCESTOR_TAGS = frozenset({"article", "main"})
+
+
+def _is_inside_article_or_main(el: lxml.html.HtmlElement) -> bool:
+    """Check if element has an <article> or <main> ancestor."""
+    parent = el.getparent()
+    while parent is not None:
+        tag = parent.tag.lower() if isinstance(parent.tag, str) else ""
+        if tag in _ARTICLE_ANCESTOR_TAGS:
+            return True
+        parent = parent.getparent()
+    return False
+
+
+@dataclass
+class AomFilterStats:
+    """Statistics from AOM filtering."""
+
+    total_nodes: int = 0
+    removed_nodes: int = 0
+    removal_reasons: dict[str, int] = field(default_factory=dict)
+    removed_xpaths: set[str] = field(default_factory=set)  # for future xpath-level matching
+    grid_whitelist_count: int = 0
+    content_rescue_count: int = 0
+
+    def record(self, reason: str) -> None:
+        self.removed_nodes += 1
+        self.removal_reasons[reason] = self.removal_reasons.get(reason, 0) + 1
+
+
+# HN regression fix: <table>/<tbody> must participate in grid detection so that
+# table-based content listings (HN, Craigslist, forums) get whitelist protection
+# from link-density penalties.  Guards (≥3 same-fingerprint children, link
+# density > 0.5, text > 50 chars) prevent false positives on layout/nav tables.
+_GRID_CONTAINER_TAGS = frozenset({"div", "section", "ul", "ol", "main", "article", "table", "tbody"})
+_MIN_REPEATING_CHILDREN = 3
+_MAX_FINGERPRINT_CLASSES = 3
+
+
+def _child_fingerprint(el: lxml.html.HtmlElement) -> tuple[str, frozenset[str]] | None:
+    """Fingerprint a child element by (tag, first-N classes)."""
+    tag = el.tag if isinstance(el.tag, str) else None
+    if tag is None:
+        return None
+    classes = el.get("class", "").split()[:_MAX_FINGERPRINT_CLASSES]
+    return (tag.lower(), frozenset(classes))
+
+
+def _detect_repeating_grids(doc: lxml.html.HtmlElement) -> set[str]:
+    """Detect repeating grid containers (pre-AOM whitelist).
+
+    Finds containers whose direct children share the same tag+class
+    structure (>= 3 siblings). These are likely product grids, file
+    lists, or article lists — not navigation.
+
+    Only whitelists containers where link density > 0.5 (otherwise
+    the AOM filter won't penalize them anyway).
+
+    Returns set of xpaths for containers that should be exempted
+    from link-density penalty in AOM filter.
+    """
+    tree = doc.getroottree()
+    whitelist: set[str] = set()
+
+    for el in doc.iter():
+        if not isinstance(el.tag, str):
+            continue
+        if el.tag.lower() not in _GRID_CONTAINER_TAGS:
+            continue
+
+        # Group direct children by fingerprint
+        fp_counts: dict[tuple[str, frozenset[str]], int] = {}
+        for child in el:
+            fp = _child_fingerprint(child)
+            if fp is not None:
+                fp_counts[fp] = fp_counts.get(fp, 0) + 1
+
+        # Check if any fingerprint group has >= 3 children
+        has_repeating = any(c >= _MIN_REPEATING_CHILDREN for c in fp_counts.values())
+        if not has_repeating:
+            continue
+
+        # Only whitelist if link density > 0.5 (the penalty threshold)
+        total_text = (el.text_content() or "").strip()
+        total_len = len(total_text)
+        if total_len <= _LINK_DENSITY_MIN_TEXT_LEN:
+            continue
+
+        link_text_len = sum(len((a.text_content() or "").strip()) for a in el.iter("a"))
+        if link_text_len > 0 and link_text_len / total_len > _LINK_DENSITY_MODERATE:
+            try:
+                xpath = tree.getpath(el)
+                whitelist.add(xpath)
+            except ValueError:
+                continue
+
+    return whitelist
+
+
+def _is_body_direct_child(el: lxml.html.HtmlElement) -> bool:
+    """Check if element is a direct child of <body>."""
+    parent = el.getparent()
+    if parent is None:
+        return False
+    tag = parent.tag.lower() if isinstance(parent.tag, str) else ""
+    return tag == "body"
+
+
+def _count_noise_matches(el: lxml.html.HtmlElement) -> int:
+    """Count how many noise patterns match in class/id attributes."""
+    cls = el.get("class", "")
+    eid = el.get("id", "")
+    text = f"{cls} {eid}"
+    if not text.strip():
+        return 0
+    return sum(1 for p in _NOISE_PATTERNS if p.search(text))
+
+
+_LINK_DENSITY_TAGS = frozenset(
+    {
+        "div",
+        "li",
+        "td",
+        "th",
+        "p",
+        "blockquote",
+    }
+)  # Note: section/aside omitted — already handled by semantic tag early return
+
+
+def _count_content_matches(el: lxml.html.HtmlElement) -> int:
+    """Count how many content patterns match in class/id attributes."""
+    cls = el.get("class", "")
+    eid = el.get("id", "")
+    text = f"{cls} {eid}"
+    if not text.strip():
+        return 0
+    return sum(1 for p in _CONTENT_PATTERNS if p.search(text))
+
+
+_FILTER_CONTROL_TAGS = frozenset({"input", "select", "textarea"})
+
+
+def _has_interactive_descendants(el: lxml.html.HtmlElement) -> bool:
+    """Check if element contains visible form controls (input/select/textarea).
+
+    Filter sidebars contain interactive controls; related-products sections
+    contain mostly links and product cards.
+    """
+    for desc in el.iter():
+        if not isinstance(desc.tag, str):
+            continue
+        tag = desc.tag.lower()
+        if tag in _FILTER_CONTROL_TAGS:
+            if tag == "input" and desc.get("type", "").lower() == "hidden":
+                continue
+            return True
+    return False
+
+
+def _compute_weight(
+    el: lxml.html.HtmlElement,
+    schema_name: str | None = None,
+    grid_whitelist: set[str] | None = None,
+    tree: Any = None,
+    article_main_descendants: set[lxml.html.HtmlElement] | None = None,
+    *,
+    enable_text_density: bool = True,
+) -> tuple[float, str]:
+    """Compute AOM weight for an element.
+
+    Returns (weight, reason). Lower weight = more likely to be noise.
+
+    Priority:
+      1. Explicit role attribute
+      2. HTML5 semantic tag implicit mapping
+      3. aria-hidden="true"
+      4. Inline style display:none / visibility:hidden
+      5. Class/ID noise pattern matching
+      6. Link density penalty (with grid whitelist exemption)
+    """
+    tag = el.tag.lower() if isinstance(el.tag, str) else ""
+
+    # 1. Explicit role attribute
+    role = el.get("role", "").lower()
+    if role:
+        if role in ("navigation", "banner", "contentinfo", "complementary"):
+            # Schema-conditional exception: gov.kr contact_info in footer
+            if role == "contentinfo" and schema_name == "GovernmentPage":
+                return 0.6, "footer-gov-exception"
+            if role == "complementary" and _has_interactive_descendants(el):
+                return _FILTER_SIDEBAR_WEIGHT, "filter-sidebar"
+            return 0.0 if role in ("navigation", "banner", "contentinfo") else 0.3, f"role={role}"
+        if role in ("main", "article"):
+            return 1.0, f"role={role}"
+        if role == "region":
+            return 0.8, "role=region"
+
+    # 2. HTML5 semantic tag mapping
+    if tag in _SEMANTIC_WEIGHTS:
+        implicit_role, default_weight = _SEMANTIC_WEIGHTS[tag]
+
+        # header/footer: only 0.0 if body-direct child
+        if tag in ("header", "footer"):
+            if _is_body_direct_child(el):
+                if tag == "footer" and schema_name == "GovernmentPage":
+                    return 0.6, "footer-gov-exception"
+                return default_weight, f"semantic-{tag}"
+            else:
+                # Not body-direct: keep (might be article header/footer)
+                return 0.8, f"semantic-{tag}-nested"
+
+        # section: only full weight if it has a label
+        if tag == "section":
+            if el.get("aria-label") or el.get("aria-labelledby"):
+                return 0.8, "semantic-section-labeled"
+            return 0.6, "semantic-section-unlabeled"
+
+        if tag == "aside":
+            if _has_interactive_descendants(el):
+                return _FILTER_SIDEBAR_WEIGHT, "filter-sidebar"
+            return default_weight, f"semantic-{tag}"
+
+        return default_weight, f"semantic-{tag}"
+
+    # 3. aria-hidden="true"
+    if el.get("aria-hidden") == "true":
+        return 0.0, "aria-hidden"
+
+    # 4. Inline style checks (hidden content = prompt injection vector)
+    style = el.get("style", "")
+    if style:
+        if _DISPLAY_NONE_RE.search(style):
+            return 0.0, "display-none"
+        if _VISIBILITY_HIDDEN_RE.search(style):
+            return 0.0, "visibility-hidden"
+        if _OPACITY_ZERO_RE.search(style):
+            return 0.0, "opacity-zero"
+        if _FONT_SIZE_ZERO_RE.search(style):
+            return 0.0, "font-size-zero"
+        if _OFFSCREEN_POSITION_RE.search(style):
+            return 0.0, "offscreen-position"
+        if _CLIP_HIDDEN_RE.search(style):
+            return 0.0, "clip-hidden"
+        if _TEXT_INDENT_RE.search(style):
+            return 0.0, "text-indent-hidden"
+        if _TRANSFORM_OFFSCREEN_RE.search(style):
+            return 0.0, "transform-offscreen"
+        if _SR_ONLY_RE.search(style):
+            return 0.0, "sr-only-hidden"
+        if _ZERO_DIMENSION_RE.search(style):
+            return 0.0, "zero-dimension"
+
+    # 5. Class/ID noise patterns + content patterns
+    noise_count = _count_noise_matches(el)
+    content_count = _count_content_matches(el)
+
+    if noise_count >= _NOISE_COUNT_THRESHOLD:
+        if content_count > 0:
+            return _CONTENT_NOISE_OVERRIDE_WEIGHT, f"content-override-noise({content_count}vs{noise_count})"
+        # Product schema: preserve noise-matched elements that contain price data
+        if schema_name == "Product":
+            text_content = (el.text_content() or "").strip()
+            if text_content and _PRICE_IN_NOISE_RE.search(text_content):
+                return _CONTENT_NOISE_OVERRIDE_WEIGHT, f"product-price-in-noise({noise_count})"
+        return _NOISE_PATTERN_WEIGHT, f"noise-pattern({noise_count})"
+
+    if content_count > 0:
+        return 1.0, f"content-pattern({content_count})"
+
+    # 5.5. Text density signal — penalize large blocks with very low text/html ratio
+    if enable_text_density and tag in _LINK_DENSITY_TAGS:
+        try:
+            html_bytes = etree.tostring(el, encoding="unicode", method="html")
+        except Exception:
+            html_bytes = ""
+        html_len = len(html_bytes)
+        if html_len >= _TEXT_DENSITY_MIN_HTML_SIZE:
+            text_len = len((el.text_content() or "").strip())
+            density = text_len / html_len if html_len > 0 else 1.0
+            if density < _TEXT_DENSITY_THRESHOLD:
+                # Exempt elements inside <main> or <article>
+                if not _is_inside_article_or_main(el):
+                    return _TEXT_DENSITY_WEIGHT, f"text-density-low({density:.3f})"
+
+    # 6. Link density penalty (block-level containers only)
+    if tag in _LINK_DENSITY_TAGS:
+        # Check grid whitelist before applying link density penalty
+        if grid_whitelist and tree is not None:
+            try:
+                el_xpath = tree.getpath(el)
+                # Exempt if this element is whitelisted, is a descendant
+                # of a whitelisted container, or is an ancestor of one
+                if el_xpath in grid_whitelist or any(el_xpath.startswith(wp + "/") for wp in grid_whitelist):
+                    return 0.8, "grid-whitelist"
+                if any(wp.startswith(el_xpath + "/") for wp in grid_whitelist):
+                    return 0.8, "grid-whitelist-ancestor"
+            except ValueError:
+                pass
+        total_text = (el.text_content() or "").strip()
+        total_len = len(total_text)
+        if total_len > _LINK_DENSITY_MIN_TEXT_LEN:
+            link_text_len = sum(len((a.text_content() or "").strip()) for a in el.iter("a"))
+            if link_text_len > 0:
+                density = link_text_len / total_len
+                # Readability-inspired: long paragraphs inside article/main
+                # survive moderate link density (e.g. Wikipedia reference links)
+                if tag == "p" and (
+                    (el in article_main_descendants)
+                    if article_main_descendants is not None
+                    else _is_inside_article_or_main(el)
+                ):
+                    non_link_len = total_len - link_text_len
+                    if non_link_len > 80:
+                        if density > _LINK_DENSITY_HIGH:
+                            return _LINK_DENSITY_HIGH_WEIGHT, f"article-p-link-dense({density:.2f})"
+                        return 0.9, "article-content-p"
+                if density > _LINK_DENSITY_HIGH:
+                    return _LINK_DENSITY_HIGH_WEIGHT, f"link-density-high({density:.2f})"
+                if density > _LINK_DENSITY_MODERATE:
+                    return _LINK_DENSITY_MODERATE_WEIGHT, f"link-density({density:.2f})"
+
+    # Default: keep
+    return 1.0, "default"
+
+
+def aom_filter(
+    doc: lxml.html.HtmlElement,
+    schema_name: str | None = None,
+    threshold: float = _DEFAULT_THRESHOLD,
+    grid_whitelist: set[str] | None = None,
+    *,
+    enable_text_density: bool = True,
+) -> AomFilterStats:
+    """Apply AOM-based filtering to DOM tree (in-place).
+
+    Removes nodes with weight < threshold along with all their descendants.
+    """
+    stats = AomFilterStats()
+    if grid_whitelist:
+        stats.grid_whitelist_count = len(grid_whitelist)
+
+    tree = doc.getroottree()
+
+    # Pre-compute article/main descendants for O(1) lookup (Fix 2)
+    _article_main_descendants: set[lxml.html.HtmlElement] = set()
+    for _container in doc.iter():
+        if isinstance(_container.tag, str) and _container.tag.lower() in _ARTICLE_ANCESTOR_TAGS:
+            _article_main_descendants.update(_container.iterdescendants())
+
+    # Collect elements to remove (can't modify tree during iteration)
+    to_remove: list[tuple[lxml.html.HtmlElement, str]] = []
+
+    for el in doc.iter():
+        if not isinstance(el.tag, str):
+            continue
+        stats.total_nodes += 1
+
+        tag = el.tag.lower()
+        # Never remove body/html/main or direct children of <main>
+        if tag in ("body", "html", "main"):
+            continue
+        parent = el.getparent()
+        if parent is not None and isinstance(parent.tag, str) and parent.tag.lower() == "main":
+            continue
+
+        weight, reason = _compute_weight(
+            el,
+            schema_name,
+            grid_whitelist=grid_whitelist,
+            tree=tree,
+            article_main_descendants=_article_main_descendants,
+            enable_text_density=enable_text_density,
+        )
+        if weight < threshold:
+            to_remove.append((el, reason))
+
+    # Track link-density removals for content rescue
+    _link_density_removed: list[tuple[lxml.html.HtmlElement, lxml.html.HtmlElement, int, str]] = []
+    # (element, parent, index_in_parent, reason) — only for link-density reasons
+
+    # Remove collected elements (parent-first to avoid double removal)
+    for el, reason in to_remove:
+        # Skip if already removed as descendant of a previously removed element
+        parent = el.getparent()
+        if parent is None:
+            continue
+
+        try:
+            xpath = tree.getpath(el)
+        except ValueError:
+            continue
+
+        # O(depth) ancestor prefix check via set lookup,
+        # replacing O(removed_count) linear scan.
+        # range(4,...): /html(2), /html/body(3) never removed (line 272 guard).
+        parts = xpath.split("/")
+        if any("/".join(parts[:i]) in stats.removed_xpaths for i in range(4, len(parts))):
+            continue
+
+        # Save link-density removals for possible content rescue
+        if reason.startswith("link-density"):
+            idx = list(parent).index(el)
+            _link_density_removed.append((el, parent, idx, reason))
+
+        parent.remove(el)
+        stats.removed_xpaths.add(xpath)
+        stats.record(reason)
+
+    # Content rescue: restore link-density removals containing high-value patterns.
+    # For Product schema: always rescue price/rating/review/h1 elements.
+    # For other schemas: only rescue when remaining text < 100 chars.
+    # NEVER restore security-critical removals (display:none, aria-hidden, etc.)
+    remaining_text = (doc.text_content() or "").strip()
+    _should_rescue = len(remaining_text) < 100 or schema_name == "Product"
+    rescued_reasons: list[str] = []
+    if _should_rescue and _link_density_removed:
+        for el, parent, idx, reason in _link_density_removed:
+            el_text = (el.text_content() or "").strip()
+            el_html = ""
+            with contextlib.suppress(Exception):
+                el_html = etree.tostring(el, encoding="unicode", method="html")
+            has_rescue_signal = bool(
+                el_text
+                and (
+                    _PRICE_IN_NOISE_RE.search(el_text)
+                    or _H1_RESCUE_RE.search(el_html)
+                    or _RATING_RESCUE_RE.search(el_text)
+                    or _REVIEW_COUNT_RESCUE_RE.search(el_text)
+                )
+            )
+            if has_rescue_signal:
+                # Guard: skip if parent was detached during removal phase.
+                # lxml doesn't raise ValueError for detached elements — it
+                # returns a path rooted at the detached subtree (e.g. "/nav/div").
+                # In-tree paths always start with "/html".
+                try:
+                    parent_path = tree.getpath(parent)
+                except ValueError:
+                    logger.debug("Content rescue: skipping — parent detached")
+                    continue
+                if not parent_path.startswith("/html"):
+                    logger.debug("Content rescue: skipping — parent detached")
+                    continue
+                # Re-insert at original position (clamped to parent length)
+                insert_idx = min(idx, len(parent))
+                parent.insert(insert_idx, el)
+                stats.content_rescue_count += 1
+                rescued_reasons.append(reason)
+                logger.debug("Content rescue: restored element with high-value data")
+
+    # Correct stats: rescued nodes should not count as removed
+    if rescued_reasons:
+        stats.removed_nodes -= len(rescued_reasons)
+        for r in rescued_reasons:
+            if r in stats.removal_reasons:
+                stats.removal_reasons[r] -= 1
+                if stats.removal_reasons[r] <= 0:
+                    del stats.removal_reasons[r]
+
+    logger.debug(
+        "AOM filter: %d/%d nodes removed, %d grid-whitelisted, %d rescued (%s)",
+        stats.removed_nodes,
+        stats.total_nodes,
+        stats.grid_whitelist_count,
+        stats.content_rescue_count,
+        stats.removal_reasons,
+    )
+
+    try:
+        from pagemap.telemetry import emit
+        from pagemap.telemetry.events import AOM_FILTER_COMPLETE
+
+        emit(
+            AOM_FILTER_COMPLETE,
+            {
+                "total_nodes": stats.total_nodes,
+                "removed_nodes": stats.removed_nodes,
+                "removal_reasons": dict(stats.removal_reasons),
+                "grid_whitelist_count": stats.grid_whitelist_count,
+                "content_rescue_count": stats.content_rescue_count,
+            },
+        )
+    except Exception:  # nosec B110
+        pass
+
+    return stats
+
+
+# Mapping of removed landmark reasons (weight < 0.5) to Interactable.region names.
+# Noise-class and link-density removals are intentionally excluded (no region mapping).
+_REASON_TO_REGION: dict[str, str] = {
+    "semantic-nav": "navigation",
+    "role=navigation": "navigation",
+    "semantic-header": "header",
+    "role=banner": "header",
+    "semantic-footer": "footer",
+    "role=contentinfo": "footer",
+    "semantic-aside": "complementary",
+    "role=complementary": "complementary",
+}
+
+
+def derive_pruned_regions(stats: AomFilterStats) -> set[str]:
+    """Map AOM removal reasons to interactable region names."""
+    regions: set[str] = set()
+    for reason in stats.removal_reasons:
+        region = _REASON_TO_REGION.get(reason)
+        if region:
+            regions.add(region)
+    return regions

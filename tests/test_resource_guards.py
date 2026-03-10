@@ -62,7 +62,7 @@ class TestResourceLimitConstants:
         assert MAX_DOM_NODES == 50_000
 
     def test_max_html_size_bytes_value(self):
-        assert MAX_HTML_SIZE_BYTES == 5 * 1024 * 1024  # 5MB
+        assert MAX_HTML_SIZE_BYTES == 8 * 1024 * 1024  # 8MB
 
     def test_dom_guard_js_is_nonempty(self):
         assert len(_DOM_GUARD_AND_HIDDEN_JS) > 100
@@ -336,9 +336,9 @@ class TestFontSizeZeroFalsePositiveRegression:
 
 
 class TestResourceGuardIntegration:
-    def test_html_over_5mb_raises(self):
-        """_check_html_size rejects HTML over 5MB."""
-        big_html = "x" * (6 * 1024 * 1024)  # 6MB
+    def test_html_over_8mb_raises(self):
+        """_check_html_size rejects HTML over 8MB."""
+        big_html = "x" * (9 * 1024 * 1024)  # 9MB
         with pytest.raises(ResourceExhaustionError, match="HTML size"):
             _check_html_size(big_html)
 

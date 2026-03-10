@@ -54,6 +54,9 @@ def _reset_state():
     import pagemap.server as srv
 
     srv._state.cache.invalidate_all()
+    srv._state.multi_tab = None
+    srv._state._navigation_count = 0
+    srv._state._session_started_at = 0.0
     old_robots = srv._robots_checker
     old_api_key_store = srv._api_key_store
     old_rate_limiter = srv._rate_limiter
@@ -66,6 +69,9 @@ def _reset_state():
     srv._draining = False
     yield
     srv._state.cache.invalidate_all()
+    srv._state.multi_tab = None
+    srv._state._navigation_count = 0
+    srv._state._session_started_at = 0.0
     srv._robots_checker = old_robots
     srv._api_key_store = old_api_key_store
     srv._rate_limiter = old_rate_limiter

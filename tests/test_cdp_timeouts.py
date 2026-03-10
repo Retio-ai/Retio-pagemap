@@ -120,7 +120,7 @@ class TestDetectAxTimeout:
         async def _slow_send(*args, **kwargs):
             await asyncio.sleep(999)
 
-        with patch("pagemap.interactive_detector._CDP_AX_TREE_TIMEOUT", 0.05):
+        with patch("pagemap.core.interactive_detector._CDP_AX_TREE_TIMEOUT", 0.05):
             cdp = _make_mock_cdp(send_side_effect=_slow_send)
             page = _make_mock_page(cdp)
 
@@ -150,7 +150,7 @@ class TestDetectAxTimeout:
             # After first pair, be slow to trigger timeout
             await asyncio.sleep(999)
 
-        with patch("pagemap.interactive_detector._CDP_CSS_BUDGET", 0.1):
+        with patch("pagemap.core.interactive_detector._CDP_CSS_BUDGET", 0.1):
             cdp = _make_mock_cdp(send_side_effect=_slow_css_send)
             page = _make_mock_page(cdp)
 
@@ -173,7 +173,7 @@ class TestDetectAxTimeout:
         import logging
 
         with (
-            patch("pagemap.interactive_detector._CDP_CSS_BUDGET", 0.05),
+            patch("pagemap.core.interactive_detector._CDP_CSS_BUDGET", 0.05),
             caplog.at_level(logging.WARNING),
         ):
             cdp = _make_mock_cdp(send_side_effect=_slow_css_send)
@@ -189,7 +189,7 @@ class TestDetectAxTimeout:
         async def _slow_send(*args, **kwargs):
             await asyncio.sleep(999)
 
-        with patch("pagemap.interactive_detector._CDP_AX_TREE_TIMEOUT", 0.05):
+        with patch("pagemap.core.interactive_detector._CDP_AX_TREE_TIMEOUT", 0.05):
             cdp = _make_mock_cdp(send_side_effect=_slow_send)
             page = _make_mock_page(cdp)
 
@@ -233,7 +233,7 @@ class TestDetectCdpTimeout:
         async def _slow_send(*args, **kwargs):
             await asyncio.sleep(999)
 
-        with patch("pagemap.interactive_detector._CDP_TIER3_TIMEOUT", 0.05):
+        with patch("pagemap.core.interactive_detector._CDP_TIER3_TIMEOUT", 0.05):
             cdp = _make_mock_cdp(send_side_effect=_slow_send)
             page = _make_mock_page(cdp)
 
@@ -247,7 +247,7 @@ class TestDetectCdpTimeout:
         async def _slow_send(*args, **kwargs):
             await asyncio.sleep(999)
 
-        with patch("pagemap.interactive_detector._CDP_TIER3_TIMEOUT", 0.05):
+        with patch("pagemap.core.interactive_detector._CDP_TIER3_TIMEOUT", 0.05):
             cdp = _make_mock_cdp(send_side_effect=_slow_send)
             page = _make_mock_page(cdp)
 
@@ -326,7 +326,7 @@ class TestGetAxTreeTimeout:
                 return cdp_stale
             return cdp_fresh
 
-        with patch("pagemap.browser_session._CDP_AX_TREE_TIMEOUT", 0.05):
+        with patch("pagemap.server.browser_session._CDP_AX_TREE_TIMEOUT", 0.05):
             session = self._make_session(cdp_stale)
             session.get_cdp_session = AsyncMock(side_effect=_get_cdp)
 
@@ -343,7 +343,7 @@ class TestGetAxTreeTimeout:
 
         cdp = _make_mock_cdp(send_side_effect=_slow_send)
 
-        with patch("pagemap.browser_session._CDP_AX_TREE_TIMEOUT", 0.05):
+        with patch("pagemap.server.browser_session._CDP_AX_TREE_TIMEOUT", 0.05):
             session = self._make_session(cdp)
 
             with pytest.raises(TimeoutError):
@@ -367,7 +367,7 @@ class TestGetAxTreeTimeout:
                 return cdp_stale
             return cdp_ok
 
-        with patch("pagemap.browser_session._CDP_AX_TREE_TIMEOUT", 0.05):
+        with patch("pagemap.server.browser_session._CDP_AX_TREE_TIMEOUT", 0.05):
             session = self._make_session(cdp_stale)
             session.get_cdp_session = AsyncMock(side_effect=_get_cdp)
 

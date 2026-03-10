@@ -49,7 +49,7 @@ EMPTY_ROBOTS = ""
 async def test_allowed_when_no_robots_txt():
     """404 → allow all."""
     checker = RobotsChecker()
-    with patch("pagemap.robots_checker.urllib.request.urlopen") as mock_open:
+    with patch("pagemap.server.robots_checker.urllib.request.urlopen") as mock_open:
         mock_open.side_effect = urllib.error.HTTPError("http://example.com/robots.txt", 404, "Not Found", {}, None)
         allowed, reason = await checker.is_allowed("http://example.com/page")
     assert allowed is True
@@ -60,7 +60,7 @@ async def test_allowed_when_no_robots_txt():
 async def test_blocked_when_disallowed():
     """Disallow: / blocks everything."""
     checker = RobotsChecker()
-    with patch("pagemap.robots_checker.urllib.request.urlopen") as mock_open:
+    with patch("pagemap.server.robots_checker.urllib.request.urlopen") as mock_open:
         mock_open.return_value = _mock_response(DISALLOW_ALL)
         allowed, reason = await checker.is_allowed("http://example.com/page")
     assert allowed is False
@@ -71,7 +71,7 @@ async def test_blocked_when_disallowed():
 async def test_allowed_when_explicitly_allowed():
     """Allow: / permits all."""
     checker = RobotsChecker()
-    with patch("pagemap.robots_checker.urllib.request.urlopen") as mock_open:
+    with patch("pagemap.server.robots_checker.urllib.request.urlopen") as mock_open:
         mock_open.return_value = _mock_response(ALLOW_ALL)
         allowed, reason = await checker.is_allowed("http://example.com/page")
     assert allowed is True
@@ -81,7 +81,7 @@ async def test_allowed_when_explicitly_allowed():
 async def test_wildcard_disallow():
     """Disallow: /search?* blocks query strings."""
     checker = RobotsChecker()
-    with patch("pagemap.robots_checker.urllib.request.urlopen") as mock_open:
+    with patch("pagemap.server.robots_checker.urllib.request.urlopen") as mock_open:
         mock_open.return_value = _mock_response(WILDCARD_DISALLOW)
         allowed, _ = await checker.is_allowed("http://example.com/search?q=test")
     assert allowed is False
@@ -91,7 +91,7 @@ async def test_wildcard_disallow():
 async def test_dollar_end_anchor():
     """Disallow: /*.json$ blocks .json but not .json?q=1."""
     checker = RobotsChecker()
-    with patch("pagemap.robots_checker.urllib.request.urlopen") as mock_open:
+    with patch("pagemap.server.robots_checker.urllib.request.urlopen") as mock_open:
         mock_open.return_value = _mock_response(DOLLAR_ANCHOR)
         blocked, _ = await checker.is_allowed("http://example.com/data.json")
         allowed, _ = await checker.is_allowed("http://example.com/data.json?q=1")
@@ -103,7 +103,7 @@ async def test_dollar_end_anchor():
 async def test_longest_match_precedence():
     """Allow: /public/ overrides Disallow: / (longest match wins)."""
     checker = RobotsChecker()
-    with patch("pagemap.robots_checker.urllib.request.urlopen") as mock_open:
+    with patch("pagemap.server.robots_checker.urllib.request.urlopen") as mock_open:
         mock_open.return_value = _mock_response(LONGEST_MATCH)
         allowed, _ = await checker.is_allowed("http://example.com/public/doc")
         blocked, _ = await checker.is_allowed("http://example.com/private/doc")
@@ -115,7 +115,7 @@ async def test_longest_match_precedence():
 async def test_empty_robots_allows_all():
     """Empty robots.txt allows everything."""
     checker = RobotsChecker()
-    with patch("pagemap.robots_checker.urllib.request.urlopen") as mock_open:
+    with patch("pagemap.server.robots_checker.urllib.request.urlopen") as mock_open:
         mock_open.return_value = _mock_response(EMPTY_ROBOTS)
         allowed, _ = await checker.is_allowed("http://example.com/anything")
     assert allowed is True
@@ -125,7 +125,7 @@ async def test_empty_robots_allows_all():
 async def test_specific_agent_overrides_wildcard():
     """PageMapBot-specific Allow overrides wildcard Disallow."""
     checker = RobotsChecker()
-    with patch("pagemap.robots_checker.urllib.request.urlopen") as mock_open:
+    with patch("pagemap.server.robots_checker.urllib.request.urlopen") as mock_open:
         mock_open.return_value = _mock_response(SPECIFIC_AGENT)
         allowed, _ = await checker.is_allowed("http://example.com/page")
     assert allowed is True
@@ -137,7 +137,7 @@ async def test_specific_agent_overrides_wildcard():
 @pytest.mark.asyncio
 async def test_200_parses_rules():
     checker = RobotsChecker()
-    with patch("pagemap.robots_checker.urllib.request.urlopen") as mock_open:
+    with patch("pagemap.server.robots_checker.urllib.request.urlopen") as mock_open:
         mock_open.return_value = _mock_response(DISALLOW_SEARCH)
         blocked, _ = await checker.is_allowed("http://example.com/search")
         allowed, _ = await checker.is_allowed("http://example.com/about")
@@ -148,7 +148,7 @@ async def test_200_parses_rules():
 @pytest.mark.asyncio
 async def test_401_disallows_all():
     checker = RobotsChecker()
-    with patch("pagemap.robots_checker.urllib.request.urlopen") as mock_open:
+    with patch("pagemap.server.robots_checker.urllib.request.urlopen") as mock_open:
         mock_open.side_effect = urllib.error.HTTPError("http://example.com/robots.txt", 401, "Unauthorized", {}, None)
         allowed, _ = await checker.is_allowed("http://example.com/page")
     assert allowed is False
@@ -157,7 +157,7 @@ async def test_401_disallows_all():
 @pytest.mark.asyncio
 async def test_403_disallows_all():
     checker = RobotsChecker()
-    with patch("pagemap.robots_checker.urllib.request.urlopen") as mock_open:
+    with patch("pagemap.server.robots_checker.urllib.request.urlopen") as mock_open:
         mock_open.side_effect = urllib.error.HTTPError("http://example.com/robots.txt", 403, "Forbidden", {}, None)
         allowed, _ = await checker.is_allowed("http://example.com/page")
     assert allowed is False
@@ -166,7 +166,7 @@ async def test_403_disallows_all():
 @pytest.mark.asyncio
 async def test_404_allows_all():
     checker = RobotsChecker()
-    with patch("pagemap.robots_checker.urllib.request.urlopen") as mock_open:
+    with patch("pagemap.server.robots_checker.urllib.request.urlopen") as mock_open:
         mock_open.side_effect = urllib.error.HTTPError("http://example.com/robots.txt", 404, "Not Found", {}, None)
         allowed, _ = await checker.is_allowed("http://example.com/page")
     assert allowed is True
@@ -175,7 +175,7 @@ async def test_404_allows_all():
 @pytest.mark.asyncio
 async def test_5xx_fail_open():
     checker = RobotsChecker()
-    with patch("pagemap.robots_checker.urllib.request.urlopen") as mock_open:
+    with patch("pagemap.server.robots_checker.urllib.request.urlopen") as mock_open:
         mock_open.side_effect = urllib.error.HTTPError("http://example.com/robots.txt", 500, "Server Error", {}, None)
         allowed, _ = await checker.is_allowed("http://example.com/page")
     assert allowed is True
@@ -184,7 +184,7 @@ async def test_5xx_fail_open():
 @pytest.mark.asyncio
 async def test_timeout_fail_open():
     checker = RobotsChecker()
-    with patch("pagemap.robots_checker.urllib.request.urlopen") as mock_open:
+    with patch("pagemap.server.robots_checker.urllib.request.urlopen") as mock_open:
         mock_open.side_effect = TimeoutError("Connection timed out")
         allowed, _ = await checker.is_allowed("http://example.com/page")
     assert allowed is True
@@ -197,7 +197,7 @@ async def test_timeout_fail_open():
 async def test_cache_hit_no_refetch():
     """Second call uses cache, no re-fetch."""
     checker = RobotsChecker()
-    with patch("pagemap.robots_checker.urllib.request.urlopen") as mock_open:
+    with patch("pagemap.server.robots_checker.urllib.request.urlopen") as mock_open:
         mock_open.return_value = _mock_response(ALLOW_ALL)
         await checker.is_allowed("http://example.com/page1")
         await checker.is_allowed("http://example.com/page2")
@@ -208,13 +208,13 @@ async def test_cache_hit_no_refetch():
 async def test_cache_expires_after_ttl():
     """Cache entry expires after TTL."""
     checker = RobotsChecker(default_ttl=0.1)  # 100ms
-    with patch("pagemap.robots_checker.urllib.request.urlopen") as mock_open:
+    with patch("pagemap.server.robots_checker.urllib.request.urlopen") as mock_open:
         mock_open.return_value = _mock_response(ALLOW_ALL)
         await checker.is_allowed("http://example.com/page")
 
     await asyncio.sleep(0.15)
 
-    with patch("pagemap.robots_checker.urllib.request.urlopen") as mock_open:
+    with patch("pagemap.server.robots_checker.urllib.request.urlopen") as mock_open:
         mock_open.return_value = _mock_response(ALLOW_ALL)
         await checker.is_allowed("http://example.com/page")
         assert mock_open.call_count == 1  # re-fetched
@@ -224,7 +224,7 @@ async def test_cache_expires_after_ttl():
 async def test_different_origins_separate():
     """Different origins have separate cache entries."""
     checker = RobotsChecker()
-    with patch("pagemap.robots_checker.urllib.request.urlopen") as mock_open:
+    with patch("pagemap.server.robots_checker.urllib.request.urlopen") as mock_open:
         mock_open.return_value = _mock_response(ALLOW_ALL)
         await checker.is_allowed("http://a.com/page")
         await checker.is_allowed("http://b.com/page")
@@ -235,7 +235,7 @@ async def test_different_origins_separate():
 @pytest.mark.asyncio
 async def test_invalidate_single():
     checker = RobotsChecker()
-    with patch("pagemap.robots_checker.urllib.request.urlopen") as mock_open:
+    with patch("pagemap.server.robots_checker.urllib.request.urlopen") as mock_open:
         mock_open.return_value = _mock_response(ALLOW_ALL)
         await checker.is_allowed("http://a.com/page")
         await checker.is_allowed("http://b.com/page")
@@ -247,7 +247,7 @@ async def test_invalidate_single():
 @pytest.mark.asyncio
 async def test_invalidate_all():
     checker = RobotsChecker()
-    with patch("pagemap.robots_checker.urllib.request.urlopen") as mock_open:
+    with patch("pagemap.server.robots_checker.urllib.request.urlopen") as mock_open:
         mock_open.return_value = _mock_response(ALLOW_ALL)
         await checker.is_allowed("http://a.com/page")
         await checker.is_allowed("http://b.com/page")
@@ -259,7 +259,7 @@ async def test_invalidate_all():
 async def test_error_entry_short_ttl():
     """Fail-open entries use short TTL."""
     checker = RobotsChecker()
-    with patch("pagemap.robots_checker.urllib.request.urlopen") as mock_open:
+    with patch("pagemap.server.robots_checker.urllib.request.urlopen") as mock_open:
         mock_open.side_effect = urllib.error.HTTPError("http://example.com/robots.txt", 500, "Server Error", {}, None)
         await checker.is_allowed("http://example.com/page")
 
@@ -272,7 +272,7 @@ async def test_error_entry_short_ttl():
 async def test_cache_control_max_age_respected():
     """Cache-Control: max-age sets dynamic TTL."""
     checker = RobotsChecker()
-    with patch("pagemap.robots_checker.urllib.request.urlopen") as mock_open:
+    with patch("pagemap.server.robots_checker.urllib.request.urlopen") as mock_open:
         mock_open.return_value = _mock_response(ALLOW_ALL, headers={"Cache-Control": "max-age=7200"})
         await checker.is_allowed("http://example.com/page")
 
@@ -308,7 +308,7 @@ async def test_protego_wildcard_star():
     """Protego handles * wildcard."""
     checker = RobotsChecker()
     robots_txt = "User-agent: *\nDisallow: /search?*"
-    with patch("pagemap.robots_checker.urllib.request.urlopen") as mock_open:
+    with patch("pagemap.server.robots_checker.urllib.request.urlopen") as mock_open:
         mock_open.return_value = _mock_response(robots_txt)
         blocked, _ = await checker.is_allowed("http://example.com/search?q=test")
         allowed, _ = await checker.is_allowed("http://example.com/about")
@@ -321,7 +321,7 @@ async def test_protego_dollar_anchor():
     """Protego handles $ anchor."""
     checker = RobotsChecker()
     robots_txt = "User-agent: *\nDisallow: /*.pdf$"
-    with patch("pagemap.robots_checker.urllib.request.urlopen") as mock_open:
+    with patch("pagemap.server.robots_checker.urllib.request.urlopen") as mock_open:
         mock_open.return_value = _mock_response(robots_txt)
         blocked, _ = await checker.is_allowed("http://example.com/doc.pdf")
         allowed, _ = await checker.is_allowed("http://example.com/doc.pdf?page=2")
@@ -334,7 +334,7 @@ async def test_protego_longest_match():
     """Protego uses longest-match precedence."""
     checker = RobotsChecker()
     robots_txt = "User-agent: *\nDisallow: /\nAllow: /public/docs/"
-    with patch("pagemap.robots_checker.urllib.request.urlopen") as mock_open:
+    with patch("pagemap.server.robots_checker.urllib.request.urlopen") as mock_open:
         mock_open.return_value = _mock_response(robots_txt)
         allowed, _ = await checker.is_allowed("http://example.com/public/docs/readme")
         blocked, _ = await checker.is_allowed("http://example.com/private")
@@ -347,7 +347,7 @@ async def test_protego_crawl_delay_ignored():
     """Crawl-delay is parsed but not enforced."""
     checker = RobotsChecker()
     robots_txt = "User-agent: *\nCrawl-delay: 10\nAllow: /"
-    with patch("pagemap.robots_checker.urllib.request.urlopen") as mock_open:
+    with patch("pagemap.server.robots_checker.urllib.request.urlopen") as mock_open:
         mock_open.return_value = _mock_response(robots_txt)
         allowed, _ = await checker.is_allowed("http://example.com/page")
     assert allowed is True
@@ -361,7 +361,7 @@ async def test_malformed_robots_txt():
     """Malformed robots.txt → parsed as best-effort (Protego handles gracefully)."""
     checker = RobotsChecker()
     malformed = "this is not\na valid robots\ntxt file\nrandom garbage"
-    with patch("pagemap.robots_checker.urllib.request.urlopen") as mock_open:
+    with patch("pagemap.server.robots_checker.urllib.request.urlopen") as mock_open:
         mock_open.return_value = _mock_response(malformed)
         allowed, _ = await checker.is_allowed("http://example.com/page")
     # Protego parses gracefully — no valid rules means allow all
@@ -378,7 +378,7 @@ async def test_very_large_robots_txt():
         lines.append(f"Disallow: /path{i}/")
     lines.append("Allow: /allowed/")
     large_robots = "\n".join(lines)
-    with patch("pagemap.robots_checker.urllib.request.urlopen") as mock_open:
+    with patch("pagemap.server.robots_checker.urllib.request.urlopen") as mock_open:
         mock_open.return_value = _mock_response(large_robots)
         blocked, _ = await checker.is_allowed("http://example.com/path42/page")
         allowed, _ = await checker.is_allowed("http://example.com/allowed/page")
@@ -391,7 +391,7 @@ async def test_non_utf8_encoding():
     """Non-UTF-8 content handled via errors=replace."""
     checker = RobotsChecker()
     # Simulate a response that has latin-1 content
-    with patch("pagemap.robots_checker.urllib.request.urlopen") as mock_open:
+    with patch("pagemap.server.robots_checker.urllib.request.urlopen") as mock_open:
         resp = _mock_response(ALLOW_ALL)
         # Override read to return latin-1 bytes with non-ascii
         resp.read.return_value = "User-agent: *\nAllow: /\n# Stra\xdfe".encode("latin-1")
@@ -411,7 +411,7 @@ async def test_concurrent_requests_same_origin():
         call_count += 1
         return _mock_response(ALLOW_ALL)
 
-    with patch("pagemap.robots_checker.urllib.request.urlopen", side_effect=_counting_open):
+    with patch("pagemap.server.robots_checker.urllib.request.urlopen", side_effect=_counting_open):
         # First call populates cache
         await checker.is_allowed("http://example.com/page1")
         # Subsequent calls use cache
@@ -429,7 +429,7 @@ async def test_concurrent_requests_same_origin():
 async def test_robot_user_agent_header():
     """Fetch request includes PageMapBot UA header."""
     checker = RobotsChecker()
-    with patch("pagemap.robots_checker.urllib.request.urlopen") as mock_open:
+    with patch("pagemap.server.robots_checker.urllib.request.urlopen") as mock_open:
         mock_open.return_value = _mock_response(ALLOW_ALL)
         await checker.is_allowed("http://example.com/page")
 
@@ -443,7 +443,7 @@ async def test_robot_user_agent_header():
 async def test_cache_control_min_60s():
     """Cache-Control: max-age below 60s is clamped to 60s."""
     checker = RobotsChecker()
-    with patch("pagemap.robots_checker.urllib.request.urlopen") as mock_open:
+    with patch("pagemap.server.robots_checker.urllib.request.urlopen") as mock_open:
         mock_open.return_value = _mock_response(ALLOW_ALL, headers={"Cache-Control": "max-age=10"})
         await checker.is_allowed("http://example.com/page")
 

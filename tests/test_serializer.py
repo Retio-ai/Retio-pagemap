@@ -85,6 +85,24 @@ class TestAgentPromptFormat:
         assert "[1] searchbox: Search (type)" in prompt
         assert "[2] button: Add to Cart (click)" in prompt
 
+    def test_name_source_rendered_in_agent_prompt(self):
+        item = _make_interactable(name="Add to Cart", name_source="aria-label")
+        pm = _make_page_map(interactables=[item])
+        prompt = to_agent_prompt(pm)
+        assert "[via:aria-label]" in prompt
+
+    def test_name_source_empty_not_rendered(self):
+        item = _make_interactable(name="Buy Now", name_source="")
+        pm = _make_page_map(interactables=[item])
+        prompt = to_agent_prompt(pm)
+        assert "[via:" not in prompt
+
+    def test_name_source_contents_rendered(self):
+        item = _make_interactable(name="Submit", name_source="contents")
+        pm = _make_page_map(interactables=[item])
+        prompt = to_agent_prompt(pm)
+        assert "[via:contents]" in prompt
+
     def test_no_actions_section_without_interactables(self):
         pm = _make_page_map(interactables=[])
         prompt = to_agent_prompt(pm)
@@ -253,6 +271,18 @@ class TestJsonFormat:
         pm = _make_page_map(interactables=[item])
         data = json.loads(to_json(pm))
         assert "value" not in data["interactables"][0]
+
+    def test_name_source_in_json_when_present(self):
+        item = _make_interactable(name_source="aria-label")
+        pm = _make_page_map(interactables=[item])
+        data = json.loads(to_json(pm))
+        assert data["interactables"][0]["name_source"] == "aria-label"
+
+    def test_name_source_omitted_in_json_when_empty(self):
+        item = _make_interactable(name_source="")
+        pm = _make_page_map(interactables=[item])
+        data = json.loads(to_json(pm))
+        assert "name_source" not in data["interactables"][0]
 
 
 # ── to_dict ─────────────────────────────────────────────────────────

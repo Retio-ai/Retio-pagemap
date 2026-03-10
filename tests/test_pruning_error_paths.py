@@ -51,7 +51,7 @@ class TestPrunePageErrorHandling:
             raise RuntimeError("Unexpected boom")
 
         monkeypatch.setattr(
-            "pagemap.pruning.pipeline.preprocess",
+            "pagemap.core.pruning.pipeline.preprocess",
             _raise,
         )
         result = prune_page(html("<p>Content</p>"), "site", "page", "Product")
@@ -94,7 +94,7 @@ class TestBuildPrunedContextErrors:
         from pagemap.pruned_context_builder import build_pruned_context
 
         # Monkeypatch prune_page to raise
-        with patch("pagemap.pruned_context_builder.prune_page", side_effect=RuntimeError("boom")):
+        with patch("pagemap.core.pruned_context_builder.prune_page", side_effect=RuntimeError("boom")):
             context, token_count, metadata = build_pruned_context(html("<p>Content</p>"), page_type="default")
         assert len(context) > 0  # Should fall back to raw HTML
         assert "_pruning_warnings" in metadata
@@ -102,7 +102,7 @@ class TestBuildPrunedContextErrors:
     def test_metadata_failure_nonfatal(self):
         from pagemap.pruned_context_builder import build_pruned_context
 
-        with patch("pagemap.metadata.extract_metadata", side_effect=ValueError("bad")):
+        with patch("pagemap.core.metadata.extract_metadata", side_effect=ValueError("bad")):
             context, token_count, metadata = build_pruned_context(
                 html("<main><p>Content is here for testing</p></main>"),
                 page_type="default",
@@ -272,7 +272,7 @@ class TestErrorPropagationIntegration:
         from pagemap.pruned_context_builder import build_pruned_context
 
         with (
-            patch("pagemap.pruned_context_builder.prune_page", side_effect=RuntimeError("prune fail")),
+            patch("pagemap.core.pruned_context_builder.prune_page", side_effect=RuntimeError("prune fail")),
         ):
             context, tc, meta = build_pruned_context(html("<p>Content</p>"), page_type="default")
         # Should still return something

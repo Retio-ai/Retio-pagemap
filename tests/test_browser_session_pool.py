@@ -133,7 +133,7 @@ class TestCreateContextReuse:
         with (
             patch.object(session, "_create_context", new_callable=AsyncMock) as mock_cc,
             patch.object(session, "_launch_browser", new_callable=AsyncMock),
-            patch("pagemap.browser_session.async_playwright") as mock_pw,
+            patch("pagemap.server.browser_session.async_playwright") as mock_pw,
         ):
             mock_pw.return_value.start = AsyncMock(return_value=AsyncMock())
             session._browser = browser

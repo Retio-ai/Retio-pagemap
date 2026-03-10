@@ -1,0 +1,126 @@
+# Copyright (C) 2025-2026 Retio AI
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# Dynamic Application Security Testing (DAST) — ZAP + Nuclei.
+# Runs quarterly (1st of every 3rd month) + manual trigger.
+
+name: DAST Security Scan
+
+on:
+  schedule:
+    - cron: "0 3 1 */3 *"  # Quarterly: 03:00 UTC, 1st of Jan/Apr/Jul/Oct
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+  issues: write
+
+jobs:
+  zap-api-scan:
+    name: ZAP API Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: "3.13"
+
+      - name: Install PageMap
+        run: pip install -e ".[dev]"
+
+      - name: Start PageMap server
+        run: |
+          python -m pagemap --transport streamable-http --port 8080 &
+          sleep 10
+          curl -sf http://localhost:8080/health || exit 1
+
+      - name: ZAP API Scan
+        uses: zaproxy/action-api-scan@v0.9.0
+        with:
+          target: http://localhost:8080
+          rules_file_name: .zap/rules.tsv
+          cmd_options: >
+            -f openapi
+            -O http://localhost:8080/openapi.json
+            -z "-config api.disablekey=true"
+
+      - name: Upload ZAP SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@c4a7bc332abaec03596ff2803dd7f3ca3a238975  # v3
+        with:
+          sarif_file: report_sarif.json
+          category: zap-api-scan
+        continue-on-error: true
+
+      - name: Upload ZAP HTML report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-report
+          path: report_html.html
+          retention-days: 90
+
+  nuclei-scan:
+    name: Nuclei MCP Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: "3.13"
+
+      - name: Install PageMap
+        run: pip install -e ".[dev]"
+
+      - name: Start PageMap server
+        run: |
+          python -m pagemap --transport streamable-http --port 8080 &
+          sleep 10
+          curl -sf http://localhost:8080/health || exit 1
+
+      - name: Install Nuclei
+        run: |
+          go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+          nuclei -version
+
+      - name: Run Nuclei (custom MCP templates)
+        run: |
+          nuclei -t .nuclei/templates/ \
+            -u http://localhost:8080 \
+            -sarif-export nuclei-results.sarif \
+            -o nuclei-output.txt \
+            -severity critical,high,medium \
+            -no-color
+        continue-on-error: true
+
+      - name: Run Nuclei (community SSRF templates)
+        run: |
+          nuclei -tags ssrf,misconfig \
+            -u http://localhost:8080 \
+            -o nuclei-community.txt \
+            -severity critical,high \
+            -no-color
+        continue-on-error: true
+
+      - name: Upload Nuclei SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@c4a7bc332abaec03596ff2803dd7f3ca3a238975  # v3
+        with:
+          sarif_file: nuclei-results.sarif
+          category: nuclei-scan
+        continue-on-error: true
+
+      - name: Upload Nuclei results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuclei-results
+          path: |
+            nuclei-output.txt
+            nuclei-community.txt
+          retention-days: 90

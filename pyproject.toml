@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "retio-pagemap"
-version = "0.7.3"
+version = "1.0.0"
 description = "Structured web page representation for AI agents — 97% HTML token reduction"
 requires-python = ">=3.11"
 license = {text = "AGPL-3.0-only"}
@@ -62,8 +62,27 @@ benchmark = [
 paddle = [
     "paddle-python-sdk>=1.13.0",
 ]
+creem = [
+    "httpx>=0.27.0",
+]
 redis = [
     "redis>=5.2.0",
+]
+supabase = [
+    "psycopg[binary]>=3.2.0",
+    "psycopg-pool>=3.2.0",
+    "PyJWT[crypto]>=2.8.0",
+]
+metrics = [
+    "prometheus-client>=0.21",
+]
+loadtest = [
+    "locust>=2.29",
+]
+cqp = [
+    "ruptures>=1.1.10",
+    "optuna>=4.5.0",
+    "cryptography>=42.0.0",
 ]
 
 [dependency-groups]
@@ -79,6 +98,7 @@ dev = [
     "pip-audit>=2.10.0",
     "bandit>=1.9.0",
     "httpx>=0.27.0",
+    "schemathesis>=3.36.0",
 ]
 benchmark = [
     "anthropic>=0.40.0",
@@ -103,23 +123,15 @@ retio-pagemap = "pagemap.server:main"
 [tool.hatch.build.targets.wheel]
 packages = ["src/pagemap"]
 exclude = [
-    "src/pagemap/benchmark/**",
-    "src/pagemap/data/**",
-    "src/pagemap/collect.py",
-    "src/pagemap/collect_sim.py",
-    "src/pagemap/collect_scenarios.py",
-    "src/pagemap/validate_axtree.py",
-    "src/pagemap/config.yaml",
+    "src/pagemap/_internal/**",
+    "src/pagemap/browser/**",
+    "src/pagemap/core/config.yaml",
 ]
 
 [tool.hatch.build.targets.sdist]
 exclude = [
-    "src/pagemap/benchmark/**",
-    "src/pagemap/data/**",
-    "src/pagemap/collect.py",
-    "src/pagemap/collect_sim.py",
-    "src/pagemap/collect_scenarios.py",
-    "src/pagemap/validate_axtree.py",
+    "src/pagemap/_internal/**",
+    "src/pagemap/browser/**",
     "data/",
     "mvp/",
     "baseline/",
@@ -178,17 +190,10 @@ ignore = [
 
 [tool.ruff.lint.isort]
 known-first-party = ["pagemap"]
+combine-as-imports = true
 
 [tool.bandit]
-exclude_dirs = [
-    "tests",
-    "src/pagemap/benchmark",
-    "src/pagemap/data",
-    "src/pagemap/collect.py",
-    "src/pagemap/collect_sim.py",
-    "src/pagemap/collect_scenarios.py",
-    "src/pagemap/validate_axtree.py",
-]
+exclude_dirs = ["tests", "src/pagemap/_internal"]
 skips = [
     "B101",  # assert — internal invariant checks
 ]
@@ -205,20 +210,12 @@ markers = [
     "smoke: CLI smoke tests (subprocess-based, no network by default)",
     "network: requires network access and Playwright Chromium",
     "fuzz: property-based fuzz tests (hypothesis)",
+    "slow: slow tests (contract testing, SSRF fuzzing)",
 ]
 
 [tool.coverage.run]
 source = ["pagemap"]
-omit = [
-    "src/pagemap/benchmark/*",
-    "src/pagemap/data/*",
-    "src/pagemap/collect.py",
-    "src/pagemap/collect_sim.py",
-    "src/pagemap/collect_scenarios.py",
-    "src/pagemap/validate_axtree.py",
-    "src/pagemap/__main__.py",
-    "src/pagemap/cli.py",
-]
+omit = ["src/pagemap/_internal/*", "src/pagemap/__main__.py", "src/pagemap/cli.py"]
 
 [tool.coverage.report]
 fail_under = 60

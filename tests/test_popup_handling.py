@@ -227,7 +227,7 @@ class TestPageHandlerRegistration:
     async def test_page_handler_registered_on_context(self):
         mock_pw_cm, _, _, mock_context, _ = _build_mock_chain()
 
-        with patch("pagemap.browser_session.async_playwright", return_value=mock_pw_cm):
+        with patch("pagemap.server.browser_session.async_playwright", return_value=mock_pw_cm):
             session = BrowserSession()
             await session.start()
 

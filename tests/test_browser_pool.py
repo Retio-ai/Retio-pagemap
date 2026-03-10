@@ -41,7 +41,7 @@ def _mock_playwright_and_browser():
 def mock_pw():
     """Patch async_playwright to return mock objects."""
     pw, browser = _mock_playwright_and_browser()
-    with patch("pagemap.browser_pool.async_playwright") as mock_apw:
+    with patch("pagemap.server.browser_pool.async_playwright") as mock_apw:
         mock_start = AsyncMock(return_value=pw)
         mock_apw.return_value.start = mock_start
         yield pw, browser
@@ -94,7 +94,7 @@ class TestSessionContextManager:
 
     async def test_yields_browser_session(self, mock_pw):
         pw, browser = mock_pw
-        with patch("pagemap.browser_pool.BrowserSession") as MockBS:
+        with patch("pagemap.server.browser_pool.BrowserSession") as MockBS:
             mock_sess = _mock_browser_session()
             MockBS.return_value = mock_sess
 
@@ -104,7 +104,7 @@ class TestSessionContextManager:
 
     async def test_releases_on_normal_exit(self, mock_pw):
         pw, browser = mock_pw
-        with patch("pagemap.browser_pool.BrowserSession") as MockBS:
+        with patch("pagemap.server.browser_pool.BrowserSession") as MockBS:
             mock_sess = _mock_browser_session()
             MockBS.return_value = mock_sess
 
@@ -120,7 +120,7 @@ class TestSessionExceptionReleases:
 
     async def test_exception_releases_semaphore(self, mock_pw):
         pw, browser = mock_pw
-        with patch("pagemap.browser_pool.BrowserSession") as MockBS:
+        with patch("pagemap.server.browser_pool.BrowserSession") as MockBS:
             mock_sess = _mock_browser_session()
             MockBS.return_value = mock_sess
 
@@ -142,7 +142,7 @@ class TestAcquireCreatesContext:
 
     async def test_new_session(self, mock_pw):
         pw, browser = mock_pw
-        with patch("pagemap.browser_pool.BrowserSession") as MockBS:
+        with patch("pagemap.server.browser_pool.BrowserSession") as MockBS:
             mock_sess = _mock_browser_session()
             MockBS.return_value = mock_sess
 
@@ -160,7 +160,7 @@ class TestAcquireReturnsExisting:
 
     async def test_returns_same_session(self, mock_pw):
         pw, browser = mock_pw
-        with patch("pagemap.browser_pool.BrowserSession") as MockBS:
+        with patch("pagemap.server.browser_pool.BrowserSession") as MockBS:
             mock_sess = _mock_browser_session()
             MockBS.return_value = mock_sess
 
@@ -180,7 +180,7 @@ class TestReleaseClosesContext:
 
     async def test_release(self, mock_pw):
         pw, browser = mock_pw
-        with patch("pagemap.browser_pool.BrowserSession") as MockBS:
+        with patch("pagemap.server.browser_pool.BrowserSession") as MockBS:
             mock_sess = _mock_browser_session()
             MockBS.return_value = mock_sess
 
@@ -220,7 +220,7 @@ class TestSemaphoreBlocksAtCapacity:
             call_count += 1
             return _mock_browser_session()
 
-        with patch("pagemap.browser_pool.BrowserSession", side_effect=make_session):
+        with patch("pagemap.server.browser_pool.BrowserSession", side_effect=make_session):
             async with BrowserPool(max_contexts=1) as pool:
                 async with pool.session("s1"):
                     # Pool at capacity. Second acquire in background:
@@ -245,9 +245,9 @@ class TestAcquireTimeout:
 
     async def test_timeout(self, mock_pw):
         pw, browser = mock_pw
-        with patch("pagemap.browser_pool.BrowserSession") as MockBS:
+        with patch("pagemap.server.browser_pool.BrowserSession") as MockBS:
             MockBS.return_value = _mock_browser_session()
-            with patch("pagemap.browser_pool._ACQUIRE_TIMEOUT", 0.1):
+            with patch("pagemap.server.browser_pool._ACQUIRE_TIMEOUT", 0.1):
                 async with BrowserPool(max_contexts=1) as pool:
                     async with pool.session("s1"):
                         with pytest.raises(TimeoutError):
@@ -265,13 +265,13 @@ class TestReaperRemovesIdle:
 
     async def test_reaper_evicts(self, mock_pw):
         pw, browser = mock_pw
-        with patch("pagemap.browser_pool.BrowserSession") as MockBS:
+        with patch("pagemap.server.browser_pool.BrowserSession") as MockBS:
             mock_sess = _mock_browser_session()
             MockBS.return_value = mock_sess
 
             async with BrowserPool(max_contexts=3, idle_timeout=0.05) as pool:
                 # Patch reaper interval to be fast
-                with patch("pagemap.browser_pool._REAPER_INTERVAL", 0.05):
+                with patch("pagemap.server.browser_pool._REAPER_INTERVAL", 0.05):
                     async with pool.session("s1"):
                         pass
                     # Manually set last_used_at to the past
@@ -291,12 +291,12 @@ class TestReaperRemovesIdle:
     async def test_reaper_releases_semaphore_for_acquired(self, mock_pw):
         """Fix 1: reaper must release semaphore for acquire()-held sessions."""
         pw, browser = mock_pw
-        with patch("pagemap.browser_pool.BrowserSession") as MockBS:
+        with patch("pagemap.server.browser_pool.BrowserSession") as MockBS:
             mock_sess = _mock_browser_session()
             MockBS.return_value = mock_sess
 
             async with BrowserPool(max_contexts=2, idle_timeout=0.05) as pool:
-                with patch("pagemap.browser_pool._REAPER_INTERVAL", 0.05):
+                with patch("pagemap.server.browser_pool._REAPER_INTERVAL", 0.05):
                     # acquire() holds semaphore slot (value 2→1)
                     await pool.acquire("s1")
                     assert pool._available_slots == 1
@@ -318,12 +318,12 @@ class TestReaperRemovesIdle:
     async def test_reaper_no_over_release_for_session_cm(self, mock_pw):
         """Reaper must NOT release semaphore for session() CM entries."""
         pw, browser = mock_pw
-        with patch("pagemap.browser_pool.BrowserSession") as MockBS:
+        with patch("pagemap.server.browser_pool.BrowserSession") as MockBS:
             mock_sess = _mock_browser_session()
             MockBS.return_value = mock_sess
 
             async with BrowserPool(max_contexts=2, idle_timeout=0.05) as pool:
-                with patch("pagemap.browser_pool._REAPER_INTERVAL", 0.05):
+                with patch("pagemap.server.browser_pool._REAPER_INTERVAL", 0.05):
                     # session() CM: semaphore borrowed transiently, entry persists
                     async with pool.session("s1"):
                         pass
@@ -378,7 +378,7 @@ class TestShutdownClosesAll:
 
     async def test_full_shutdown(self, mock_pw):
         pw, browser = mock_pw
-        with patch("pagemap.browser_pool.BrowserSession") as MockBS:
+        with patch("pagemap.server.browser_pool.BrowserSession") as MockBS:
             mock_sess = _mock_browser_session()
             MockBS.return_value = mock_sess
 
@@ -418,7 +418,7 @@ class TestHealthCheck:
 
     async def test_health_with_sessions(self, mock_pw):
         pw, browser = mock_pw
-        with patch("pagemap.browser_pool.BrowserSession") as MockBS:
+        with patch("pagemap.server.browser_pool.BrowserSession") as MockBS:
             MockBS.return_value = _mock_browser_session()
 
             async with BrowserPool(max_contexts=5) as pool, pool.session("s1"):
@@ -447,7 +447,7 @@ class TestAvailableSlotsTracking:
 
     async def test_decrements_on_session_acquire(self, mock_pw):
         pw, browser = mock_pw
-        with patch("pagemap.browser_pool.BrowserSession") as MockBS:
+        with patch("pagemap.server.browser_pool.BrowserSession") as MockBS:
             MockBS.return_value = _mock_browser_session()
 
             async with BrowserPool(max_contexts=3) as pool, pool.session("s1"):
@@ -455,7 +455,7 @@ class TestAvailableSlotsTracking:
 
     async def test_restores_on_session_release(self, mock_pw):
         pw, browser = mock_pw
-        with patch("pagemap.browser_pool.BrowserSession") as MockBS:
+        with patch("pagemap.server.browser_pool.BrowserSession") as MockBS:
             MockBS.return_value = _mock_browser_session()
 
             async with BrowserPool(max_contexts=3) as pool:
@@ -465,7 +465,7 @@ class TestAvailableSlotsTracking:
 
     async def test_decrements_on_low_level_acquire(self, mock_pw):
         pw, browser = mock_pw
-        with patch("pagemap.browser_pool.BrowserSession") as MockBS:
+        with patch("pagemap.server.browser_pool.BrowserSession") as MockBS:
             MockBS.return_value = _mock_browser_session()
 
             async with BrowserPool(max_contexts=3) as pool:
@@ -475,7 +475,7 @@ class TestAvailableSlotsTracking:
 
     async def test_restores_on_low_level_release(self, mock_pw):
         pw, browser = mock_pw
-        with patch("pagemap.browser_pool.BrowserSession") as MockBS:
+        with patch("pagemap.server.browser_pool.BrowserSession") as MockBS:
             MockBS.return_value = _mock_browser_session()
 
             async with BrowserPool(max_contexts=3) as pool:
@@ -492,7 +492,7 @@ class TestAvailableSlotsTracking:
             call_count += 1
             return _mock_browser_session()
 
-        with patch("pagemap.browser_pool.BrowserSession", side_effect=make_session):
+        with patch("pagemap.server.browser_pool.BrowserSession", side_effect=make_session):
             async with BrowserPool(max_contexts=3) as pool:
                 assert pool._available_slots == 3
 
@@ -510,7 +510,7 @@ class TestAvailableSlotsTracking:
 
     async def test_restores_on_acquire_create_failure(self, mock_pw):
         pw, browser = mock_pw
-        with patch("pagemap.browser_pool.BrowserSession") as MockBS:
+        with patch("pagemap.server.browser_pool.BrowserSession") as MockBS:
             MockBS.return_value.start_from_pool = AsyncMock(side_effect=RuntimeError("boom"))
 
             async with BrowserPool(max_contexts=3) as pool:

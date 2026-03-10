@@ -121,6 +121,32 @@ class TestValidateUrl:
         # 172.32.0.0 is NOT in 172.16.0.0/12
         assert _validate_url("http://172.32.0.1/") is None
 
+    # --- Cloud metadata endpoints (Gap 2+3) ---
+
+    def test_aws_nitro_ipv6_metadata_blocked(self):
+        """AWS Nitro IPv6 metadata endpoint (CVE-2026-27129) must be blocked."""
+        err = _validate_url("http://[fd00:ec2::254]/latest/meta-data/")
+        assert err is not None
+        assert "blocked" in err.lower()
+
+    def test_gcp_metadata_alt_blocked(self):
+        """GCP alternative metadata hostname must be blocked."""
+        err = _validate_url("http://metadata.goog/computeMetadata/v1/")
+        assert err is not None
+        assert "blocked" in err.lower()
+
+    def test_alibaba_cloud_metadata_blocked(self):
+        """Alibaba Cloud metadata endpoint must be blocked."""
+        err = _validate_url("http://100.100.100.200/latest/meta-data/")
+        assert err is not None
+        assert "blocked" in err.lower()
+
+    def test_aws_ecs_task_metadata_blocked(self):
+        """AWS ECS task metadata endpoint must be blocked."""
+        err = _validate_url("http://169.254.170.2/v2/metadata")
+        assert err is not None
+        assert "blocked" in err.lower()
+
 
 # ── Key Whitelist ────────────────────────────────────────────────────
 

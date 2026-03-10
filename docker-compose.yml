@@ -3,7 +3,7 @@ services:
     build:
       context: .
       args:
-        PAGEMAP_VERSION: "0.7.3"
+        PAGEMAP_VERSION: "1.0.0"
     image: retio1001/pagemap:latest
     stdin_open: true
 
@@ -11,7 +11,7 @@ services:
     build:
       context: .
       args:
-        PAGEMAP_VERSION: "0.7.3"
+        PAGEMAP_VERSION: "1.0.0"
     image: retio1001/pagemap:latest
     command: ["--transport", "http", "--host", "0.0.0.0", "--port", "8000"]
     ports:
@@ -19,6 +19,10 @@ services:
     environment:
       PAGEMAP_MAX_CONTEXTS: "5"
       PAGEMAP_DRAIN_TIMEOUT: "30"
+      REDIS_URL: "redis://valkey:6379/0"
+    depends_on:
+      valkey:
+        condition: service_healthy
     stop_grace_period: 35s
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/readyz')"]
@@ -26,3 +30,15 @@ services:
       timeout: 5s
       retries: 3
       start_period: 30s
+
+  valkey:
+    image: valkey/valkey:8-alpine
+    ports:
+      - "6379:6379"
+    command: ["valkey-server", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 5s

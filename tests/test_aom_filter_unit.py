@@ -18,8 +18,11 @@ import pytest
 
 pytest.importorskip("hypothesis")
 
-from hypothesis import given, settings  # noqa: E402
-from hypothesis import strategies as st  # noqa: E402
+from hypothesis import (  # noqa: E402
+    given,
+    settings,
+    strategies as st,  # noqa: E402
+)
 
 from pagemap.pruning.aom_filter import (
     _ARTICLE_ANCESTOR_TAGS,

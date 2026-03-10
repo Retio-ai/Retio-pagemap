@@ -55,7 +55,7 @@ def _validate_output_path(path_str: str | None) -> tuple[Path | None, bool]:
 def _has_internal() -> bool:
     """Check if internal development modules are available."""
     try:
-        from . import collect  # noqa: F401
+        from ._internal import collect  # noqa: F401
 
         return True
     except ImportError:
@@ -65,7 +65,7 @@ def _has_internal() -> bool:
 def _has_benchmark() -> bool:
     """Check if benchmark modules are available."""
     try:
-        from . import benchmark  # noqa: F401
+        from ._internal import benchmark  # noqa: F401
 
         return True
     except ImportError:
@@ -81,7 +81,7 @@ def _benchmark_postflight(
     report_path: Path,
 ) -> str:
     """Common benchmark post-processing: evaluate, report, save."""
-    from .benchmark.evaluator import evaluate_all
+    from ._internal.benchmark.evaluator import evaluate_all
 
     evaluate_all(tasks, result.task_results)
     report = report_func(result, tasks)
@@ -92,21 +92,320 @@ def _benchmark_postflight(
     return report
 
 
+def _has_management_db() -> bool:
+    """Check if a management database is configured (SUPABASE_DB_URL)."""
+    import os
+
+    return bool(os.environ.get("SUPABASE_DB_URL", ""))
+
+
+def _require_user_id() -> str:
+    """Return PAGEMAP_CLI_USER_ID or exit with error."""
+    import os
+
+    user_id = os.environ.get("PAGEMAP_CLI_USER_ID", "")
+    if not user_id:
+        print("Error: PAGEMAP_CLI_USER_ID environment variable is required.", file=sys.stderr)
+        sys.exit(1)
+    return user_id
+
+
+async def _open_repo():
+    """Open SupabaseRepository from environment or exit."""
+    from .supabase_config import SupabaseConfig
+
+    config = SupabaseConfig.from_env()
+    if config is None:
+        print("Error: SUPABASE_DB_URL not configured.", file=sys.stderr)
+        sys.exit(1)
+    from .repository_supabase import SupabaseRepository
+
+    return await SupabaseRepository.create(config)
+
+
+def cmd_credits(args: argparse.Namespace) -> None:
+    """Manage credits — balance and top-up."""
+    user_id = _require_user_id()
+
+    if args.credits_command == "balance":
+        asyncio.run(_cmd_credits_balance(user_id))
+    elif args.credits_command == "topup":
+        asyncio.run(_cmd_credits_topup(user_id, args.price_id, getattr(args, "open", False)))
+
+
+async def _cmd_credits_balance(user_id: str) -> None:
+    """Show credit balance for the user."""
+    repo = await _open_repo()
+    try:
+        user = await repo.get_user(user_id)
+        if user is None:
+            print(f"Error: User '{user_id}' not found.", file=sys.stderr)
+            sys.exit(1)
+
+        keys = await repo.list_keys_for_owner(owner_id=user_id)
+        print(f"User: {user.email} ({user.plan.value})")
+        print(f"Keys: {len(keys)}")
+        total = 0
+        for k in keys:
+            balance = await repo.get_credit_state(k.key_hash)
+            status = " (revoked)" if k.revoked else ""
+            b = balance if balance is not None else 0
+            total += b
+            print(f"  {k.key_hash[:12]}... {k.label}: {b} credits{status}")
+        print(f"Total: {total} credits")
+    finally:
+        await repo.close()
+
+
+async def _cmd_credits_topup(user_id: str, price_id: str, open_url: bool) -> None:
+    """Create a checkout session for credit top-up."""
+    from .paddle.config import PaddleConfig
+
+    paddle_config = PaddleConfig.from_env()
+    if paddle_config is None:
+        print("Error: PADDLE_WEBHOOK_SECRET not configured.", file=sys.stderr)
+        sys.exit(1)
+
+    repo = await _open_repo()
+    try:
+        user = await repo.get_user(user_id)
+        if user is None:
+            print(f"Error: User '{user_id}' not found.", file=sys.stderr)
+            sys.exit(1)
+
+        keys = await repo.list_keys_for_owner(owner_id=user_id)
+        active_keys = [k for k in keys if not k.revoked]
+        if not active_keys:
+            print("Error: No active API keys found. Create a key first.", file=sys.stderr)
+            sys.exit(1)
+
+        key_hash = active_keys[0].key_hash
+        from .paddle.checkout import create_checkout_session
+
+        session = create_checkout_session(paddle_config, key_hash, price_id)
+        print(f"Checkout URL: {session.checkout_url}")
+        print(f"Transaction ID: {session.transaction_id}")
+
+        if open_url and session.checkout_url:
+            import webbrowser
+
+            webbrowser.open(session.checkout_url)
+    finally:
+        await repo.close()
+
+
+# ---------------------------------------------------------------------------
+# keys / usage / user commands
+# ---------------------------------------------------------------------------
+
+
+def cmd_keys(args: argparse.Namespace) -> None:
+    """Manage API keys — list, create, revoke, rotate."""
+    user_id = _require_user_id()
+    sub = args.keys_command
+    if sub == "list":
+        asyncio.run(_cmd_keys_list(user_id))
+    elif sub == "create":
+        asyncio.run(_cmd_keys_create(user_id, args.label, getattr(args, "expires_in_days", None)))
+    elif sub == "revoke":
+        asyncio.run(_cmd_keys_revoke(user_id, args.key_hash))
+    elif sub == "rotate":
+        asyncio.run(_cmd_keys_rotate(user_id, args.key_hash, args.label))
+
+
+async def _cmd_keys_list(user_id: str) -> None:
+    repo = await _open_repo()
+    try:
+        keys = await repo.list_keys_for_owner(owner_id=user_id)
+        if not keys:
+            print("No API keys found.")
+            return
+        import datetime
+
+        from tabulate import tabulate
+
+        rows = []
+        for k in keys:
+            status = "revoked" if k.revoked else "active"
+            dt = datetime.datetime.fromtimestamp(k.created_at, tz=datetime.UTC).strftime("%Y-%m-%d %H:%M")
+            rows.append([k.key_hash[:12] + "...", k.label, status, dt])
+        print(tabulate(rows, headers=["Key Hash", "Label", "Status", "Created"], tablefmt="simple"))
+    finally:
+        await repo.close()
+
+
+async def _cmd_keys_create(user_id: str, label: str, expires_in_days: int | None) -> None:
+    import time as _time
+
+    from .api_key import KeyRecord, KeyVersion, generate_api_key
+
+    repo = await _open_repo()
+    try:
+        display_key, key_hash = generate_api_key()
+        expires_at = _time.time() + expires_in_days * 86400 if expires_in_days else None
+        record = KeyRecord(
+            key_hash=key_hash,
+            label=label,
+            version=KeyVersion.V1,
+            created_at=_time.time(),
+            expires_at=expires_at,
+        )
+        await repo.store_key_for_owner(record, user_id)
+        print(f"API Key: {display_key}")
+        print(f"Key Hash: {key_hash}")
+        print("Store the API key securely — it cannot be retrieved later.")
+    finally:
+        await repo.close()
+
+
+async def _cmd_keys_revoke(user_id: str, key_hash: str) -> None:
+    repo = await _open_repo()
+    try:
+        ok = await repo.revoke_key_for_owner(key_hash, owner_id=user_id)
+        if ok:
+            print(f"Key {key_hash[:12]}... revoked.")
+        else:
+            print("Error: Key not found or already revoked.", file=sys.stderr)
+            sys.exit(1)
+    finally:
+        await repo.close()
+
+
+async def _cmd_keys_rotate(user_id: str, old_key_hash: str, label: str) -> None:
+    import time as _time
+
+    from .api_key import KeyRecord, KeyVersion, generate_api_key
+
+    repo = await _open_repo()
+    try:
+        # Create new key first (safe: old key still works)
+        display_key, key_hash = generate_api_key()
+        record = KeyRecord(
+            key_hash=key_hash,
+            label=label,
+            version=KeyVersion.V1,
+            created_at=_time.time(),
+        )
+        await repo.store_key_for_owner(record, user_id)
+        # Then revoke old key
+        ok = await repo.revoke_key_for_owner(old_key_hash, owner_id=user_id)
+        if not ok:
+            print(f"Warning: Old key {old_key_hash[:12]}... not found or already revoked.", file=sys.stderr)
+        print(f"New API Key: {display_key}")
+        print(f"New Key Hash: {key_hash}")
+        if ok:
+            print(f"Old key {old_key_hash[:12]}... revoked.")
+    finally:
+        await repo.close()
+
+
+def cmd_usage(args: argparse.Namespace) -> None:
+    """Show usage statistics."""
+    user_id = _require_user_id()
+    asyncio.run(_cmd_usage(user_id, getattr(args, "period", None)))
+
+
+async def _cmd_usage(user_id: str, period: str | None) -> None:
+    import time as _time
+
+    repo = await _open_repo()
+    try:
+        keys = await repo.list_keys_for_owner(owner_id=user_id)
+        if not keys:
+            print("No API keys found.")
+            return
+
+        if period:
+            from .time_utils import parse_period
+
+            total_s, bucket_s = parse_period(period)
+            now = _time.time()
+            since = now - total_s
+            from tabulate import tabulate
+
+            for k in keys:
+                buckets = await repo.get_usage_timeseries(
+                    k.key_hash,
+                    since_ts=since,
+                    until_ts=now,
+                    bucket_seconds=bucket_s,
+                )
+                print(f"\nKey: {k.key_hash[:12]}... ({k.label})")
+                if not buckets:
+                    print("  No usage in this period.")
+                    continue
+                import datetime
+
+                rows = []
+                for b in buckets:
+                    dt = datetime.datetime.fromtimestamp(b.bucket_start, tz=datetime.UTC)
+                    rows.append([dt.strftime("%Y-%m-%d %H:%M"), b.call_count, b.total_cost])
+                print(tabulate(rows, headers=["Period Start", "Calls", "Cost"], tablefmt="simple"))
+        else:
+            from tabulate import tabulate
+
+            for k in keys:
+                stats = await repo.get_usage_stats(k.key_hash)
+                print(f"\nKey: {k.key_hash[:12]}... ({k.label})")
+                if not stats:
+                    print("  No usage recorded.")
+                    continue
+                rows = [[s.tool, s.count, s.total_cost] for s in stats]
+                print(tabulate(rows, headers=["Tool", "Calls", "Cost"], tablefmt="simple"))
+    finally:
+        await repo.close()
+
+
+def cmd_user(args: argparse.Namespace) -> None:
+    """Show user info."""
+    user_id = _require_user_id()
+    asyncio.run(_cmd_user(user_id))
+
+
+async def _cmd_user(user_id: str) -> None:
+    repo = await _open_repo()
+    try:
+        user = await repo.get_user(user_id)
+        if user is None:
+            print(f"Error: User '{user_id}' not found.", file=sys.stderr)
+            sys.exit(1)
+        print(f"User ID:    {user.id}")
+        print(f"Email:      {user.email}")
+        print(f"Name:       {user.name}")
+        print(f"Plan:       {user.plan.value}")
+        import datetime
+
+        created = (
+            datetime.datetime.fromtimestamp(user.created_at, tz=datetime.UTC).strftime("%Y-%m-%d %H:%M")
+            if user.created_at
+            else "N/A"
+        )
+        updated = (
+            datetime.datetime.fromtimestamp(user.updated_at, tz=datetime.UTC).strftime("%Y-%m-%d %H:%M")
+            if user.updated_at
+            else "N/A"
+        )
+        print(f"Created:    {created}")
+        print(f"Updated:    {updated}")
+    finally:
+        await repo.close()
+
+
 def cmd_validate(args: argparse.Namespace) -> None:
     """Run AX Tree validation (Day 0)."""
     _require_cli_deps()
     import yaml
 
-    from .validate_axtree import print_validation_report, validate_urls
+    from ._internal.validate_axtree import print_validation_report, validate_urls
 
-    config_path = Path(__file__).parent / "config.yaml"
+    config_path = Path(__file__).parent / "core" / "config.yaml"
     with open(config_path) as f:
         config = yaml.safe_load(f)
 
     if args.url:
         urls = [args.url]
     elif args.all:
-        from .collect import _resolve_url_map
+        from ._internal.collect import _resolve_url_map
 
         urls = []
         for _site_id, site in config["sites"].items():
@@ -116,7 +415,7 @@ def cmd_validate(args: argparse.Namespace) -> None:
             for page_urls in url_map.values():
                 urls.extend(page_urls[:1])
     else:
-        from .collect import _resolve_url_map
+        from ._internal.collect import _resolve_url_map
 
         url_map = _resolve_url_map(config["sites"]["coupang"])
         urls = list(url_map.values())[0][:1] if url_map else []
@@ -433,7 +732,7 @@ def cmd_serve(args: argparse.Namespace) -> None:
 def cmd_collect(args: argparse.Namespace) -> None:
     """Collect page snapshots for benchmarking."""
     if args.simulator:
-        from .collect_sim import SimulatorController, collect_all_sim, collect_site_sim, load_config
+        from ._internal.collect_sim import SimulatorController, collect_all_sim, collect_site_sim, load_config
 
         config = load_config()
         if args.all:
@@ -460,7 +759,7 @@ def cmd_collect(args: argparse.Namespace) -> None:
             print("Specify --site SITE or --all")
             sys.exit(1)
     else:
-        from .collect import collect_all, collect_site
+        from ._internal.collect import collect_all, collect_site
 
         if args.all:
             asyncio.run(collect_all(count=args.count))
@@ -480,7 +779,7 @@ def cmd_collect(args: argparse.Namespace) -> None:
 
 def cmd_check_urls(args: argparse.Namespace) -> None:
     """Check health of all URLs in config.yaml."""
-    from .check_urls import check_all_urls, save_report
+    from ._internal.check_urls import check_all_urls, save_report
 
     output_path = Path(args.output) if args.output else Path("url_health_report.json")
     report = check_all_urls(site_filter=args.site)
@@ -500,7 +799,7 @@ def cmd_check_urls(args: argparse.Namespace) -> None:
 
 def cmd_refresh_urls(args: argparse.Namespace) -> None:
     """Replace expired/dummy URLs with fresh ones."""
-    from .refresh_urls import refresh_all_urls
+    from ._internal.refresh_urls import refresh_all_urls
 
     health_report = None
     if args.health_report:
@@ -528,7 +827,7 @@ def cmd_refresh_urls(args: argparse.Namespace) -> None:
 
 def cmd_refresh_and_collect(args: argparse.Namespace) -> None:
     """Replace URLs and re-collect snapshots."""
-    from .refresh_urls import refresh_and_collect
+    from ._internal.refresh_urls import refresh_and_collect
 
     results = refresh_and_collect(site_filter=args.site)
 
@@ -541,7 +840,7 @@ def cmd_refresh_and_collect(args: argparse.Namespace) -> None:
 
 def cmd_convert(args: argparse.Namespace) -> None:
     """Convert snapshots using competitor tools."""
-    from .benchmark.converters import CONVERTERS, convert_all_pages
+    from ._internal.benchmark.converters import CONVERTERS, convert_all_pages
 
     # Determine snapshot directory
     snapshot_dir = Path(args.snapshot_dir) if args.snapshot_dir else None
@@ -607,13 +906,13 @@ def cmd_benchmark(args: argparse.Namespace) -> None:
 
 def _run_static_benchmark(args: argparse.Namespace, data_dir: Path) -> None:
     """Run static benchmark (multi-condition comparison)."""
-    from .benchmark.converters import load_converted_pages
-    from .benchmark.report import (
+    from ._internal.benchmark.converters import load_converted_pages
+    from ._internal.benchmark.report import (
         generate_full_report,
         load_static_results,
         save_results_json,
     )
-    from .benchmark.runner import (
+    from ._internal.benchmark.runner import (
         ALL_CONDITIONS,
         BASE_CONDITIONS,
         COMPETITOR_CONDITIONS,
@@ -655,7 +954,7 @@ def _run_static_benchmark(args: argparse.Namespace, data_dir: Path) -> None:
         needed_pairs = {(tid, c) for tid in task_ids for c in requested_set}
         if needed_pairs.issubset(existing_pairs):
             print(f"All {len(needed_pairs)} pairs completed. Use --force to re-run.")
-            from .benchmark.runner import BenchmarkResult
+            from ._internal.benchmark.runner import BenchmarkResult
 
             result = BenchmarkResult(task_results=existing, conditions=conditions)
             _benchmark_postflight(
@@ -711,13 +1010,13 @@ def _run_static_benchmark(args: argparse.Namespace, data_dir: Path) -> None:
 
 def _run_live_benchmark(args: argparse.Namespace, data_dir: Path) -> None:
     """Run live benchmark (multi-turn agentic loop)."""
-    from .benchmark.report import (
+    from ._internal.benchmark.report import (
         generate_combined_judgment,
         generate_live_report,
         load_live_results,
         save_live_results_json,
     )
-    from .benchmark.runner import LiveBenchmarkResult, load_tasks, run_live_benchmark
+    from ._internal.benchmark.runner import LiveBenchmarkResult, load_tasks, run_live_benchmark
 
     result_path = data_dir / "live_benchmark_results.json"
     report_path = data_dir / "live_benchmark_report.md"
@@ -779,12 +1078,12 @@ def _run_live_benchmark(args: argparse.Namespace, data_dir: Path) -> None:
 
 def _run_sim_benchmark(args: argparse.Namespace, data_dir: Path, mode: str) -> None:
     """Run simulator-based benchmark (sim_live or sim_static)."""
-    from .benchmark.report import (
+    from ._internal.benchmark.report import (
         generate_live_report,
         load_live_results,
         save_live_results_json,
     )
-    from .benchmark.runner import LiveBenchmarkResult, load_tasks
+    from ._internal.benchmark.runner import LiveBenchmarkResult, load_tasks
 
     result_path = data_dir / f"{mode}_benchmark_results.json"
     task_id = getattr(args, "task", None)
@@ -828,11 +1127,11 @@ def _run_sim_benchmark(args: argparse.Namespace, data_dir: Path, mode: str) -> N
     )
 
     if mode == "sim_live":
-        from .benchmark.runner import run_sim_live_benchmark
+        from ._internal.benchmark.runner import run_sim_live_benchmark
 
         result = run_sim_live_benchmark(**runner_kwargs)
     else:
-        from .benchmark.runner import run_sim_static_benchmark
+        from ._internal.benchmark.runner import run_sim_static_benchmark
 
         result = asyncio.run(run_sim_static_benchmark(**runner_kwargs))
 
@@ -924,6 +1223,26 @@ class _ServeHelpAction(argparse.Action):
         parser.exit()
 
 
+def cmd_openapi(args: argparse.Namespace) -> None:
+    """Generate OpenAPI 3.1 specification."""
+    from .openapi import generate_openapi_spec, spec_to_json, spec_to_yaml
+    from .server import mcp
+
+    spec = generate_openapi_spec(mcp)
+
+    if args.format == "yaml":
+        output = spec_to_yaml(spec)
+    else:
+        output = spec_to_json(spec)
+
+    if args.output:
+        with open(args.output, "w", encoding="utf-8") as f:
+            f.write(output)
+        print(f"OpenAPI spec written to {args.output}", file=sys.stderr)
+    else:
+        print(output)
+
+
 def main() -> None:
     """CLI entry point."""
     parser = argparse.ArgumentParser(
@@ -984,7 +1303,74 @@ examples:
         help="show this help message and exit",
     )
 
-    commands = {"build": cmd_build, "serve": cmd_serve}
+    # OpenAPI spec generation
+    _openapi_epilog = """\
+examples:
+  %(prog)s                                 Print JSON to stdout
+  %(prog)s --format yaml                   Print YAML to stdout
+  %(prog)s -o openapi.json                 Save to file
+  %(prog)s --format yaml -o openapi.yaml   Save YAML to file
+"""
+    p_openapi = subparsers.add_parser(
+        "openapi",
+        help="Generate OpenAPI 3.1 specification",
+        epilog=_openapi_epilog,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_openapi.add_argument(
+        "--format",
+        choices=["json", "yaml"],
+        default="json",
+        help="Output format (default: json)",
+    )
+    p_openapi.add_argument(
+        "-o",
+        "--output",
+        type=str,
+        metavar="PATH",
+        help="Output file path (default: stdout)",
+    )
+
+    commands = {"build": cmd_build, "serve": cmd_serve, "openapi": cmd_openapi}
+
+    # ── Credits management (S8) ─────────────────────────────────
+    if _has_management_db():
+        p_credits = subparsers.add_parser(
+            "credits",
+            help="Manage credits (requires SUPABASE_DB_URL)",
+        )
+        credits_sub = p_credits.add_subparsers(dest="credits_command", required=True)
+
+        credits_sub.add_parser("balance", help="Show credit balance")
+
+        p_topup = credits_sub.add_parser("topup", help="Create a checkout for credit top-up")
+        p_topup.add_argument("--price-id", type=str, default="pri_starter", help="Paddle price ID")
+        p_topup.add_argument("--open", action="store_true", help="Open checkout URL in browser")
+
+        commands["credits"] = cmd_credits
+
+        # keys management
+        p_keys = subparsers.add_parser("keys", help="Manage API keys")
+        keys_sub = p_keys.add_subparsers(dest="keys_command", required=True)
+        keys_sub.add_parser("list", help="List all API keys")
+        p_kc = keys_sub.add_parser("create", help="Create a new API key")
+        p_kc.add_argument("--label", default="api-key")
+        p_kc.add_argument("--expires-in-days", type=int)
+        p_kr = keys_sub.add_parser("revoke", help="Revoke an API key")
+        p_kr.add_argument("key_hash")
+        p_krot = keys_sub.add_parser("rotate", help="Rotate (create new + revoke old)")
+        p_krot.add_argument("key_hash")
+        p_krot.add_argument("--label", default="api-key-rotated")
+        commands["keys"] = cmd_keys
+
+        # usage statistics
+        p_usage = subparsers.add_parser("usage", help="Show usage statistics")
+        p_usage.add_argument("--period", type=str, help="Time period: 7d, 24h, 30d")
+        commands["usage"] = cmd_usage
+
+        # user info
+        subparsers.add_parser("user", help="Show user info")
+        commands["user"] = cmd_user
 
     # Development-only: internal tools
     if _has_internal():
@@ -1027,8 +1413,8 @@ examples:
 
     # Development-only: benchmark tools
     if _has_benchmark():
-        from .benchmark.converters import CONVERTERS
-        from .benchmark.runner import ALL_CONDITIONS
+        from ._internal.benchmark.converters import CONVERTERS
+        from ._internal.benchmark.runner import ALL_CONDITIONS
 
         p_convert = subparsers.add_parser("convert", help="Convert snapshots with competitor tools")
         p_convert.add_argument(

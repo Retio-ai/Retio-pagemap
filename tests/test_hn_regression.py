@@ -14,6 +14,7 @@ from __future__ import annotations
 import lxml.html
 import pytest
 
+from pagemap.diagnostics.eq_score import compute_eq_score, should_warn_eq
 from pagemap.preprocessing.preprocess import count_tokens
 from pagemap.pruned_context_builder import _compress_for_landing
 from pagemap.pruning.aom_filter import _detect_repeating_grids, aom_filter
@@ -180,3 +181,77 @@ class TestLandingCompressorHnOutput:
         result = _compress_for_landing(hn_html, 1500)
         tokens = count_tokens(result)
         assert tokens > 100, f"Expected > 100 tokens for HN content, got {tokens}"
+
+
+# ── EQ Score Regression ──────────────────────────────────────────────────
+
+
+class TestHNRegressionEQ:
+    """HN landing: high link density → MCG fires → grid bonus should compensate."""
+
+    def test_landing_no_grid_mcg_fires_low_eq(self):
+        """MCG fires + no grid → low EQ (warning expected)."""
+        score = compute_eq_score(
+            token_ratio=0.2,
+            chunk_ratio=0.2,
+            mcg_activated=True,
+            has_errors=False,
+            page_type="landing",
+            grid_whitelist_count=0,
+        )
+        assert should_warn_eq(score, "landing")
+
+    def test_landing_with_grid_compensates_mcg(self):
+        """MCG fires + grid whitelist → grid bonus improves EQ."""
+        without = compute_eq_score(
+            token_ratio=0.2,
+            chunk_ratio=0.2,
+            mcg_activated=True,
+            has_errors=False,
+            page_type="landing",
+            grid_whitelist_count=0,
+        )
+        with_grid = compute_eq_score(
+            token_ratio=0.2,
+            chunk_ratio=0.2,
+            mcg_activated=True,
+            has_errors=False,
+            page_type="landing",
+            grid_whitelist_count=5,
+        )
+        assert with_grid > without
+        assert not should_warn_eq(with_grid, "landing")
+
+    @pytest.mark.parametrize("grid_wl", [3, 5, 10, 20])
+    def test_landing_grid_bonus_scales(self, grid_wl):
+        """Grid whitelist increase → EQ monotonically increases (up to cap)."""
+        s1 = compute_eq_score(
+            token_ratio=0.5,
+            chunk_ratio=0.4,
+            mcg_activated=True,
+            has_errors=False,
+            page_type="landing",
+            grid_whitelist_count=0,
+        )
+        s2 = compute_eq_score(
+            token_ratio=0.5,
+            chunk_ratio=0.4,
+            mcg_activated=True,
+            has_errors=False,
+            page_type="landing",
+            grid_whitelist_count=grid_wl,
+        )
+        assert s2 >= s1
+
+    def test_default_profile_backward_compat(self):
+        """Unknown page_type → original formula (no grid bonus)."""
+        score = compute_eq_score(
+            token_ratio=0.8,
+            chunk_ratio=0.7,
+            mcg_activated=False,
+            has_errors=False,
+            page_type="unknown",
+            grid_whitelist_count=0,
+        )
+        expected = 0.3 * 0.8 + 0.3 * 0.7 + 0.2 * 1.0 + 0.2 * 1.0
+        assert abs(score - expected) < 1e-9

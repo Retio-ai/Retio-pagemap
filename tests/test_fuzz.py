@@ -10,8 +10,7 @@ page classifier, and script filter modules.
 from __future__ import annotations
 
 try:
-    from hypothesis import HealthCheck, example, given, settings
-    from hypothesis import strategies as st
+    from hypothesis import HealthCheck, example, given, settings, strategies as st
 except ImportError:
     import pytest
 

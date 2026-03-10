@@ -106,9 +106,19 @@ class TestRequestContextContract:
             "template_cache",
             "client_ip",
             "get_session",
+            "trace_id",
+            "auth_method",  # S4: authentication method
+            "user_id",  # S4: Supabase user ID
+            "scroll_merge_state",  # S9: scroll merge dedup state
+            "tenant_id",  # S3: per-tenant session limits
+            "experiment_id",  # S5: CQP A/B experiment ID
+            "experiment_variant",  # S5: CQP A/B variant name
+            "build_context",  # S2: ground truth tracking
+            "multi_tab",  # Phase 1: per-session MultiTabSession
+            "get_or_create_multi_tab",  # Phase 1: lazy init factory
         }
         assert set(fields.keys()) == expected_names
-        assert len(fields) == 7
+        assert len(fields) == 17
 
 
 # ── TestCreateStdioContext ───────────────────────────────────────────

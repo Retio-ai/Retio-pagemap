@@ -313,6 +313,16 @@ class TestValidateUrlWithDns:
             err = await _validate_url_with_dns("http://ipv6-evil.com/")
         assert err is not None
 
+    async def test_domain_to_aws_nitro_ipv6_metadata_blocked(self):
+        """Domain resolving to AWS Nitro IPv6 metadata IP (fd00:ec2::254) is blocked."""
+        with patch(
+            "pagemap.server.socket.getaddrinfo",
+            _fake_getaddrinfo_factory(["fd00:ec2::254"]),
+        ):
+            err = await _validate_url_with_dns("http://evil-metadata.com/")
+        assert err is not None
+        assert "blocked" in err.lower() or "rebinding" in err.lower()
+
 
 # ── TestGetPageMapDnsValidation ──────────────────────────────────────
 

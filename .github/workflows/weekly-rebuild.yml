@@ -1,0 +1,103 @@
+# Copyright (C) 2025-2026 Retio AI
+# SPDX-License-Identifier: AGPL-3.0-only
+#
+# Weekly Chromium base image rebuild + CVE scan.
+# Calls docker-attested.yml (workflow_call) to avoid build pipeline duplication.
+
+name: Weekly Chromium Rebuild
+
+on:
+  schedule:
+    - cron: "0 3 * * 1"  # Every Monday 03:00 UTC
+  workflow_dispatch:
+    inputs:
+      force_push:
+        description: "Push even if CVE scan fails (emergency override)"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+  attestations: write
+  security-events: write
+  issues: write
+
+env:
+  GHCR_IMAGE: ghcr.io/retio-ai/pagemap
+
+jobs:
+  # ── Trigger the attested build pipeline ───────────────────────
+  rebuild:
+    uses: ./.github/workflows/docker-attested.yml
+    secrets: inherit
+    with:
+      force_push: ${{ inputs.force_push || false }}
+
+  # ── Deep CVE scan (two-scan pattern) ──────────────────────────
+  cve-scan:
+    needs: rebuild
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      # Scan 1: Fail on CRITICAL vulnerabilities
+      - name: Trivy scan (fail on CRITICAL)
+        id: trivy_critical
+        uses: aquasecurity/trivy-action@e368e328979b113139d6f9068e03accaed98a518  # v0.34.1
+        with:
+          image-ref: ${{ env.GHCR_IMAGE }}:latest
+          format: table
+          exit-code: 1
+          severity: CRITICAL
+        continue-on-error: true
+
+      # Scan 2: Full scan with SARIF upload (always runs)
+      - name: Trivy scan (SARIF — all severities)
+        if: always()
+        uses: aquasecurity/trivy-action@e368e328979b113139d6f9068e03accaed98a518  # v0.34.1
+        with:
+          image-ref: ${{ env.GHCR_IMAGE }}:latest
+          format: sarif
+          output: trivy-weekly.sarif
+          limit-severities-for-sarif: true
+
+      - name: Upload SARIF to Security tab
+        if: always()
+        uses: github/codeql-action/upload-sarif@c4a7bc332abaec03596ff2803dd7f3ca3a238975  # v3
+        with:
+          sarif_file: trivy-weekly.sarif
+          category: weekly-rebuild
+
+      # ── Auto-create issue if CRITICAL CVEs found ──────────────
+      - name: Create CVE issue
+        if: steps.trivy_critical.outcome == 'failure'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = `[Security] CRITICAL CVE detected in weekly rebuild — ${new Date().toISOString().split('T')[0]}`;
+            const body = [
+              '## CRITICAL CVE Detected',
+              '',
+              'The weekly Chromium base image rebuild detected **CRITICAL** vulnerabilities.',
+              '',
+              '**Action required:**',
+              '1. Check the [Security tab](../../security/code-scanning) for full SARIF details',
+              '2. Update the base image or apply patches',
+              '3. Re-trigger the rebuild with `workflow_dispatch`',
+              '',
+              `**Workflow run:** ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              '',
+              '---',
+              '_This issue was automatically created by the weekly-rebuild workflow._',
+            ].join('\n');
+
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              body,
+              labels: ['security', 'automated'],
+            });

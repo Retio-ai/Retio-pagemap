@@ -72,7 +72,7 @@ class TestDetectAllSafe:
         from pagemap.page_map_builder import _detect_all_safe
 
         mock_interactable = Interactable(ref=1, role="button", name="Buy", affordance="click", region="main", tier=1)
-        with patch("pagemap.page_map_builder.detect_all") as mock_detect:
+        with patch("pagemap.core.page_map_builder.detect_all") as mock_detect:
             mock_detect.return_value = ([mock_interactable], ["warn1"])
             result, warnings = await _detect_all_safe(MagicMock(), True)
         assert len(result) == 1
@@ -82,7 +82,7 @@ class TestDetectAllSafe:
     async def test_error_isolation(self):
         from pagemap.page_map_builder import _detect_all_safe
 
-        with patch("pagemap.page_map_builder.detect_all") as mock_detect:
+        with patch("pagemap.core.page_map_builder.detect_all") as mock_detect:
             mock_detect.side_effect = RuntimeError("CDP crash")
             result, warnings = await _detect_all_safe(MagicMock(), True)
         assert result == []
@@ -92,7 +92,7 @@ class TestDetectAllSafe:
     async def test_cancelled_error_propagates(self):
         from pagemap.page_map_builder import _detect_all_safe
 
-        with patch("pagemap.page_map_builder.detect_all") as mock_detect:
+        with patch("pagemap.core.page_map_builder.detect_all") as mock_detect:
             mock_detect.side_effect = asyncio.CancelledError()
             with pytest.raises(asyncio.CancelledError):
                 await _detect_all_safe(MagicMock(), True)
@@ -117,7 +117,7 @@ class TestParallelPageMapBuild:
         from pagemap.page_map_builder import build_page_map_live
 
         session = self._make_session()
-        with patch("pagemap.page_map_builder._detect_all_safe") as mock_safe:
+        with patch("pagemap.core.page_map_builder._detect_all_safe") as mock_safe:
             mock_safe.return_value = ([], [])
             pm = await build_page_map_live(session, enable_tier3=False)
         mock_safe.assert_called_once()
@@ -128,7 +128,7 @@ class TestParallelPageMapBuild:
         from pagemap.page_map_builder import build_page_map_live
 
         session = self._make_session()
-        with patch("pagemap.page_map_builder._detect_all_safe") as mock_safe:
+        with patch("pagemap.core.page_map_builder._detect_all_safe") as mock_safe:
             mock_safe.return_value = ([], ["detection failed"])
             pm = await build_page_map_live(session, enable_tier3=False)
         assert pm.interactables == []
@@ -139,7 +139,7 @@ class TestParallelPageMapBuild:
 
         session = self._make_session()
         session.get_page_html.side_effect = RuntimeError("page crashed")
-        with patch("pagemap.page_map_builder._detect_all_safe") as mock_safe:
+        with patch("pagemap.core.page_map_builder._detect_all_safe") as mock_safe:
             mock_safe.return_value = ([], [])
             with pytest.raises(RuntimeError, match="page crashed"):
                 await build_page_map_live(session, enable_tier3=False)

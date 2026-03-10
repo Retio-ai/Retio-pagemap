@@ -1,0 +1,14 @@
+{
+  "name": "@pagemap/browser-scripts",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Browser-injected stealth and security scanner bundles for PageMap",
+  "scripts": {
+    "build": "node esbuild.config.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.0",
+    "typescript": "^5.7.0"
+  }
+}

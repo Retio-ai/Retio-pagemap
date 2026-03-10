@@ -111,7 +111,7 @@ class TestBuildPageMapLiveIsolation:
         mock_session.get_page_html = AsyncMock(return_value="<html><body><p>Price: 10,000</p></body></html>")
 
         with patch(
-            "pagemap.page_map_builder.detect_all",
+            "pagemap.core.page_map_builder.detect_all",
             side_effect=RuntimeError("unexpected fatal error"),
         ):
             page_map = await build_page_map_live(session=mock_session)
@@ -134,7 +134,7 @@ class TestBuildPageMapLiveIsolation:
 
         ax_warning = "AX tree detection failed (Exception): interactive elements may be incomplete"
         with patch(
-            "pagemap.page_map_builder.detect_all",
+            "pagemap.core.page_map_builder.detect_all",
             return_value=([], [ax_warning]),
         ):
             page_map = await build_page_map_live(session=mock_session)

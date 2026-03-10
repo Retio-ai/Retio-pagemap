@@ -1,0 +1,3065 @@
+# Copyright (C) 2025-2026 Retio AI
+# SPDX-License-Identifier: AGPL-3.0-only
+
+"""Pruned context builder: aggressive HTML compression for PageMap.
+
+Wraps the pruning2 pipeline and applies additional compression to meet
+the tight token budget (500-1500 tokens for pruned_context).
+
+Strategy per page type:
+- product_detail: product name (h1) + price + rating + review count + options
+- search_results: result list items + pagination info
+- article: title + first paragraph + date + author
+- default: headings + first significant text blocks
+"""
+
+from __future__ import annotations
+
+import contextlib
+import html as _html
+import logging
+import re
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any
+from urllib.parse import urljoin
+
+from .i18n import (
+    CONTACT_TERMS,
+    DEPARTMENT_TERMS,
+    FEATURE_TERMS,
+    FILTER_TERMS,
+    LISTING_TERMS,
+    LOAD_MORE_TERMS,
+    NEXT_BUTTON_TERMS,
+    OPTION_TERMS,
+    PREV_BUTTON_TERMS,
+    PRICE_LABEL_TERMS,
+    PRICING_TERMS,
+    SEARCH_RESULT_TERMS,
+    LocaleConfig,
+    get_locale,
+)
+from .preprocessing.preprocess import count_tokens
+from .pruning import ChunkType, HtmlChunk
+from .pruning.pipeline import prune_page
+
+logger = logging.getLogger(__name__)
+
+# Maximum tokens for pruned_context section
+DEFAULT_MAX_TOKENS = 1500
+
+# Pre-computed lowered option keywords for _compress_for_product
+_option_kw = tuple(t.lower() for t in OPTION_TERMS)
+
+# News schema names that trigger early news-portal detection (pre-AOM hint)
+_NEWS_SCHEMA_NAMES: frozenset[str] = frozenset({"NewsArticle", "Article", "ReportageNewsArticle"})
+
+# Patterns for extracting key information (multilingual)
+PRICE_PATTERN = re.compile(
+    r"(?:₩\s*[\d,]+|\d[\d,]+\s*원"
+    r"|\d[\d,]+\s*円|¥\s*[\d,]+"
+    r"|£\s*[\d,]+(?:\.\d{2})?"
+    r"|€\s*[\d,]+(?:\.\d{2})?"
+    r"|\$\d+(?:\.\d{2})?"
+    r"|₹\s*[\d,.]+|₺\s*[\d,.]+|₫\s*[\d,.]+"
+    r"|₱\s*[\d,.]+|฿\s*[\d,.]+"
+    r"|R\$\s*[\d,.]+|S\$\s*[\d,.]+|NT\$\s*[\d,.]+"
+    r"|RM\s*[\d,.]+|MX\$\s*[\d,.]+"
+    r"|USD\s*[\d,.]+|EUR\s*[\d,.]+|CHF\s*[\d,.]+"
+    r"|INR\s*[\d,.]+|BRL\s*[\d,.]+"
+    r"|CNY\s*[\d,.]+"
+    r"|RMB\s*[\d,.]+"
+    r"|\d[\d,]+\s*元"
+    r"|\d{2,3}(?:,\d{3})+)" + r"|" + "|".join(re.escape(t) for t in PRICE_LABEL_TERMS),
+)
+_PRICE_CLASS_RE = re.compile(
+    r"""class=(?P<q>["'])[^"']*(?:a-price|a-offscreen|price)[^"']*(?P=q)[^>]*>(?:\s*<[^>]+>)*\s*(?P<price>[^<]+)""",
+    re.IGNORECASE,
+)
+RATING_PATTERN = re.compile(
+    r"(?:★|⭐|평점|별점|\d+\.\d+\s*[/점]|\d+(?:\.\d+)?점|리뷰\s*\d+"
+    r"|評価|レビュー|étoile|Bewertung|Sterne"
+    r"|评分|评价"
+    r"|\d+(?:\.\d+)?\s*分)",
+)
+
+
+# Patterns for image extraction
+_IMG_TAG_PATTERN = re.compile(r"<img\b[^>]*?>", re.IGNORECASE | re.DOTALL)
+_IMG_ATTR_PATTERNS = [
+    re.compile(r'\bsrc=["\']([^"\']+)["\']', re.IGNORECASE),
+    re.compile(r'\bdata-src=["\']([^"\']+)["\']', re.IGNORECASE),
+    re.compile(r'\bdata-lazy-src=["\']([^"\']+)["\']', re.IGNORECASE),
+    re.compile(r'\bdata-original=["\']([^"\']+)["\']', re.IGNORECASE),
+]
+_SRCSET_PATTERN = re.compile(r'\bsrcset=["\']([^"\']+)["\']', re.IGNORECASE)
+_PRODUCT_IMG_HINTS = re.compile(
+    r"("
+    # E-commerce
+    r"product|goods|item|detail|gallery|pdp|zoom|main[-_]?img"
+    r"|swiper|slide|hero|displayitem|prd_img|goods_img"
+    # Precision patterns (avoid false positives)
+    r"|primary[-_](?:img|image|photo)"
+    # Editorial / article
+    r"|upload\.wikimedia|article|content[-_]?img|featured"
+    # General content
+    r"|/media/(?:catalog|product|upload)/|/photos?/"
+    # Major CDN domains (high-confidence product image sources)
+    r"|m\.media-amazon\.com/images/I/"
+    r"|thumbnail\d*\.coupang(?:cdn)?\.com"
+    r"|image\.msscdn\.net"
+    r"|sitem\.ssgcdn\.com"
+    r")",
+    re.IGNORECASE,
+)
+_EXCLUDE_IMG_PATTERNS = re.compile(
+    r"("
+    # UI chrome / branding
+    r"icon|logo|favicon|wordmark|tagline|copyright"
+    # Wiki-specific noise
+    r"|badge|shackle|disambig|padlock|protection[-_]shackle"
+    # Layout/decorative
+    r"|banner|sprite|spacer|blank|separator|divider"
+    # Ads and tracking
+    r"|ad[_\-]|tracking|pixel|1x1|beacon"
+    # Tracking domains (top offenders, inline)
+    r"|scorecardresearch\.com|doubleclick\.net|google-analytics\.com"
+    r"|facebook\.com/tr|bat\.bing\.com|amazon-adsystem\.com"
+    # Badge services
+    r"|shields\.io"
+    # Data URIs for tiny images
+    r"|svg\+xml|data:image/(?:gif|svg)"
+    # Amazon flyout / CTA noise
+    r"|flyout|fallback_CTA"
+    r")",
+    re.IGNORECASE,
+)
+
+# --- Size-based filtering ---
+_URL_PATH_SIZE_RE = re.compile(r"/(\d+)px-")
+_IMG_WIDTH_ATTR_RE = re.compile(r'\bwidth=["\']?(\d+)', re.IGNORECASE)
+_IMG_HEIGHT_ATTR_RE = re.compile(r'\bheight=["\']?(\d+)', re.IGNORECASE)
+_MIN_IMG_DIMENSION = 50
+
+# --- URL deduplication ---
+_IMG_RESIZE_PARAMS_RE = re.compile(
+    r"[?&](?:imwidth|imheight|w|h|width|height|size|sz|quality|q)=\d+",
+    re.IGNORECASE,
+)
+_IMG_SIZE_VALUE_RE = re.compile(
+    r"[?&](?:imwidth|imheight|w|h|width|height|size|sz)=(\d+)",
+    re.IGNORECASE,
+)
+
+# --- <picture>/<source> support ---
+_PICTURE_TAG_PATTERN = re.compile(r"<picture\b[^>]*>(.*?)</picture>", re.IGNORECASE | re.DOTALL)
+_SOURCE_SRCSET_PATTERN = re.compile(r"<source\b[^>]*?\bsrcset=[\"']([^\"']+)[\"']", re.IGNORECASE)
+
+# --- HTML semantic signals (2026 best practice) ---
+_DECORATIVE_IMG_RE = re.compile(
+    r'(?:role=["\'](?:presentation|none)["\']|aria-hidden=["\']true["\'])',
+    re.IGNORECASE,
+)
+_EMPTY_ALT_RE = re.compile(r'\balt=["\']["\']', re.IGNORECASE)
+_FETCHPRIORITY_HIGH_RE = re.compile(r'\bfetchpriority=["\']high["\']', re.IGNORECASE)
+_LOADING_EAGER_RE = re.compile(r'\bloading=["\']eager["\']', re.IGNORECASE)
+
+# --- <figure> semantic context (W3C WCAG 2.2) ---
+_FIGURE_IMG_PATTERN = re.compile(r"<figure\b[^>]*>(.*?)</figure>", re.IGNORECASE | re.DOTALL)
+
+# Security: allowed URL schemes for image extraction
+_ALLOWED_URL_PREFIXES = ("http://", "https://", "//")
+_MAX_URL_LENGTH = 2048
+
+# Pre-compiled patterns for text extraction and compression (Phase 6.3c)
+_SCRIPT_STYLE_RE = re.compile(r"<(script|style|noscript)[^>]*>.*?</\1>", re.DOTALL | re.IGNORECASE)
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+_MULTI_NEWLINE_RE = re.compile(r"\n{3,}")
+_HORIZ_SPACE_RE = re.compile(r"[ \t]+")
+_ANY_WHITESPACE_RE = re.compile(r"\s+")
+
+# CJK → digit boundary: insert space where CJK character directly precedes a digit.
+# Fixes text fusion from stripped inline elements (e.g., "상품323,140" → "상품 323,140").
+# Only CJK→digit direction; digit→CJK ("55,000원") is intentional and left unchanged.
+_CJK_RANGE = r"\u3040-\u30FF\u4E00-\u9FFF\uAC00-\uD7AF"
+_CJK_DIGIT_BOUNDARY_RE = re.compile(rf"([{_CJK_RANGE}])(\d)")
+_LI_SPLIT_RE = re.compile(r"<li[^>]*>", re.IGNORECASE)
+_KRW_PRICE_BARE_RE = re.compile(r"^\d{2,3}(?:,\d{3})+$")
+_DATE_PATTERN_RE = re.compile(r"\d{4}[.\-/]\d{1,2}[.\-/]\d{1,2}")
+
+# Payment promotion filter — lines about payment-method-specific discounts (low value for agents)
+_PAYMENT_PROMOTION_RE = re.compile(
+    r"(?:"
+    # ko: card/payment promotions
+    r"결제\s*시|이상\s*결제|카드.*할인|페이\s*[×xX·]|무이자\s*할부"
+    r"|적립금|포인트\s*적립|쿠폰\s*(?:받기|다운|적용)"
+    r"|무신사페이|네이버페이|카카오페이|토스페이"
+    # en
+    r"|pay\s*with|payment\s*method|installment|credit\s*card\s*(?:offer|deal)"
+    # ja
+    r"|お支払い方法|ポイント還元|分割払い"
+    r")",
+    re.IGNORECASE,
+)
+
+# Footer/boilerplate noise — common footer patterns in Korean e-commerce
+_FOOTER_NOISE_RE = re.compile(
+    r"(?:"
+    r"어바웃|회사\s*소개|비즈니스|고객지원|고객센터|이용약관|개인정보"
+    r"|사업자\s*등록|통신판매|대표\s*이사|주소\s*:"
+    r"|copyright|©|\(c\)|all\s*rights\s*reserved"
+    r")",
+    re.IGNORECASE,
+)
+
+# Discount percentage pattern (e.g. "89%", "89% 할인", "30% OFF")
+_DISCOUNT_PCT_RE = re.compile(r"(\d{1,2})%\s*(?:할인|세일|OFF|off|引き|割引|rabatt|remise)?")
+
+# Form control / product variant patterns (size labels, stock, quantity)
+_FORM_CONTROL_RE = re.compile(
+    r"(?:"
+    r"(?:XXS|XS|S|M|L|XL|XXL|2XL|3XL|FREE)\s*[/,]"
+    r"|\b(?:수량|quantity|Qty)\b"
+    r"|\b(?:재고|in stock|out of stock|품절)\b"
+    r")",
+    re.IGNORECASE,
+)
+
+# Extract numeric price value from a price string for comparison
+_PRICE_NUMERIC_RE = re.compile(r"[\d,]+(?:\.\d+)?")
+
+
+def _normalize_image_url(url: str) -> str:
+    """Remove resize query parameters to produce a canonical URL for dedup."""
+    return _IMG_RESIZE_PARAMS_RE.sub("", url).rstrip("?&")
+
+
+def _extract_size_from_url(url: str) -> int:
+    """Extract the maximum size value from resize query parameters."""
+    matches = _IMG_SIZE_VALUE_RE.findall(url)
+    if not matches:
+        return 0
+    return max(int(v) for v in matches)
+
+
+def _is_img_too_small_by_path(url: str) -> bool:
+    """Check if URL path contains a size indicator <= _MIN_IMG_DIMENSION."""
+    m = _URL_PATH_SIZE_RE.search(url)
+    if m:
+        try:
+            return int(m.group(1)) <= _MIN_IMG_DIMENSION
+        except ValueError:
+            pass
+    return False
+
+
+def _is_img_too_small_by_attrs(tag: str) -> bool:
+    """Check if HTML width/height attributes indicate a tiny image."""
+    w_m = _IMG_WIDTH_ATTR_RE.search(tag)
+    h_m = _IMG_HEIGHT_ATTR_RE.search(tag)
+    if w_m:
+        try:
+            if int(w_m.group(1)) <= _MIN_IMG_DIMENSION:
+                return True
+        except ValueError:
+            pass
+    if h_m:
+        try:
+            if int(h_m.group(1)) <= _MIN_IMG_DIMENSION:
+                return True
+        except ValueError:
+            pass
+    return False
+
+
+def _is_decorative_img(tag: str) -> bool:
+    """Check if an img tag is marked as decorative (W3C best practice)."""
+    if _DECORATIVE_IMG_RE.search(tag):
+        return True
+    return bool(_EMPTY_ALT_RE.search(tag))
+
+
+def _extract_picture_urls(html: str) -> list[tuple[str, bool]]:
+    """Extract image URLs from <picture><source srcset> elements.
+
+    Returns list of (url, has_product_hint) tuples.
+    Prefers the largest variant from srcset descriptors (w or x).
+    """
+    results: list[tuple[str, bool]] = []
+    for picture_m in _PICTURE_TAG_PATTERN.finditer(html):
+        picture_content = picture_m.group(1)
+        has_hint = bool(_PRODUCT_IMG_HINTS.search(picture_content))
+
+        # Extract from <source srcset="...">
+        for source_m in _SOURCE_SRCSET_PATTERN.finditer(picture_content):
+            srcset_val = source_m.group(1)
+            best_url = ""
+            best_score: float = 0  # unified score: w value or x*10000
+            for part in srcset_val.split(","):
+                part = part.strip()
+                if not part:
+                    continue
+                tokens = part.split()
+                url = tokens[0]
+                score: float = 0
+                if len(tokens) > 1:
+                    desc = tokens[1]
+                    if desc.endswith("w"):
+                        with contextlib.suppress(ValueError):
+                            score = float(desc[:-1])
+                    elif desc.endswith("x"):
+                        with contextlib.suppress(ValueError):
+                            # Scale x descriptors so 2x > any typical w value
+                            score = float(desc[:-1]) * 10000
+                if score > best_score or not best_url:
+                    best_url = url
+                    best_score = score
+            if best_url:
+                results.append((best_url, has_hint))
+
+        # Fallback <img> inside <picture> — skip if decorative
+        for pat in _IMG_ATTR_PATTERNS:
+            m = pat.search(picture_content)
+            if m:
+                # Check decorative signals on the inner <img> tag
+                img_m = _IMG_TAG_PATTERN.search(picture_content)
+                if img_m and _is_decorative_img(img_m.group(0)):
+                    break
+                results.append((m.group(1), has_hint))
+                break  # one fallback is enough
+
+    return results
+
+
+def extract_product_images(
+    raw_html: str,
+    base_url: str = "",
+) -> tuple[list[str], dict[str, Any]]:
+    """Extract likely product image URLs from HTML.
+
+    5-phase pipeline:
+    0. Pre-extract <picture><source srcset> + <figure> URLs
+    1. Collect candidates from <img> tags with semantic/size filtering
+    2. Canonical URL deduplication (keep largest variant)
+    3. Priority sort (fetchpriority > product_hint > appearance) → top 10
+    4. Telemetry stats collection
+
+    Returns (image_urls, filter_stats) tuple.
+    """
+    # -- Phase 0: <picture> pre-extraction --
+    picture_candidates = _extract_picture_urls(raw_html)
+
+    # Pre-extract <figure>-contained image URLs for priority boost
+    figure_img_urls: set[str] = set()
+    for fig_m in _FIGURE_IMG_PATTERN.finditer(raw_html):
+        for pat in _IMG_ATTR_PATTERNS:
+            for m in pat.finditer(fig_m.group(1)):
+                figure_img_urls.add(_html.unescape(m.group(1).strip()))
+
+    # -- Phase 1: <img> candidate collection --
+    img_tags = _IMG_TAG_PATTERN.findall(raw_html)
+    # (url, has_product_hint, has_fetchpriority)
+    candidates: list[tuple[str, bool, bool]] = []
+    seen_urls: set[str] = set()
+
+    total_candidates = len(img_tags)
+    after_decorative = 0
+    after_size_attrs = 0
+
+    for tag in img_tags:
+        # Skip decorative images (W3C semantic signals)
+        if _is_decorative_img(tag):
+            continue
+        after_decorative += 1
+
+        # Skip images too small by HTML attributes
+        if _is_img_too_small_by_attrs(tag):
+            continue
+        after_size_attrs += 1
+
+        # Check product hints and fetchpriority
+        has_hint = bool(_PRODUCT_IMG_HINTS.search(tag))
+        has_fetchpriority = bool(_FETCHPRIORITY_HIGH_RE.search(tag))
+        if has_fetchpriority:
+            has_hint = True  # fetchpriority="high" implies content image
+
+        # loading="eager" implies above-fold content image
+        if _LOADING_EAGER_RE.search(tag):
+            has_hint = True
+
+        # srcset w-descriptor size validation: skip if all variants < 100w
+        srcset_m = _SRCSET_PATTERN.search(tag)
+        srcset_all_tiny = False
+        srcset_parts: list[str] = []
+        if srcset_m:
+            srcset_parts = srcset_m.group(1).split(",")
+            srcset_max_w = 0
+            for part in srcset_parts:
+                tokens = part.strip().split()
+                if len(tokens) > 1 and tokens[1].endswith("w"):
+                    with contextlib.suppress(ValueError):
+                        srcset_max_w = max(srcset_max_w, int(tokens[1][:-1]))
+            if srcset_max_w > 0 and srcset_max_w < 100:
+                srcset_all_tiny = True
+
+        if srcset_all_tiny:
+            continue
+
+        # Extract URLs from various attributes
+        urls: list[str] = []
+        for pat in _IMG_ATTR_PATTERNS:
+            m = pat.search(tag)
+            if m:
+                urls.append(m.group(1))
+
+        # Parse srcset (reuse split result from tiny-check)
+        for part in srcset_parts:
+            part = part.strip()
+            if part:
+                url_part = part.split()[0]
+                if url_part:
+                    urls.append(url_part)
+
+        for url in urls:
+            url = _html.unescape(url.strip())
+            if not url:
+                continue
+
+            # <figure> context boost: images inside <figure> are editorial content
+            url_has_hint = has_hint
+            if url in figure_img_urls:
+                url_has_hint = True
+
+            # Allowlist: only http/https/protocol-relative absolute URLs allowed.
+            # Relative URLs (/path, path) pass through for urljoin resolution.
+            url_lower = url.lower()
+            if ":" in url_lower.split("/")[0] and not url_lower.startswith(_ALLOWED_URL_PREFIXES):
+                continue
+            if len(url) > _MAX_URL_LENGTH:
+                continue
+
+            # Filter out non-product images (URL-based)
+            if _EXCLUDE_IMG_PATTERNS.search(url):
+                continue
+
+            # Size filter: URL path (e.g. /20px-icon.png)
+            if _is_img_too_small_by_path(url):
+                continue
+
+            # Resolve relative URLs
+            if base_url and not url.startswith(("http://", "https://", "//")):
+                url = urljoin(base_url, url)
+            elif url.startswith("//"):
+                url = "https:" + url
+
+            # SVG filter (after resolve so product hints can match full URL)
+            if url.lower().endswith(".svg") and not _PRODUCT_IMG_HINTS.search(url):
+                continue
+
+            if url in seen_urls:
+                continue
+            seen_urls.add(url)
+
+            candidates.append((url, url_has_hint, has_fetchpriority))
+
+    after_exclude = len(candidates)  # Phase 1 <img> complete
+
+    # Merge <picture> candidates (Phase 0 results)
+    for url, has_hint in picture_candidates:
+        url = _html.unescape(url.strip())
+        if not url:
+            continue
+        url_lower = url.lower()
+        if ":" in url_lower.split("/")[0] and not url_lower.startswith(_ALLOWED_URL_PREFIXES):
+            continue
+        if len(url) > _MAX_URL_LENGTH:
+            continue
+        if _EXCLUDE_IMG_PATTERNS.search(url):
+            continue
+        if _is_img_too_small_by_path(url):
+            continue
+        # Resolve relative URLs
+        if base_url and not url.startswith(("http://", "https://", "//")):
+            url = urljoin(base_url, url)
+        elif url.startswith("//"):
+            url = "https:" + url
+        # SVG filter (after resolve so product hints can match full URL)
+        if url.lower().endswith(".svg") and not _PRODUCT_IMG_HINTS.search(url):
+            continue
+        if url in seen_urls:
+            continue
+        seen_urls.add(url)
+        # Boost <picture> images that are inside <figure>
+        pic_hint = has_hint or (url in figure_img_urls)
+        candidates.append((url, pic_hint, False))
+
+    after_picture_merge = len(candidates)
+
+    # -- Phase 2: Canonical URL deduplication --
+    # Group by normalized URL, keep the variant with the largest size param.
+    # Merge boolean flags with OR so hints aren't lost when a smaller variant
+    # carried the signal (e.g. <img class="gallery" src="...?w=200">).
+    canonical_map: dict[str, tuple[str, bool, bool, int]] = {}
+    for url, has_hint, has_fp in candidates:
+        canon = _normalize_image_url(url)
+        size_val = _extract_size_from_url(url)
+        existing = canonical_map.get(canon)
+        if existing is None:
+            canonical_map[canon] = (url, has_hint, has_fp, size_val)
+        else:
+            # Merge: keep largest URL, OR-merge boolean flags
+            merged_hint = existing[1] or has_hint
+            merged_fp = existing[2] or has_fp
+            if size_val > existing[3]:
+                canonical_map[canon] = (url, merged_hint, merged_fp, size_val)
+            else:
+                canonical_map[canon] = (existing[0], merged_hint, merged_fp, existing[3])
+
+    deduped = [(url, hint, fp) for url, hint, fp, _ in canonical_map.values()]
+    after_dedup = len(deduped)
+
+    # -- Phase 3: Priority sort --
+    # fetchpriority="high" > product_hint > appearance order
+    # Use negative bools for descending sort (True first)
+    prioritized = sorted(deduped, key=lambda x: (not x[2], not x[1]))
+
+    final = [_html.unescape(url) for url, _, _ in prioritized[:10]]
+
+    # -- Phase 4: Telemetry stats --
+    stats: dict[str, Any] = {
+        "total_candidates": total_candidates,
+        "after_decorative_filter": after_decorative,
+        "after_size_attrs_filter": after_size_attrs,
+        "after_all_filters": after_exclude,
+        "after_picture_merge": after_picture_merge,
+        "after_dedup": after_dedup,
+        "final_count": len(final),
+        "structured_image_merged": False,  # set by caller after merge
+    }
+
+    logger.debug(
+        "Image filter: %d candidates → %d after decorative → %d after size_attrs "
+        "→ %d after all filters → %d after picture merge → %d after dedup → %d final",
+        total_candidates,
+        after_decorative,
+        after_size_attrs,
+        after_exclude,
+        after_picture_merge,
+        after_dedup,
+        len(final),
+    )
+
+    return final, stats
+
+
+def _extract_text_lines(html: str) -> list[str]:
+    """Extract visible text lines from HTML, preserving key structure."""
+    # Remove script/style
+    cleaned = _SCRIPT_STYLE_RE.sub("", html)
+    # Strip remaining tags
+    text = _HTML_TAG_RE.sub("\n", cleaned)
+    # Decode HTML entities left over after tag stripping
+    text = _html.unescape(text)
+    text = _CJK_DIGIT_BOUNDARY_RE.sub(r"\1 \2", text)
+    text = text.replace("\xa0", " ")
+    text = _MULTI_NEWLINE_RE.sub("\n\n", text)
+    text = _HORIZ_SPACE_RE.sub(" ", text)
+
+    lines = [line.strip() for line in text.split("\n") if line.strip()]
+    return lines
+
+
+def _extract_text_lines_filtered(
+    html: str,
+    lc: LocaleConfig | None = None,
+    enable_lang_filter: bool = False,
+) -> list[str]:
+    """Extract text lines with optional language filtering.
+
+    When enable_lang_filter is True, removes short UI noise in non-dominant
+    scripts and tags long non-dominant content with [lang] markers.
+    """
+    lines = _extract_text_lines(html)
+    if not enable_lang_filter:
+        return lines
+
+    from .script_filter import Script, filter_lines
+
+    # Use locale hint for expected script
+    page_script = None
+    if lc and lc.code:
+        _LOCALE_SCRIPT_MAP: dict[str, Script] = {
+            "ko": Script.HANGUL,
+            "ja": Script.HIRAGANA,
+            "zh": Script.CJK,
+            "en": Script.LATIN,
+            "es": Script.LATIN,
+            "fr": Script.LATIN,
+            "de": Script.LATIN,
+            "ru": Script.CYRILLIC,
+            "ar": Script.ARABIC,
+        }
+        lang_code = lc.code.split("_")[0].split("-")[0].lower()
+        page_script = _LOCALE_SCRIPT_MAP.get(lang_code)
+
+    result = filter_lines(lines, page_script=page_script)
+
+    if result.removed_count > 0 or result.tagged_count > 0:
+        try:
+            from pagemap.telemetry import emit
+            from pagemap.telemetry.events import LANG_FILTER_APPLIED
+
+            emit(
+                LANG_FILTER_APPLIED,
+                {
+                    "page_script": result.page_script.name,
+                    "removed_count": result.removed_count,
+                    "tagged_count": result.tagged_count,
+                    "total_lines": len(lines),
+                },
+            )
+        except Exception:  # nosec B110
+            pass
+
+    return result.lines
+
+
+# ---------------------------------------------------------------------------
+# Card detection for listing / search_results pages
+# ---------------------------------------------------------------------------
+
+# Price pattern used for card detection (reuse PRICE_PATTERN for line-level)
+_CARD_PRICE_RE = re.compile(
+    r"(?:₩\s*[\d,]+|\d[\d,]+\s*원|\d[\d,]+\s*円|¥\s*[\d,]+"
+    r"|\d{2,3}(?:,\d{3})+(?:\s*원)?"
+    r"|\$\d+(?:\.\d{2})?|€\s*[\d,.]+|£\s*[\d,.]+"
+    r"|USD\s*[\d,.]+|EUR\s*[\d,.]+|CHF\s*[\d,.]+)",
+)
+
+
+def _detect_cards_from_metadata(metadata: dict | None) -> list[dict[str, Any]]:
+    """Extract product cards from JSON-LD ItemList metadata (highest confidence)."""
+    if not metadata or "items" not in metadata:
+        return []
+    items = metadata["items"]
+    if not isinstance(items, list):
+        return []
+    cards: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict) or not item.get("name"):
+            continue
+        cards.append(item)
+    return cards
+
+
+_MAX_CARD_ANCESTOR_DEPTH = 6
+_MIN_DOM_CARDS = 3
+
+
+def _detect_cards_from_dom(doc: Any) -> list[dict[str, Any]]:
+    """Detect product cards from pre-parsed DOM using price-anchor + parent walk.
+
+    Uses the SAME doc from preprocess() — no additional parsing.
+
+    Algorithm:
+    1. Find leaf elements with price text (el.text matches price pattern)
+    2. Walk up max 6 levels to find card boundary
+       (ancestor whose parent has 3+ children with same tag)
+    3. Extract name (text before price) + price from card
+    4. Minimum 3 cards to confirm grid pattern
+    """
+    if doc is None:
+        return []
+
+    price_elements: list[tuple[Any, str]] = []  # (element, price_text)
+    for el in doc.iter():
+        if not isinstance(el.tag, str):
+            continue
+        # Check direct text and tail for price patterns
+        for text_part in (el.text, el.tail):
+            if text_part:
+                m = _CARD_PRICE_RE.search(text_part.strip())
+                if m:
+                    price_elements.append((el, m.group(0)))
+                    break
+
+    if len(price_elements) < _MIN_DOM_CARDS:
+        return []
+
+    cards: list[dict[str, Any]] = []
+    seen_texts: set[str] = set()
+
+    _WALK_STOP_TAGS = frozenset({"body", "html"})
+
+    for price_el, price_text in price_elements:
+        # Walk up to find card boundary
+        card_el = price_el
+        _boundary_found = False
+        for _ in range(_MAX_CARD_ANCESTOR_DEPTH):
+            parent = card_el.getparent()
+            if parent is None:
+                break
+            parent_tag = parent.tag.lower() if isinstance(parent.tag, str) else ""
+            if parent_tag in _WALK_STOP_TAGS:
+                break
+            # Card boundary: parent has 3+ children with same tag
+            same_tag_count = sum(1 for sibling in parent if isinstance(sibling.tag, str) and sibling.tag == card_el.tag)
+            if same_tag_count >= _MIN_DOM_CARDS:
+                _boundary_found = True
+                break
+            card_el = parent
+
+        # Skip if no card boundary found (walked to root — card_el is too broad)
+        if not _boundary_found and card_el is not price_el:
+            continue
+
+        # Extract card text
+        card_text = (card_el.text_content() or "").strip()
+        if not card_text or card_text in seen_texts:
+            continue
+        seen_texts.add(card_text)
+
+        # Extract name: text content minus the price portion
+        name = card_text
+        price_idx = name.find(price_text)
+        if price_idx >= 0:
+            name = name[:price_idx].strip()
+        # Clean up: take last meaningful line as name (skip noise)
+        name_lines = [ln.strip() for ln in name.split("\n") if ln.strip()]
+        # Filter out very short fragments and noise
+        name_lines = [ln for ln in name_lines if len(ln) > 1]
+        if name_lines:
+            # Prefer the longest non-price line as product name
+            name = max(name_lines, key=len)
+        else:
+            name = card_text[:100]
+
+        # Skip if name is too short or looks like noise
+        if len(name) < 2:
+            continue
+
+        cards.append({"name": name[:150], "price_text": price_text})
+
+    if len(cards) < _MIN_DOM_CARDS:
+        return []
+
+    return cards
+
+
+def _detect_cards_from_chunks(chunks: list[HtmlChunk]) -> list[dict[str, Any]]:
+    """Detect product cards from pruned chunks.
+
+    Strategy cascade:
+    1. LIST/TABLE chunks — parse <li> items for name+price pairs
+    2. parent_xpath grouping — group chunks by parent, pair name+price
+    3. Adjacent name/price line pairing (last resort)
+    """
+    cards: list[dict[str, Any]] = []
+
+    # Strategy 1: LIST chunks with <li> containing name+price
+    list_chunks = [c for c in chunks if c.chunk_type in (ChunkType.LIST, ChunkType.TABLE)]
+    for chunk in list_chunks:
+        # Split by <li> tags
+        li_parts = _LI_SPLIT_RE.split(chunk.html)
+        for part in li_parts[1:]:  # skip pre-<li> content
+            part_text = _HTML_TAG_RE.sub(" ", part)
+            part_text = _html.unescape(part_text)
+            part_text = _ANY_WHITESPACE_RE.sub(" ", part_text).strip()
+            if not part_text or len(part_text) < 5:
+                continue
+            price_m = _CARD_PRICE_RE.search(part_text)
+            if price_m:
+                # Everything before the price is likely the product name
+                name_part = part_text[: price_m.start()].strip().rstrip("|·-–—")
+                price_str = price_m.group(0)
+                if name_part and len(name_part) > 2:
+                    card: dict[str, Any] = {"name": name_part.strip(), "price_text": price_str}
+                    cards.append(card)
+
+    if cards:
+        return cards
+
+    # Strategy 2: parent_xpath grouping
+    # Group non-meta chunks by parent_xpath
+    groups: dict[str, list[HtmlChunk]] = {}
+    for c in chunks:
+        if c.chunk_type in (ChunkType.META, ChunkType.RSC_DATA):
+            continue
+        pxpath = c.parent_xpath or c.xpath
+        groups.setdefault(pxpath, []).append(c)
+
+    # Find groups that look like product listings (multiple children with prices)
+    for _pxpath, group_chunks in groups.items():
+        if len(group_chunks) < 2:
+            continue
+        texts = [c.text.strip() for c in group_chunks if c.text.strip()]
+        # Count lines with prices
+        price_lines = [t for t in texts if _CARD_PRICE_RE.search(t)]
+        name_lines = [t for t in texts if not _CARD_PRICE_RE.search(t) and 3 < len(t) < 200]
+
+        if len(price_lines) >= 2 and name_lines:
+            # Pair names and prices by position
+            for i, name in enumerate(name_lines):
+                if i < len(price_lines):
+                    price_m = _CARD_PRICE_RE.search(price_lines[i])
+                    card = {"name": name, "price_text": price_m.group(0) if price_m else price_lines[i]}
+                    cards.append(card)
+
+    if cards:
+        return cards
+
+    # Strategy 3: Adjacent line pairing (fallback)
+    all_texts = []
+    for c in chunks:
+        if c.chunk_type in (ChunkType.META, ChunkType.RSC_DATA):
+            continue
+        text = c.text.strip()
+        if text:
+            all_texts.append(text)
+
+    i = 0
+    while i < len(all_texts) - 1:
+        line = all_texts[i]
+        next_line = all_texts[i + 1]
+
+        # Pattern: name line followed by price line
+        if not _CARD_PRICE_RE.search(line) and 3 < len(line) < 200 and _CARD_PRICE_RE.search(next_line):
+            price_m = _CARD_PRICE_RE.search(next_line)
+            card = {"name": line, "price_text": price_m.group(0) if price_m else next_line}
+            cards.append(card)
+            i += 2
+            continue
+
+        # Pattern: single line with both name and price
+        if _CARD_PRICE_RE.search(line) and len(line) > 15:
+            price_m = _CARD_PRICE_RE.search(line)
+            name_part = line[: price_m.start()].strip().rstrip("|·-–—") if price_m else ""
+            if name_part and len(name_part) > 2:
+                card = {"name": name_part, "price_text": price_m.group(0) if price_m else ""}
+                cards.append(card)
+        i += 1
+
+    return cards
+
+
+def _detect_product_cards(
+    chunks: list[HtmlChunk] | None,
+    metadata: dict | None,
+    card_strategy_hint: str | None = None,
+    doc: Any = None,
+) -> list[dict[str, Any]]:
+    """Main entry point: detect product cards with cascade priority.
+
+    Priority: JSON-LD ItemList > DOM price-anchor > chunk-based > empty list.
+    Deduplicates by (name_lower, price_text).
+
+    If card_strategy_hint is provided, tries the hinted strategy first
+    and skips the fallback cascade on success.
+    """
+    cards: list[dict[str, Any]] = []
+
+    if card_strategy_hint == "json_ld_itemlist":
+        # Optimistic: try metadata-based only
+        cards = _detect_cards_from_metadata(metadata)
+        if not cards:
+            # Hint failed — fall through: try DOM, then chunks
+            if doc is not None:
+                cards = _detect_cards_from_dom(doc)
+            if not cards and chunks:
+                cards = _detect_cards_from_chunks(chunks)
+    else:
+        # Full cascade (no hint or unknown hint)
+        # Try JSON-LD first (highest confidence)
+        cards = _detect_cards_from_metadata(metadata)
+
+        # Try DOM price-anchor detection
+        if not cards and doc is not None:
+            cards = _detect_cards_from_dom(doc)
+
+        # Fallback to chunk-based detection
+        if not cards and chunks:
+            cards = _detect_cards_from_chunks(chunks)
+
+    # Deduplicate by (name.lower(), price)
+    seen: set[tuple[str, str]] = set()
+    deduped: list[dict[str, Any]] = []
+    for card in cards:
+        name = card.get("name", "").lower().strip()
+        price = card.get("price_text", "") or str(card.get("price", ""))
+        key = (name, price)
+        if key not in seen:
+            seen.add(key)
+            deduped.append(card)
+
+    return deduped
+
+
+def _serialize_cards(
+    cards: list[dict[str, Any]],
+    max_cards: int = 15,
+    lc: LocaleConfig | None = None,
+) -> str:
+    """Serialize product cards into numbered lines.
+
+    Format: "1. 상품명 | 가격 | 브랜드"
+    """
+    if lc is None:
+        lc = get_locale(None)
+    lines: list[str] = []
+    for i, card in enumerate(cards[:max_cards], 1):
+        parts = [card.get("name", "")]
+        # Price
+        price_text = card.get("price_text", "")
+        if not price_text and card.get("price") is not None:
+            from .preprocessing.normalize import format_price
+
+            price_text = format_price(card["price"], card.get("currency", "KRW"))
+        if price_text:
+            parts.append(price_text)
+        # Brand
+        if card.get("brand"):
+            parts.append(card["brand"])
+        lines.append(f"{i}. {' | '.join(parts)}")
+
+    if len(cards) > max_cards:
+        lines.append(f"... {lc.overflow_template.format(n=len(cards) - max_cards)}")
+
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Pagination detection (from raw HTML — AOM filter removes <nav>)
+# ---------------------------------------------------------------------------
+
+_PAGE_PARAM_RE = re.compile(
+    r'(?:href|action)=["\'][^"\']*[?&](?:page|p|pg|pn|pageNo|pageNum|currentPage)=(\d+)',
+    re.IGNORECASE,
+)
+_TOTAL_COUNT_RE = re.compile(
+    r"(?:"
+    r"총\s*[\d,]+\s*건"
+    r"|[\d,]+\s*(?:개의?\s*(?:상품|결과|검색결과|아이템|건))"
+    r"|\d[\d,]*\s*(?:results?|items?|products?)"
+    r"|(?:of|중)\s+[\d,]+"
+    r"|\d+-\d+\s+of\s+[\d,]+"
+    # ja
+    r"|\d[\d,]*\s*件の商品"
+    # fr
+    r"|\d[\d,]*\s*résultats"
+    r"|\d[\d,]*\s*produits"
+    # de
+    r"|\d[\d,]*\s*Ergebnisse"
+    r"|\d[\d,]*\s*Produkte"
+    r")",
+    re.IGNORECASE,
+)
+# Build _HAS_NEXT_RE from i18n tuples
+_next_terms = NEXT_BUTTON_TERMS + LOAD_MORE_TERMS
+_HAS_NEXT_RE = re.compile(
+    r"(?:"
+    + "|".join(r">" + re.escape(t) + r"<" for t in _next_terms)
+    + r"|aria-label=[\"'](?:"
+    + "|".join(re.escape(t) for t in _next_terms)
+    + r")[\"']"
+    + r"|class=[\"'][^\"']*next[^\"']*[\"']"
+    + r")",
+    re.IGNORECASE,
+)
+# Build _HAS_PREV_RE from i18n tuples (mirrors _HAS_NEXT_RE)
+_prev_terms = PREV_BUTTON_TERMS
+_HAS_PREV_RE = re.compile(
+    r"(?:"
+    + "|".join(r">" + re.escape(t) + r"<" for t in _prev_terms)
+    + r"|aria-label=[\"'](?:"
+    + "|".join(re.escape(t) for t in _prev_terms)
+    + r")[\"']"
+    + r"|class=[\"'][^\"']*prev[^\"']*[\"']"
+    + r")",
+    re.IGNORECASE,
+)
+_CURRENT_PAGE_RE = re.compile(
+    r"(?:"
+    r"[Pp]age\s+(\d+)\s+(?:of|/)\s+(\d+)"
+    r"|페이지\s*(\d+)\s*/\s*(\d+)"
+    r"|(\d+)\s*/\s*(\d+)\s*페이지"
+    r"|(\d+)\s*/\s*(\d+)\s*ページ"
+    r"|[Ss]eite\s+(\d+)\s+(?:von|/)\s+(\d+)"
+    r")",
+)
+
+
+def _extract_pagination_info(
+    raw_html: str,
+    lc: LocaleConfig | None = None,
+    pagination_hint: str | None = None,
+) -> str:
+    """Extract pagination summary from raw HTML.
+
+    Returns a single-line summary like:
+    "페이지네이션: ~25페이지 | 총 500건 | 다음 있음"
+
+    Returns empty string if no pagination info found.
+
+    If pagination_hint is "none", returns empty immediately (known no-pagination domain).
+    If pagination_hint is a param name (e.g. "page"), uses targeted regex only.
+    """
+    if pagination_hint == "none":
+        return ""
+
+    if lc is None:
+        lc = get_locale(None)
+
+    parts: list[str] = []
+
+    # Max page from URL params (targeted if hint provided)
+    if pagination_hint and pagination_hint != "none":
+        # Targeted regex for a single known parameter
+        _targeted_re = re.compile(
+            rf'(?:href|action)=["\'][^"\']*[?&]{re.escape(pagination_hint)}=(\d+)',
+            re.IGNORECASE,
+        )
+        try:
+            page_numbers = [int(m) for m in _targeted_re.findall(raw_html)]
+        except ValueError:
+            page_numbers = []
+    else:
+        # Full scan of all known pagination parameters
+        try:
+            page_numbers = [int(m) for m in _PAGE_PARAM_RE.findall(raw_html)]
+        except ValueError:
+            page_numbers = []
+    max_page = max(page_numbers) if page_numbers else 0
+
+    # Current page / total pages from text
+    current_page_m = _CURRENT_PAGE_RE.search(raw_html)
+    if current_page_m:
+        groups = current_page_m.groups()
+        try:
+            for i in range(0, len(groups), 2):
+                if groups[i] is not None:
+                    _current = int(groups[i])
+                    if i + 1 < len(groups) and groups[i + 1] is not None:
+                        total_pages = int(groups[i + 1])
+                        max_page = max(max_page, total_pages)
+                    break
+        except (ValueError, IndexError) as exc:
+            logger.warning("Failed to parse pagination numbers: %s", exc)
+
+    if max_page > 1:
+        parts.append(f"~{max_page}{lc.label_page_suffix}")
+
+    # Total result count
+    total_m = _TOTAL_COUNT_RE.search(raw_html)
+    if total_m:
+        parts.append(total_m.group(0).strip())
+
+    # Has next page
+    has_next = bool(_HAS_NEXT_RE.search(raw_html))
+    if has_next:
+        parts.append(lc.label_next_available)
+
+    if not parts:
+        return ""
+
+    return f"{lc.label_pagination}: " + " | ".join(parts)
+
+
+def extract_pagination_structured(raw_html: str, lc: LocaleConfig | None = None) -> dict:
+    """Extract structured pagination info from raw HTML.
+
+    Returns dict with detected keys only (empty dict if nothing found):
+        current_page (int), total_pages (int), total_items (str),
+        has_next (bool), has_prev (bool)
+    """
+    if lc is None:
+        lc = get_locale(None)
+
+    result: dict = {}
+
+    # Current page / total pages from text
+    current_page = 0
+    total_pages = 0
+    current_page_m = _CURRENT_PAGE_RE.search(raw_html)
+    if current_page_m:
+        groups = current_page_m.groups()
+        try:
+            for i in range(0, len(groups), 2):
+                if groups[i] is not None:
+                    current_page = int(groups[i])
+                    if i + 1 < len(groups) and groups[i + 1] is not None:
+                        total_pages = int(groups[i + 1])
+                    break
+        except (ValueError, IndexError) as exc:
+            logger.warning("Failed to parse pagination numbers: %s", exc)
+
+    # Max page from URL params
+    try:
+        page_numbers = [int(m) for m in _PAGE_PARAM_RE.findall(raw_html)]
+    except ValueError:
+        page_numbers = []
+    if page_numbers:
+        total_pages = max(total_pages, max(page_numbers))
+
+    if current_page > 0:
+        result["current_page"] = current_page
+    if total_pages > 1:
+        result["total_pages"] = total_pages
+
+    # Total result count
+    total_m = _TOTAL_COUNT_RE.search(raw_html)
+    if total_m:
+        result["total_items"] = total_m.group(0).strip()
+
+    # Has next / prev
+    if _HAS_NEXT_RE.search(raw_html):
+        result["has_next"] = True
+    if _HAS_PREV_RE.search(raw_html):
+        result["has_prev"] = True
+
+    return result
+
+
+def _extract_price_numeric(text: str) -> float | None:
+    """Extract numeric price value from a string for comparison."""
+    m = _PRICE_NUMERIC_RE.search(text)
+    if not m:
+        return None
+    try:
+        return float(m.group(0).replace(",", ""))
+    except ValueError:
+        return None
+
+
+def _compress_for_product(
+    pruned_html: str,
+    max_tokens: int,
+    metadata: dict | None = None,
+    lc: LocaleConfig | None = None,
+    enable_lang_filter: bool = False,
+    doc: Any = None,
+) -> str:
+    """Aggressive compression for product detail pages.
+
+    Phase 1: Use structured metadata (high confidence) if available.
+    Phase 2: Regex fallback for fields not covered by metadata.
+    Phase 2b: Extract original price + discount from text when metadata lacks them.
+    """
+    if lc is None:
+        lc = get_locale(None)
+    parts: list[str] = []
+    used: set[str] = set()
+
+    # -- Phase 1: structured metadata (high confidence) --
+    meta_price_val: float | None = None
+    if metadata:
+        if metadata.get("name"):
+            parts.append(f"{lc.label_title}: {metadata['name']}")
+            used.add("title")
+        if metadata.get("price") is not None:
+            from .preprocessing.normalize import format_price
+
+            currency = metadata.get("currency", "KRW")
+            parts.append(format_price(metadata["price"], currency))
+            used.add("price")
+            meta_price_val = float(metadata["price"])
+        if metadata.get("original_price") is not None:
+            from .preprocessing.normalize import format_price
+
+            currency = metadata.get("currency", "KRW")
+            parts.append(f"{lc.label_original_price}: {format_price(metadata['original_price'], currency)}")
+            used.add("original_price")
+        if metadata.get("rating") is not None:
+            rating_str = f"{lc.label_rating}: {metadata['rating']}"
+            if metadata.get("review_count"):
+                rating_str += " " + lc.review_template.format(count=metadata["review_count"])
+            parts.append(rating_str)
+            used.add("rating")
+        if metadata.get("brand"):
+            parts.append(f"{lc.label_brand}: {metadata['brand']}")
+
+    # -- Phase 2: regex fallback (unfilled fields only) --
+    lines = _extract_text_lines_filtered(pruned_html, lc=lc, enable_lang_filter=enable_lang_filter)
+    sections: dict[str, list[str]] = {
+        "title": [],
+        "price": [],
+        "rating": [],
+        "options": [],
+        "discount": [],
+        "other": [],
+    }
+
+    for line in lines:
+        if len(line) < 2:
+            continue
+        line_lower = line.lower()
+
+        # Price lines get priority — check before filtering promotions
+        has_price = PRICE_PATTERN.search(line) and re.search(r"\d", line)
+
+        if has_price:
+            # When price is from metadata, still collect price lines for original_price detection
+            if "price" not in used:
+                if line not in sections["price"]:
+                    sections["price"].append(line)
+            elif "original_price" not in used:
+                # Check if this price is higher than metadata price → likely original price
+                line_price = _extract_price_numeric(line)
+                if line_price and meta_price_val and line_price > meta_price_val * 1.1:
+                    if line not in sections["price"]:
+                        sections["price"].append(line)
+            continue
+
+        # Filter out payment promotions and footer noise (non-price lines only)
+        if _PAYMENT_PROMOTION_RE.search(line):
+            continue
+        if _FOOTER_NOISE_RE.search(line):
+            continue
+
+        if _DISCOUNT_PCT_RE.search(line):
+            sections["discount"].append(line)
+        elif "rating" not in used and RATING_PATTERN.search(line):
+            if line not in sections["rating"]:
+                sections["rating"].append(line)
+        elif any(kw in line_lower for kw in _option_kw) or _FORM_CONTROL_RE.search(line):
+            sections["options"].append(line)
+        elif "title" not in used and not sections["title"] and 10 < len(line) < 200:
+            sections["title"].append(line)
+        else:
+            sections["other"].append(line)
+
+    # -- Phase 2c: DOM-based option extraction (select/option elements) --
+    if doc is not None and not sections["options"]:
+        for el in doc.iter():
+            if not isinstance(el.tag, str) or el.tag != "select":
+                continue
+            opts: list[str] = []
+            for opt in el:
+                if isinstance(opt.tag, str) and opt.tag == "option":
+                    val = (opt.text_content() or "").strip()
+                    if val and val.lower() not in ("선택", "select", "choose", "---", ""):
+                        opts.append(val)
+            if opts:
+                label = el.get("name", "") or el.get("id", "")
+                prefix = label or "options"
+                sections["options"].append(f"{prefix}: {', '.join(opts[:15])}")
+                if len(sections["options"]) >= 5:
+                    break
+
+    # "원" post-processing -- only when price not from metadata
+    if "price" not in used:
+        for i, p in enumerate(sections["price"]):
+            if _KRW_PRICE_BARE_RE.match(p.strip()):
+                sections["price"][i] = p.strip() + "원"
+
+    # -- Phase 3: combine --
+    if "title" not in used and sections["title"]:
+        parts.append(f"{lc.label_title}: {sections['title'][0]}")
+    if "price" not in used:
+        for p in sections["price"][:5]:
+            parts.append(p)
+    elif "original_price" not in used and sections["price"]:
+        # Original price detected from text (higher than sale price)
+        parts.append(f"{lc.label_original_price}: {sections['price'][0]}")
+    if "rating" not in used:
+        for r in sections["rating"][:2]:
+            parts.append(r)
+    # Discount percentage
+    if sections["discount"]:
+        parts.append(f"{lc.label_discount}: {sections['discount'][0]}")
+    for o in sections["options"][:5]:
+        parts.append(o)
+    _existing_lower = "\n".join(parts).lower()
+    for d in sections["other"][:10]:
+        if len(d) > 8 and d.lower() not in _existing_lower:
+            parts.append(d[:200])
+
+    # Phase 4: price fallback — scan pruned_html for price class patterns
+    if "price" not in used and not sections["price"]:
+        _price_class_match = _PRICE_CLASS_RE.search(pruned_html)
+        if _price_class_match:
+            price_text = _price_class_match.group("price").strip()
+            if price_text and PRICE_PATTERN.search(price_text):
+                parts.append(price_text)
+                # Feedback: inject into metadata dict for downstream consumers
+                if metadata is not None and "price" not in metadata:
+                    with contextlib.suppress(ValueError):
+                        _m = _PRICE_NUMERIC_RE.search(price_text)
+                        if _m:
+                            metadata["price"] = float(_m.group().replace(",", ""))
+
+    result = "\n".join(parts)
+
+    if count_tokens(result) > max_tokens:
+        result = _truncate_to_tokens(result, max_tokens)
+
+    return result
+
+
+def _compress_for_article(
+    pruned_html: str,
+    max_tokens: int,
+    chunks: list[HtmlChunk] | None = None,
+    metadata: dict | None = None,
+    lc: LocaleConfig | None = None,
+) -> str:
+    """Budget-based compression for article/news pages.
+
+    Phase 1: metadata title.
+    Phase 2: chunk-based structural extraction (heading + body blocks).
+    Phase 3: text-line fallback with budget.
+    """
+    if lc is None:
+        lc = get_locale(None)
+    parts: list[str] = []
+
+    # Phase 1: metadata
+    if metadata:
+        title = metadata.get("headline") or metadata.get("title") or metadata.get("name")
+        if title:
+            parts.append(f"{lc.label_title}: {title}")
+        if metadata.get("author"):
+            parts.append(f"Author: {metadata['author']}")
+        if metadata.get("date_published"):
+            parts.append(metadata["date_published"])
+
+    # Phase 2: chunk-based (budget)
+    lines = _extract_text_lines(pruned_html)
+    cpt = _calibrate_chars_per_token(lines, min_len=5, max_line_len=300)
+    char_budget = int(max_tokens * cpt * 0.95)
+    running_chars = sum(len(p) + 1 for p in parts)
+
+    if chunks:
+        current_heading: str | None = None
+        body_count = 0
+        for chunk in chunks:
+            if chunk.chunk_type == ChunkType.HEADING:
+                heading_text = chunk.text.strip()
+                if not heading_text:
+                    continue
+                text = f"## {heading_text}"
+                cost = len(text) + 1
+                if running_chars + cost > char_budget:
+                    break
+                parts.append(text)
+                running_chars += cost
+                current_heading = heading_text
+                body_count = 0
+            elif chunk.chunk_type == ChunkType.TEXT_BLOCK and current_heading is not None:
+                if body_count >= 3:
+                    continue
+                block_text = chunk.text.strip()
+                if not block_text:
+                    continue
+                text = block_text[:300]
+                cost = len(text) + 1
+                if running_chars + cost > char_budget:
+                    break
+                parts.append(text)
+                running_chars += cost
+                body_count += 1
+    else:
+        # Phase 3: text-line fallback with budget
+        title_found = bool(parts)  # already have title from metadata
+        for line in lines:
+            if len(line) < 3:
+                continue
+            if not title_found and len(line) > 10:
+                text = f"{lc.label_title}: {line}"
+                cost = len(text) + 1
+                if running_chars + cost > char_budget:
+                    break
+                parts.append(text)
+                running_chars += cost
+                title_found = True
+                continue
+            if _DATE_PATTERN_RE.search(line):
+                cost = len(line) + 1
+                if running_chars + cost > char_budget:
+                    break
+                parts.append(line)
+                running_chars += cost
+                continue
+            if title_found and len(line) > 30:
+                text = line[:300]
+                cost = len(text) + 1
+                if running_chars + cost > char_budget:
+                    break
+                parts.append(text)
+                running_chars += cost
+
+    if not parts:
+        return _compress_default(pruned_html, max_tokens)
+
+    result = "\n".join(parts)
+    if count_tokens(result) > max_tokens:
+        result = _truncate_to_tokens(result, max_tokens)
+    return result
+
+
+def _compress_for_search_results(
+    pruned_html: str,
+    max_tokens: int,
+    chunks: list[HtmlChunk] | None = None,
+    metadata: dict | None = None,
+    lc: LocaleConfig | None = None,
+    card_strategy_hint: str | None = None,
+    doc: Any = None,
+    enable_lang_filter: bool = False,
+) -> str:
+    """Compression for search result pages.
+
+    Card detection path: structured cards with name+price pairs.
+    Fallback: legacy text-line extraction.
+    """
+    if lc is None:
+        lc = get_locale(None)
+    # Try card detection first
+    cards = _detect_product_cards(chunks, metadata, card_strategy_hint=card_strategy_hint, doc=doc)
+    if cards:
+        return _build_card_output(pruned_html, cards, max_tokens, lc=lc)
+
+    # Legacy fallback: text-line based extraction
+    lines = _extract_text_lines_filtered(pruned_html, lc=lc, enable_lang_filter=enable_lang_filter)
+
+    sections: dict[str, list[str]] = {
+        "result_count": [],
+        "products": [],
+        "filters": [],
+    }
+
+    _search_kw = tuple(t.lower() for t in SEARCH_RESULT_TERMS)
+    _filter_kw = tuple(t.lower() for t in FILTER_TERMS)
+
+    for line in lines:
+        if len(line) < 2:
+            continue
+        line_lower = line.lower()
+
+        if any(kw in line_lower for kw in _search_kw):
+            sections["result_count"].append(line)
+        elif PRICE_PATTERN.search(line):
+            sections["products"].append(line)
+        elif any(kw in line_lower for kw in _filter_kw):
+            sections["filters"].append(line[:100])
+
+    parts = sections["result_count"][:2]
+    parts.extend(p[:150] for p in sections["products"][:10])
+    parts.extend(sections["filters"][:3])
+
+    result = "\n".join(parts)
+    if count_tokens(result) > max_tokens:
+        result = _truncate_to_tokens(result, max_tokens)
+    return result
+
+
+def _compress_for_listing(
+    pruned_html: str,
+    max_tokens: int,
+    chunks: list[HtmlChunk] | None = None,
+    metadata: dict | None = None,
+    lc: LocaleConfig | None = None,
+    card_strategy_hint: str | None = None,
+    doc: Any = None,
+    enable_lang_filter: bool = False,
+) -> str:
+    """Compression for listing/ranking pages.
+
+    Card detection path: structured cards with name+price pairs.
+    Fallback: legacy text-line extraction.
+    """
+    if lc is None:
+        lc = get_locale(None)
+    # Try card detection first
+    cards = _detect_product_cards(chunks, metadata, card_strategy_hint=card_strategy_hint, doc=doc)
+    if cards:
+        return _build_card_output(pruned_html, cards, max_tokens, lc=lc)
+
+    # Legacy fallback: text-line based extraction
+    lines = _extract_text_lines_filtered(pruned_html, lc=lc, enable_lang_filter=enable_lang_filter)
+
+    sections: dict[str, list[str]] = {
+        "title": [],
+        "products": [],
+        "sort_filter": [],
+    }
+
+    _listing_kw = tuple(t.lower() for t in LISTING_TERMS)
+    _filter_kw = tuple(t.lower() for t in FILTER_TERMS)
+
+    for line in lines:
+        if len(line) < 2:
+            continue
+        line_lower = line.lower()
+
+        if any(kw in line_lower for kw in _listing_kw):
+            sections["title"].append(line)
+        elif PRICE_PATTERN.search(line):
+            sections["products"].append(line)
+        elif any(kw in line_lower for kw in _filter_kw):
+            sections["sort_filter"].append(line[:100])
+
+    parts = sections["title"][:2]
+    parts.extend(p[:150] for p in sections["products"][:10])
+    parts.extend(sections["sort_filter"][:3])
+
+    result = "\n".join(parts)
+    if count_tokens(result) > max_tokens:
+        result = _truncate_to_tokens(result, max_tokens)
+    return result
+
+
+def _build_card_output(
+    pruned_html: str,
+    cards: list[dict[str, Any]],
+    max_tokens: int,
+    lc: LocaleConfig | None = None,
+) -> str:
+    """Build structured output from detected cards + page status header."""
+    if lc is None:
+        lc = get_locale(None)
+    parts: list[str] = []
+
+    _heading_kw = tuple(t.lower() for t in LISTING_TERMS + SEARCH_RESULT_TERMS)
+    _count_kw = tuple(t.lower() for t in SEARCH_RESULT_TERMS + FILTER_TERMS)
+
+    # Extract page status header from text
+    lines = _extract_text_lines(pruned_html)
+    for line in lines[:15]:  # only check early lines
+        line_lower = line.lower()
+        if any(kw in line_lower for kw in _heading_kw):
+            parts.append(line[:150])
+            break
+
+    # Result count / sort info
+    for line in lines[:20]:
+        line_lower = line.lower()
+        if any(kw in line_lower for kw in _count_kw):
+            if line not in parts:
+                parts.append(line[:150])
+                if len(parts) >= 3:
+                    break
+
+    # Serialized cards
+    parts.append(_serialize_cards(cards, lc=lc))
+
+    result = "\n".join(parts)
+    if count_tokens(result) > max_tokens:
+        result = _truncate_to_tokens(result, max_tokens)
+    return result
+
+
+def _calibrate_chars_per_token(lines: list[str], min_len: int, max_line_len: int) -> float:
+    """Calibrate chars/token ratio from a sample of lines.
+
+    One tiktoken call on a joined sample. Used to convert token budget
+    to char budget for O(1)-per-line accumulation loops.
+    """
+    sample_parts = []
+    for line in lines:
+        if len(line) < min_len:
+            continue
+        sample_parts.append(line[:max_line_len])
+        if len(sample_parts) >= 20:
+            break
+    if not sample_parts:
+        return 4.0  # English default
+    sample = "\n".join(sample_parts)
+    tok = count_tokens(sample)
+    if tok == 0:
+        return 4.0
+    return max(len(sample) / tok, 1.5)  # floor 1.5: safe for extreme CJK
+
+
+def _compress_default(pruned_html: str, max_tokens: int) -> str:
+    """Default compression: headings + significant text blocks."""
+    lines = _extract_text_lines(pruned_html)
+    cpt = _calibrate_chars_per_token(lines, min_len=5, max_line_len=300)
+    char_budget = int(max_tokens * cpt * 0.95)
+
+    parts: list[str] = []
+    running_chars = 0
+    for line in lines:
+        if len(line) < 5:
+            continue
+        text = line[:300]
+        cost = len(text) + 1
+        if running_chars + cost > char_budget:
+            break
+        parts.append(text)
+        running_chars += cost
+
+    result = "\n".join(parts)
+    if count_tokens(result) > max_tokens:
+        result = _truncate_to_tokens(result, max_tokens)
+    return result
+
+
+def _truncate_to_tokens(text: str, max_tokens: int) -> str:
+    """Truncate text to fit within token budget."""
+    import tiktoken
+
+    enc = tiktoken.get_encoding("cl100k_base")
+    tokens = enc.encode(text)
+    if len(tokens) <= max_tokens:
+        return text
+    truncated = enc.decode(tokens[:max_tokens])
+    return truncated
+
+
+# ---------------------------------------------------------------------------
+# Minimum Content Guarantee (MCG)
+# ---------------------------------------------------------------------------
+
+_MCG_MIN_TOKENS = 10
+_MCG_SKIP_TYPES = frozenset({"login", "error", "form", "settings"})
+
+
+def _extract_minimum_content(
+    meta_chunks: list[HtmlChunk],
+    pruned_html: str,
+    raw_html: str,
+    max_tokens: int,
+    lc: LocaleConfig | None = None,
+) -> str:
+    """Minimum content guarantee: never return empty for a real page.
+
+    Priority cascade:
+    1. OG title + description (from meta_chunks, already extracted)
+    2. Text lines from pruned_html (post-AOM, cleaner)
+    3. Text lines from raw_html (last resort)
+    """
+    parts: list[str] = []
+
+    # 1. OG meta: title + description from meta_chunks
+    # Preprocessor stores OG data as attrs={'og:title': '...', 'og:description': '...'}
+    for chunk in meta_chunks:
+        if chunk.tag == "meta":
+            # Try preprocessor format first (og:title as key)
+            og_title = chunk.attrs.get("og:title", "")
+            og_desc = chunk.attrs.get("og:description", "")
+            if og_title:
+                parts.append(og_title.strip())
+            if og_desc:
+                parts.append(og_desc.strip())
+            # Also check standard format (property + content)
+            if not og_title and not og_desc:
+                prop = chunk.attrs.get("property", "") or chunk.attrs.get("name", "")
+                content = chunk.attrs.get("content", "")
+                if prop in ("og:title", "title") and content or prop in ("og:description", "description") and content:
+                    parts.append(content.strip())
+
+    # 2. Text from pruned_html (post-AOM, cleaner)
+    if count_tokens("\n".join(parts)) < _MCG_MIN_TOKENS and pruned_html:
+        lines = _extract_text_lines(pruned_html)
+        cpt = _calibrate_chars_per_token(lines, min_len=10, max_line_len=300)
+        char_budget = int((max_tokens // 2) * cpt)
+        _acc_chars = sum(len(p) for p in parts) + len(parts)
+        for line in lines:
+            if len(line) > 10:
+                parts.append(line)
+                _acc_chars += len(line) + 1
+            if _acc_chars >= char_budget:
+                break
+
+    # 3. Last resort: raw_html
+    if count_tokens("\n".join(parts)) < _MCG_MIN_TOKENS and raw_html:
+        lines = _extract_text_lines(raw_html)
+        cpt = _calibrate_chars_per_token(lines, min_len=10, max_line_len=300)
+        char_budget = int((max_tokens // 2) * cpt)
+        _acc_chars = sum(len(p) for p in parts) + len(parts)
+        for line in lines:
+            if len(line) > 10:
+                parts.append(line)
+                _acc_chars += len(line) + 1
+            if _acc_chars >= char_budget:
+                break
+
+    result = "\n".join(parts)
+    if count_tokens(result) > max_tokens:
+        result = _truncate_to_tokens(result, max_tokens)
+    return result
+
+
+_NO_TEMPLATE = object()  # sentinel: distinguishes "not passed" from "passed as None"
+
+
+# ---------------------------------------------------------------------------
+# Dispatch table for page-type-specific compression
+# ---------------------------------------------------------------------------
+
+
+@dataclass(slots=True)
+class CompressorContext:
+    """Bundled arguments for page-type-specific compression."""
+
+    pruned_html: str
+    max_tokens: int
+    chunks: list[HtmlChunk] | None = None
+    metadata: dict | None = None
+    lc: LocaleConfig | None = None
+    card_strategy_hint: str | None = None
+    doc: Any = None  # lxml.html.HtmlElement for DOM card detection (pre-parsed)
+    enable_lang_filter: bool = False
+    schema_name: str = ""
+    raw_html: str = ""  # for fallback extraction on gutted DOMs
+    decisions: dict | None = None  # xpath → PruneDecision for score-based chunk selection
+
+
+def _compress_product_dispatch(ctx: CompressorContext) -> str:
+    return _compress_for_product(
+        ctx.pruned_html,
+        ctx.max_tokens,
+        metadata=ctx.metadata,
+        lc=ctx.lc,
+        enable_lang_filter=ctx.enable_lang_filter,
+        doc=ctx.doc,
+    )
+
+
+def _compress_search_dispatch(ctx: CompressorContext) -> str:
+    return _compress_for_search_results(
+        ctx.pruned_html,
+        ctx.max_tokens,
+        chunks=ctx.chunks,
+        metadata=ctx.metadata,
+        lc=ctx.lc,
+        card_strategy_hint=ctx.card_strategy_hint,
+        doc=ctx.doc,
+        enable_lang_filter=ctx.enable_lang_filter,
+    )
+
+
+def _compress_listing_dispatch(ctx: CompressorContext) -> str:
+    return _compress_for_listing(
+        ctx.pruned_html,
+        ctx.max_tokens,
+        chunks=ctx.chunks,
+        metadata=ctx.metadata,
+        lc=ctx.lc,
+        card_strategy_hint=ctx.card_strategy_hint,
+        doc=ctx.doc,
+        enable_lang_filter=ctx.enable_lang_filter,
+    )
+
+
+def _compress_article_dispatch(ctx: CompressorContext) -> str:
+    return _compress_for_article(ctx.pruned_html, ctx.max_tokens, chunks=ctx.chunks, metadata=ctx.metadata, lc=ctx.lc)
+
+
+def _compress_default_dispatch(ctx: CompressorContext) -> str:
+    return _compress_default(ctx.pruned_html, ctx.max_tokens)
+
+
+# ---------------------------------------------------------------------------
+# P7.1: New page-type compressors
+# ---------------------------------------------------------------------------
+
+
+def _compress_for_login(pruned_html: str, max_tokens: int) -> str:
+    """Login page: form fields, social login buttons, error messages, forgot password."""
+    lines = _extract_text_lines(pruned_html)
+
+    parts: list[str] = []
+
+    # Error/validation messages (priority — no budget check)
+    for line in lines:
+        ll = line.lower()
+        if any(kw in ll for kw in ("error", "invalid", "incorrect", "실패", "오류", "잘못", "エラー")):
+            parts.append(f"[error] {line[:200]}")
+
+    # Calibrate + account for existing parts
+    cpt = _calibrate_chars_per_token(lines, min_len=5, max_line_len=200)
+    char_budget = int(max_tokens * cpt * 0.95)
+    running_chars = sum(len(p) + 1 for p in parts)
+
+    # Form field labels + social login
+    for line in lines:
+        ll = line.lower()
+        if any(
+            kw in ll
+            for kw in (
+                "email",
+                "password",
+                "username",
+                "이메일",
+                "비밀번호",
+                "아이디",
+                "remember",
+                "forgot",
+                "비밀번호 찾기",
+                "소셜",
+                "social",
+                "google",
+                "facebook",
+                "apple",
+                "kakao",
+                "naver",
+            )
+        ):
+            text = line[:200]
+            cost = len(text) + 1
+            if running_chars + cost > char_budget:
+                break
+            parts.append(text)
+            running_chars += cost
+
+    if not parts:
+        return _compress_default(pruned_html, max_tokens)
+
+    result = "\n".join(parts)
+    if count_tokens(result) > max_tokens:
+        result = _truncate_to_tokens(result, max_tokens)
+    return result
+
+
+def _compress_for_checkout(pruned_html: str, max_tokens: int) -> str:
+    """Checkout: cart items + total, current step, payment methods, shipping."""
+    lines = _extract_text_lines(pruned_html)
+    cpt = _calibrate_chars_per_token(lines, min_len=1, max_line_len=300)
+    char_budget = int(max_tokens * cpt * 0.95)
+
+    parts: list[str] = []
+    running_chars = 0
+
+    for line in lines:
+        ll = line.lower()
+        # Prioritize: totals, items, step info, payment, shipping
+        if any(
+            kw in ll
+            for kw in (
+                "total",
+                "합계",
+                "소계",
+                "subtotal",
+                "合計",
+                "step",
+                "단계",
+                "ステップ",
+                "payment",
+                "결제",
+                "お支払い",
+                "card",
+                "카드",
+                "shipping",
+                "배송",
+                "配送",
+                "address",
+                "주소",
+                "order",
+                "주문",
+                "注文",
+            )
+        ):
+            text = line[:300]
+            cost = len(text) + 1
+            if running_chars + cost > char_budget:
+                break
+            parts.append(text)
+            running_chars += cost
+
+    if not parts:
+        return _compress_default(pruned_html, max_tokens)
+
+    result = "\n".join(parts)
+    if count_tokens(result) > max_tokens:
+        result = _truncate_to_tokens(result, max_tokens)
+    return result
+
+
+def _compress_for_form(pruned_html: str, max_tokens: int) -> str:
+    """Form page: label+input pairs, required markers, validation errors, submit."""
+    lines = _extract_text_lines(pruned_html)
+
+    parts: list[str] = []
+
+    # Errors first (no budget check)
+    for line in lines:
+        ll = line.lower()
+        if any(kw in ll for kw in ("error", "invalid", "required", "필수", "오류", "必須", "エラー")):
+            parts.append(f"[validation] {line[:200]}")
+
+    # Calibrate + account for existing parts
+    cpt = _calibrate_chars_per_token(lines, min_len=5, max_line_len=200)
+    char_budget = int(max_tokens * cpt * 0.95)
+    running_chars = sum(len(p) + 1 for p in parts)
+
+    # Labels and field-related text
+    for line in lines:
+        ll = line.lower()
+        if any(
+            kw in ll
+            for kw in (
+                "name",
+                "email",
+                "phone",
+                "이름",
+                "이메일",
+                "전화",
+                "연락처",
+                "message",
+                "메시지",
+                "comment",
+                "submit",
+                "제출",
+                "등록",
+                "label",
+                "field",
+                "select",
+                "choose",
+                "선택",
+            )
+        ):
+            text = line[:200]
+            cost = len(text) + 1
+            if running_chars + cost > char_budget:
+                break
+            parts.append(text)
+            running_chars += cost
+
+    if not parts:
+        return _compress_default(pruned_html, max_tokens)
+
+    result = "\n".join(parts)
+    if count_tokens(result) > max_tokens:
+        result = _truncate_to_tokens(result, max_tokens)
+    return result
+
+
+def _is_news_portal(pruned_html: str, *, doc: Any = None, schema_name: str = "") -> bool:
+    """Detect news portal pattern in dashboard-classified pages."""
+    if schema_name in _NEWS_SCHEMA_NAMES:
+        return True
+    if doc is not None:
+        # Single-pass DOM detection (handles nested articles correctly)
+        article_count = 0
+        headline_link_count = 0
+        for el in doc.iter():
+            if not isinstance(el.tag, str):
+                continue
+            if el.tag == "article":
+                article_count += 1
+            elif el.tag in ("h2", "h3"):
+                if any(isinstance(c.tag, str) and c.tag == "a" for c in el):
+                    headline_link_count += 1
+        return article_count >= 3 or headline_link_count >= 3
+    # Fallback: simple string counting (rare — doc almost always available)
+    return pruned_html.lower().count("<article") >= 3
+
+
+def _compress_for_news_portal(pruned_html: str, max_tokens: int, *, doc: Any = None, raw_html: str = "") -> str:
+    """News portal: numbered headline list with optional summaries."""
+    headlines: list[tuple[str, str]] = []  # (headline, summary)
+
+    if doc is not None:
+        # Strategy A: Extract from <article> elements via DOM
+        seen: set[str] = set()
+        for el in doc.iter():
+            if not (isinstance(el.tag, str) and el.tag == "article"):
+                continue
+            # Find first h2/h3 descendant; track position for summary search
+            headline_text = ""
+            headline_el = None
+            for h in el.iter():
+                if isinstance(h.tag, str) and h.tag in ("h2", "h3"):
+                    headline_text = (h.text_content() or "").strip()
+                    headline_el = h
+                    break
+            if not headline_text or len(headline_text) < 5:
+                continue
+            key = headline_text.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            # Optional summary: first <p> that appears after the headline in
+            # document order (avoids picking up bylines/dates before the title)
+            summary = ""
+            past_headline = False
+            for p in el.iter():
+                if p is headline_el:
+                    past_headline = True
+                    continue
+                if not past_headline:
+                    continue
+                if isinstance(p.tag, str) and p.tag == "p":
+                    s = (p.text_content() or "").strip()
+                    if s and len(s) >= 10:
+                        summary = s
+                        break
+            headlines.append((headline_text[:200], summary[:200]))
+
+        # Strategy B: standalone h2/h3 with <a> children (no article wrappers)
+        if not headlines:
+            seen_b: set[str] = set()
+            for el in doc.iter():
+                if not (isinstance(el.tag, str) and el.tag in ("h2", "h3")):
+                    continue
+                if not any(isinstance(c.tag, str) and c.tag == "a" for c in el):
+                    continue
+                text = (el.text_content() or "").strip()
+                if not text or len(text) < 5:
+                    continue
+                key = text.lower()
+                if key not in seen_b:
+                    seen_b.add(key)
+                    headlines.append((text[:200], ""))
+
+    if not headlines and raw_html:
+        # Fallback: re-parse raw HTML for headlines lost to AOM pruning
+        try:
+            import lxml.html as _lxml_html
+
+            raw_doc = _lxml_html.fromstring(raw_html)
+            seen_raw: set[str] = set()
+            for el in raw_doc.iter():
+                if not isinstance(el.tag, str):
+                    continue
+                if el.tag in ("h2", "h3"):
+                    text = (el.text_content() or "").strip()
+                    if text and len(text) >= 10 and text.lower() not in seen_raw:
+                        seen_raw.add(text.lower())
+                        headlines.append((text[:200], ""))
+        except Exception:  # nosec B110
+            pass
+
+    if not headlines:
+        # doc=None: detection succeeded via string fallback but DOM extraction
+        # unavailable — _compress_default is still better than dashboard keyword filter.
+        # Also covers articles that contain no h2/h3 headlines.
+        return _compress_default(pruned_html, max_tokens)
+
+    # Budget-aware numbered list (same pattern as all other compressors)
+    lines = _extract_text_lines(pruned_html)
+    cpt = _calibrate_chars_per_token(lines, min_len=5, max_line_len=200)
+    char_budget = int(max_tokens * cpt * 0.95)
+
+    parts: list[str] = []
+    running_chars = 0
+    for i, (headline, summary) in enumerate(headlines, 1):
+        entry = f"{i}. {headline}"
+        if summary:
+            entry += f"\n   {summary}"
+        cost = len(entry) + 1
+        if running_chars + cost > char_budget:
+            break
+        parts.append(entry)
+        running_chars += cost
+
+    if not parts:
+        return _compress_default(pruned_html, max_tokens)
+
+    result = "\n".join(parts)
+    if count_tokens(result) > max_tokens:
+        result = _truncate_to_tokens(result, max_tokens)
+    return result
+
+
+def _compress_for_dashboard(
+    pruned_html: str, max_tokens: int, *, doc: Any = None, schema_name: str = "", raw_html: str = ""
+) -> str:
+    """Dashboard: key metrics, table summaries (header+row count), navigation."""
+    if _is_news_portal(pruned_html, doc=doc, schema_name=schema_name):
+        return _compress_for_news_portal(pruned_html, max_tokens, doc=doc, raw_html=raw_html)
+    lines = _extract_text_lines(pruned_html)
+    cpt = _calibrate_chars_per_token(lines, min_len=5, max_line_len=300)
+    char_budget = int(max_tokens * cpt * 0.95)
+
+    parts: list[str] = []
+    running_chars = 0
+
+    # Headings and metrics
+    for line in lines:
+        if len(line) < 5:
+            continue
+        ll = line.lower()
+        # Short metric-like lines or headings
+        if len(line) < 80 or any(
+            kw in ll
+            for kw in (
+                "total",
+                "합계",
+                "count",
+                "average",
+                "revenue",
+                "users",
+                "views",
+                "매출",
+                "건수",
+                "analytics",
+                "metric",
+            )
+        ):
+            text = line[:300]
+            cost = len(text) + 1
+            if running_chars + cost > char_budget:
+                break
+            parts.append(text)
+            running_chars += cost
+
+    if not parts:
+        return _compress_default(pruned_html, max_tokens)
+
+    result = "\n".join(parts)
+    if count_tokens(result) > max_tokens:
+        result = _truncate_to_tokens(result, max_tokens)
+    return result
+
+
+def _compress_for_help_faq(pruned_html: str, max_tokens: int) -> str:
+    """FAQ/Help: Q&A list (numbered), category navigation."""
+    lines = _extract_text_lines(pruned_html)
+    cpt = _calibrate_chars_per_token(lines, min_len=5, max_line_len=200)
+    char_budget = int(max_tokens * cpt * 0.95)
+
+    parts: list[str] = []
+    running_chars = 0
+    q_num = 0
+
+    for line in lines:
+        if len(line) < 5:
+            continue
+        # Question-like lines (short, often end with ?)
+        if "?" in line or "？" in line or len(line) < 120:
+            q_num += 1
+            text = f"Q{q_num}. {line[:200]}"
+            cost = len(text) + 1
+            if running_chars + cost > char_budget:
+                break
+            parts.append(text)
+            running_chars += cost
+
+    if not parts:
+        return _compress_default(pruned_html, max_tokens)
+
+    result = "\n".join(parts)
+    if count_tokens(result) > max_tokens:
+        result = _truncate_to_tokens(result, max_tokens)
+    return result
+
+
+def _compress_for_settings(pruned_html: str, max_tokens: int) -> str:
+    """Settings: section headings, field labels + current values, toggle states."""
+    lines = _extract_text_lines(pruned_html)
+    cpt = _calibrate_chars_per_token(lines, min_len=3, max_line_len=200)
+    char_budget = int(max_tokens * cpt * 0.95)
+
+    parts: list[str] = []
+    running_chars = 0
+
+    for line in lines:
+        if len(line) < 3:
+            continue
+        ll = line.lower()
+        if any(
+            kw in ll
+            for kw in (
+                "setting",
+                "preference",
+                "notification",
+                "설정",
+                "알림",
+                "profile",
+                "프로필",
+                "account",
+                "계정",
+                "privacy",
+                "개인정보",
+                "language",
+                "언어",
+                "theme",
+                "테마",
+                "on",
+                "off",
+                "enable",
+                "disable",
+                "활성",
+                "비활성",
+            )
+        ):
+            text = line[:200]
+            cost = len(text) + 1
+            if running_chars + cost > char_budget:
+                break
+            parts.append(text)
+            running_chars += cost
+
+    if not parts:
+        return _compress_default(pruned_html, max_tokens)
+
+    result = "\n".join(parts)
+    if count_tokens(result) > max_tokens:
+        result = _truncate_to_tokens(result, max_tokens)
+    return result
+
+
+def _compress_for_error(pruned_html: str, max_tokens: int) -> str:
+    """Error page: status code, error message, available actions."""
+    lines = _extract_text_lines(pruned_html)
+    cpt = _calibrate_chars_per_token(lines, min_len=3, max_line_len=200)
+    char_budget = int(max_tokens * cpt * 0.95)
+
+    parts: list[str] = []
+    running_chars = 0
+
+    for line in lines:
+        if len(line) < 3:
+            continue
+        text = line[:200]
+        cost = len(text) + 1
+        if running_chars + cost > char_budget:
+            break
+        parts.append(text)
+        running_chars += cost
+
+    result = "\n".join(parts) if parts else ""
+    if not result:
+        return _compress_default(pruned_html, max_tokens)
+    if count_tokens(result) > max_tokens:
+        result = _truncate_to_tokens(result, max_tokens)
+    return result
+
+
+def _compress_for_documentation(pruned_html: str, max_tokens: int) -> str:
+    """Documentation: heading outline, code blocks (first N lines), API signatures."""
+    lines = _extract_text_lines(pruned_html)
+    cpt = _calibrate_chars_per_token(lines, min_len=3, max_line_len=200)
+    char_budget = int(max_tokens * cpt * 0.95)
+
+    parts: list[str] = []
+    running_chars = 0
+
+    for line in lines:
+        if len(line) < 3:
+            continue
+        # Headings (short lines, likely headings)
+        if len(line) < 80:
+            text = line[:200]
+        # Code-like lines
+        elif any(
+            kw in line for kw in ("def ", "function ", "class ", "import ", "const ", "export ", "->", "=>", "return ")
+        ):
+            text = f"  {line[:200]}"
+        else:
+            continue
+
+        cost = len(text) + 1
+        if running_chars + cost > char_budget:
+            break
+        parts.append(text)
+        running_chars += cost
+
+    if not parts:
+        return _compress_default(pruned_html, max_tokens)
+
+    result = "\n".join(parts)
+    if count_tokens(result) > max_tokens:
+        result = _truncate_to_tokens(result, max_tokens)
+    return result
+
+
+def _compress_for_landing(pruned_html: str, max_tokens: int) -> str:
+    """Landing page: hero text, CTA buttons, major section titles."""
+    lines = _extract_text_lines(pruned_html)
+    cpt = _calibrate_chars_per_token(lines, min_len=5, max_line_len=200)
+    char_budget = int(max_tokens * cpt * 0.95)
+
+    parts: list[str] = []
+    running_chars = 0
+
+    for line in lines:
+        if len(line) < 5:
+            continue
+        # Short lines are likely headings/CTAs; keep them
+        if len(line) < 100:
+            text = line[:200]
+            cost = len(text) + 1
+            if running_chars + cost > char_budget:
+                break
+            parts.append(text)
+            running_chars += cost
+
+    if not parts:
+        return _compress_default(pruned_html, max_tokens)
+
+    result = "\n".join(parts)
+    if count_tokens(result) > max_tokens:
+        result = _truncate_to_tokens(result, max_tokens)
+    return result
+
+
+# Dispatch wrappers for new types
+
+
+def _compress_login_dispatch(ctx: CompressorContext) -> str:
+    return _compress_for_login(ctx.pruned_html, ctx.max_tokens)
+
+
+def _compress_checkout_dispatch(ctx: CompressorContext) -> str:
+    return _compress_for_checkout(ctx.pruned_html, ctx.max_tokens)
+
+
+def _compress_form_dispatch(ctx: CompressorContext) -> str:
+    return _compress_for_form(ctx.pruned_html, ctx.max_tokens)
+
+
+def _compress_dashboard_dispatch(ctx: CompressorContext) -> str:
+    return _compress_for_dashboard(
+        ctx.pruned_html, ctx.max_tokens, doc=ctx.doc, schema_name=ctx.schema_name, raw_html=ctx.raw_html
+    )
+
+
+def _compress_help_faq_dispatch(ctx: CompressorContext) -> str:
+    return _compress_for_help_faq(ctx.pruned_html, ctx.max_tokens)
+
+
+def _compress_settings_dispatch(ctx: CompressorContext) -> str:
+    return _compress_for_settings(ctx.pruned_html, ctx.max_tokens)
+
+
+def _compress_error_dispatch(ctx: CompressorContext) -> str:
+    return _compress_for_error(ctx.pruned_html, ctx.max_tokens)
+
+
+def _compress_documentation_dispatch(ctx: CompressorContext) -> str:
+    return _compress_for_documentation(ctx.pruned_html, ctx.max_tokens)
+
+
+def _compress_landing_dispatch(ctx: CompressorContext) -> str:
+    return _compress_for_landing(ctx.pruned_html, ctx.max_tokens)
+
+
+# ---------------------------------------------------------------------------
+# Schema-aware compressors (SaaSPage, GovernmentPage, WikiArticle)
+# ---------------------------------------------------------------------------
+
+# Pre-computed lowered keyword sets for schema compressors
+_saas_pricing_kw = tuple(t.lower() for t in PRICING_TERMS) + (
+    "plan",
+    "free",
+    "pro",
+    "enterprise",
+    "tier",
+    "/mo",
+    "/yr",
+    "플랜",
+    "무료",
+    "유료",
+    "プラン",
+    "套餐",
+)
+_saas_feature_kw = tuple(t.lower() for t in FEATURE_TERMS) + (
+    "integration",
+    "api",
+    "support",
+    "연동",
+    "지원",
+    "サポート",
+    "集成",
+)
+_gov_department_kw = tuple(t.lower() for t in DEPARTMENT_TERMS)
+_gov_contact_kw = tuple(t.lower() for t in CONTACT_TERMS)
+_gov_service_kw = (
+    "service",
+    "서비스",
+    "안내",
+    "공지",
+    "notice",
+    "신청",
+    "apply",
+    "サービス",
+    "お知らせ",
+    "服务",
+    "通知",
+)
+
+
+def _compress_for_saas(
+    pruned_html: str,
+    max_tokens: int,
+    metadata: dict | None = None,
+    lc: LocaleConfig | None = None,
+) -> str:
+    """Compression for SaaS pages: product info, pricing plans, features."""
+    if lc is None:
+        lc = get_locale(None)
+    parts: list[str] = []
+
+    # Phase 1: metadata (OG source)
+    if metadata:
+        if metadata.get("name"):
+            parts.append(f"{lc.label_title}: {metadata['name']}")
+        if metadata.get("description"):
+            parts.append(metadata["description"][:200])
+        if metadata.get("publisher"):
+            parts.append(metadata["publisher"])
+
+    # Phase 2: regex fallback
+    lines = _extract_text_lines(pruned_html)
+    cpt = _calibrate_chars_per_token(lines, min_len=5, max_line_len=300)
+    char_budget = int(max_tokens * cpt * 0.95)
+    running_chars = sum(len(p) + 1 for p in parts)
+
+    title_found = bool(parts)
+    pricing_lines: list[str] = []
+    feature_lines: list[str] = []
+    desc_lines: list[str] = []
+
+    for line in lines:
+        if len(line) < 5:
+            continue
+        line_lower = line.lower()
+
+        if not title_found and len(line) > 10:
+            text = f"{lc.label_title}: {line}"
+            cost = len(text) + 1
+            if running_chars + cost <= char_budget:
+                parts.append(text)
+                running_chars += cost
+                title_found = True
+            continue
+
+        if any(kw in line_lower for kw in _saas_pricing_kw) or PRICE_PATTERN.search(line):
+            pricing_lines.append(line[:200])
+        elif any(kw in line_lower for kw in _saas_feature_kw):
+            feature_lines.append(line[:200])
+        elif len(line) >= 50 and len(desc_lines) < 3:
+            desc_lines.append(line[:200])
+
+    for line in pricing_lines[:5]:
+        cost = len(line) + 1
+        if running_chars + cost > char_budget:
+            break
+        parts.append(line)
+        running_chars += cost
+
+    for line in feature_lines[:5]:
+        cost = len(line) + 1
+        if running_chars + cost > char_budget:
+            break
+        parts.append(line)
+        running_chars += cost
+
+    for line in desc_lines:
+        cost = len(line) + 1
+        if running_chars + cost > char_budget:
+            break
+        parts.append(line)
+        running_chars += cost
+
+    if not parts:
+        return _compress_default(pruned_html, max_tokens)
+
+    result = "\n".join(parts)
+    if count_tokens(result) > max_tokens:
+        result = _truncate_to_tokens(result, max_tokens)
+    return result
+
+
+def _compress_for_government(
+    pruned_html: str,
+    max_tokens: int,
+    metadata: dict | None = None,
+    lc: LocaleConfig | None = None,
+) -> str:
+    """Compression for government pages: department, services, contact, dates."""
+    if lc is None:
+        lc = get_locale(None)
+    parts: list[str] = []
+
+    # Phase 1: metadata (OG source)
+    if metadata:
+        if metadata.get("title"):
+            parts.append(f"{lc.label_title}: {metadata['title']}")
+        if metadata.get("department"):
+            parts.append(metadata["department"])
+        if metadata.get("description"):
+            parts.append(metadata["description"][:200])
+
+    # Phase 2: regex fallback
+    lines = _extract_text_lines(pruned_html)
+    cpt = _calibrate_chars_per_token(lines, min_len=5, max_line_len=300)
+    char_budget = int(max_tokens * cpt * 0.95)
+    running_chars = sum(len(p) + 1 for p in parts)
+
+    title_found = bool(parts)
+    department_lines: list[str] = []
+    date_lines: list[str] = []
+    contact_lines: list[str] = []
+    service_lines: list[str] = []
+    body_lines: list[str] = []
+
+    for line in lines:
+        if len(line) < 5:
+            continue
+        line_lower = line.lower()
+
+        if not title_found and len(line) > 10:
+            text = f"{lc.label_title}: {line}"
+            cost = len(text) + 1
+            if running_chars + cost <= char_budget:
+                parts.append(text)
+                running_chars += cost
+                title_found = True
+            continue
+
+        if any(kw in line_lower for kw in _gov_department_kw):
+            department_lines.append(line[:200])
+        elif _DATE_PATTERN_RE.search(line):
+            date_lines.append(line[:200])
+        elif any(kw in line_lower for kw in _gov_contact_kw):
+            contact_lines.append(line[:200])
+        elif any(kw in line_lower for kw in _gov_service_kw):
+            service_lines.append(line[:200])
+        elif len(line) >= 30 and len(body_lines) < 3:
+            body_lines.append(line[:300])
+
+    budget_exhausted = False
+    for bucket in (department_lines[:3], date_lines[:2], contact_lines[:3], service_lines[:5]):
+        for line in bucket:
+            cost = len(line) + 1
+            if running_chars + cost > char_budget:
+                budget_exhausted = True
+                break
+            parts.append(line)
+            running_chars += cost
+        if budget_exhausted:
+            break
+
+    for line in body_lines:
+        cost = len(line) + 1
+        if running_chars + cost > char_budget:
+            break
+        parts.append(line)
+        running_chars += cost
+
+    if not parts:
+        return _compress_default(pruned_html, max_tokens)
+
+    result = "\n".join(parts)
+    if count_tokens(result) > max_tokens:
+        result = _truncate_to_tokens(result, max_tokens)
+    return result
+
+
+def _compress_for_wiki(
+    pruned_html: str,
+    max_tokens: int,
+    chunks: list[HtmlChunk] | None = None,
+    metadata: dict | None = None,
+    lc: LocaleConfig | None = None,
+) -> str:
+    """Compression for wiki/encyclopedia pages: structured outline from chunks."""
+    if lc is None:
+        lc = get_locale(None)
+    parts: list[str] = []
+
+    # Phase 1: metadata (OG source)
+    if metadata:
+        if metadata.get("title"):
+            parts.append(f"{lc.label_title}: {metadata['title']}")
+        if metadata.get("summary"):
+            parts.append(metadata["summary"][:300])
+
+    # Phase 2: chunk-based (structural)
+    lines = _extract_text_lines(pruned_html)
+    cpt = _calibrate_chars_per_token(lines, min_len=5, max_line_len=300)
+    char_budget = int(max_tokens * cpt * 0.95)
+    running_chars = sum(len(p) + 1 for p in parts)
+
+    if chunks:
+        current_heading: str | None = None
+        body_count = 0
+        for chunk in chunks:
+            if chunk.chunk_type == ChunkType.HEADING:
+                heading_text = chunk.text.strip()
+                if not heading_text:
+                    continue
+                text = f"## {heading_text}"
+                cost = len(text) + 1
+                if running_chars + cost > char_budget:
+                    break
+                parts.append(text)
+                running_chars += cost
+                current_heading = heading_text
+                body_count = 0
+            elif chunk.chunk_type == ChunkType.TEXT_BLOCK and current_heading is not None:
+                if body_count >= 2:
+                    continue
+                block_text = chunk.text.strip()
+                if not block_text:
+                    continue
+                text = block_text[:300]
+                cost = len(text) + 1
+                if running_chars + cost > char_budget:
+                    break
+                parts.append(text)
+                running_chars += cost
+                body_count += 1
+    else:
+        # Phase 3: text fallback (no chunks)
+        summary_count = 0
+        heading_lines: list[str] = []
+        section_body: list[str] = []
+        after_heading = False
+
+        for line in lines:
+            if len(line) < 5:
+                continue
+            # Long paragraphs → summary
+            if summary_count < 2 and len(line) >= 80:
+                text = line[:300]
+                cost = len(text) + 1
+                if running_chars + cost > char_budget:
+                    break
+                parts.append(text)
+                running_chars += cost
+                summary_count += 1
+                continue
+            # Short lines → headings
+            if len(line) < 80:
+                heading_lines.append(line)
+                after_heading = True
+                continue
+            # Lines after heading → section content
+            if after_heading and 30 <= len(line) <= 300:
+                section_body.append(line[:300])
+                after_heading = False
+
+        for line in heading_lines[:10]:
+            cost = len(line) + 1
+            if running_chars + cost > char_budget:
+                break
+            parts.append(f"## {line}")
+            running_chars += cost
+
+        for line in section_body[:5]:
+            cost = len(line) + 1
+            if running_chars + cost > char_budget:
+                break
+            parts.append(line)
+            running_chars += cost
+
+    if not parts:
+        return _compress_default(pruned_html, max_tokens)
+
+    result = "\n".join(parts)
+    if count_tokens(result) > max_tokens:
+        result = _truncate_to_tokens(result, max_tokens)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Video page compressor
+# ---------------------------------------------------------------------------
+
+
+def _format_count(n: int) -> str:
+    """Format a large number with K/M suffix."""
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}K"
+    return str(n)
+
+
+def _compress_for_video(
+    pruned_html: str,
+    max_tokens: int,
+    metadata: dict | None = None,
+    lc: LocaleConfig | None = None,
+) -> str:
+    """Compression for video pages: structured metadata output."""
+    if lc is None:
+        lc = get_locale(None)
+    parts: list[str] = []
+
+    if metadata:
+        if metadata.get("name"):
+            parts.append(f"{lc.label_title}: {metadata['name']}")
+        if metadata.get("channel"):
+            parts.append(f"Channel: {metadata['channel']}")
+        if metadata.get("upload_date"):
+            parts.append(f"Published: {metadata['upload_date']}")
+        if metadata.get("duration"):
+            parts.append(f"Duration: {metadata['duration']}")
+        # Interaction stats
+        stat_parts: list[str] = []
+        if metadata.get("view_count") is not None:
+            stat_parts.append(f"{_format_count(metadata['view_count'])} views")
+        if metadata.get("like_count") is not None:
+            stat_parts.append(f"{_format_count(metadata['like_count'])} likes")
+        if metadata.get("comment_count") is not None:
+            stat_parts.append(f"{_format_count(metadata['comment_count'])} comments")
+        if stat_parts:
+            parts.append(" | ".join(stat_parts))
+        # Description (budget-aware)
+        if metadata.get("description"):
+            lines = _extract_text_lines(pruned_html)
+            cpt = _calibrate_chars_per_token(lines, min_len=5, max_line_len=300)
+            # NOTE: CPT is calibrated on pruned_html text lines which may be
+            # English-heavy (~4 chars/token).  Video descriptions are often CJK
+            # (~1.5 chars/token), so we use a conservative 0.85 safety factor.
+            # The final _truncate_to_tokens() guard catches any overshoot.
+            char_budget = int(max_tokens * cpt * 0.85)
+            running_chars = sum(len(p) + 1 for p in parts)
+            desc = str(metadata["description"])
+            remaining = char_budget - running_chars
+            if remaining > 50:
+                parts.append(desc[:remaining])
+
+    if not parts:
+        # Text-line fallback
+        lines = _extract_text_lines(pruned_html)
+        cpt = _calibrate_chars_per_token(lines, min_len=5, max_line_len=300)
+        # 0.95 (not 0.85): text lines are the sole content source here,
+        # so the budget should be as permissive as possible.
+        char_budget = int(max_tokens * cpt * 0.95)
+        running_chars = 0
+        for line in lines:
+            if len(line) < 5:
+                continue
+            text = line[:300]
+            cost = len(text) + 1
+            if running_chars + cost > char_budget:
+                break
+            parts.append(text)
+            running_chars += cost
+
+    if not parts:
+        return _compress_default(pruned_html, max_tokens)
+
+    result = "\n".join(parts)
+    if count_tokens(result) > max_tokens:
+        result = _truncate_to_tokens(result, max_tokens)
+    return result
+
+
+def _compress_video_dispatch(ctx: CompressorContext) -> str:
+    return _compress_for_video(ctx.pruned_html, ctx.max_tokens, metadata=ctx.metadata, lc=ctx.lc)
+
+
+# Dispatch wrappers for schema-aware compressors
+
+
+def _compress_saas_dispatch(ctx: CompressorContext) -> str:
+    return _compress_for_saas(ctx.pruned_html, ctx.max_tokens, metadata=ctx.metadata, lc=ctx.lc)
+
+
+def _compress_government_dispatch(ctx: CompressorContext) -> str:
+    return _compress_for_government(ctx.pruned_html, ctx.max_tokens, metadata=ctx.metadata, lc=ctx.lc)
+
+
+def _compress_wiki_dispatch(ctx: CompressorContext) -> str:
+    return _compress_for_wiki(ctx.pruned_html, ctx.max_tokens, chunks=ctx.chunks, metadata=ctx.metadata, lc=ctx.lc)
+
+
+_SCHEMA_COMPRESSORS: dict[str, Callable[[CompressorContext], str]] = {
+    "SaaSPage": _compress_saas_dispatch,
+    "GovernmentPage": _compress_government_dispatch,
+    "WikiArticle": _compress_wiki_dispatch,
+    "VideoObject": _compress_video_dispatch,
+}
+
+_SCHEMA_OVERRIDES: frozenset[str] = frozenset({"WikiArticle", "VideoObject"})
+
+
+_COMPRESSORS: dict[str, Callable[[CompressorContext], str]] = {
+    # Existing 5
+    "product_detail": _compress_product_dispatch,
+    "search_results": _compress_search_dispatch,
+    "listing": _compress_listing_dispatch,
+    "article": _compress_article_dispatch,
+    "news": _compress_article_dispatch,
+    # P7.1 new 9
+    "login": _compress_login_dispatch,
+    "checkout": _compress_checkout_dispatch,
+    "form": _compress_form_dispatch,
+    "dashboard": _compress_dashboard_dispatch,
+    "help_faq": _compress_help_faq_dispatch,
+    "settings": _compress_settings_dispatch,
+    "error": _compress_error_dispatch,
+    "documentation": _compress_documentation_dispatch,
+    "landing": _compress_landing_dispatch,
+    "video": _compress_video_dispatch,
+}
+
+
+def build_pruned_context(
+    raw_html: str,
+    page_type: str = "default",
+    site_id: str = "unknown",
+    page_id: str = "unknown",
+    schema_name: str = "Product",
+    max_tokens: int = DEFAULT_MAX_TOKENS,
+    locale: str | None = None,
+    template: Any = _NO_TEMPLATE,
+    enable_lang_filter: bool = True,
+    task_hint: str | None = None,
+) -> tuple[str, int, dict]:
+    """Build pruned context from raw HTML.
+
+    Uses pruning2 pipeline first, then applies page-type-specific compression.
+
+    Args:
+        raw_html: full page HTML
+        page_type: one of product_detail, search_results, article, default
+        site_id: site identifier for pruning2
+        page_id: page identifier for pruning2
+        schema_name: schema name for pruning2 heuristics
+        max_tokens: maximum token budget
+        locale: locale code (e.g. "ko", "ja", "fr"). None → default ("ko").
+        template: optional PageTemplate with structural hints for optimization
+        enable_lang_filter: filter non-dominant-script noise from output (default True)
+
+    Returns:
+        (pruned_context_text, token_count, metadata_dict)
+    """
+    import time as _time
+
+    lc = get_locale(locale)
+
+    # Extract hints from template (if available)
+    _template_caching_active = template is not _NO_TEMPLATE
+    _source_hint: str | None = None
+    _card_hint: str | None = None
+    _pag_hint: str | None = None
+    if template is not None and template is not _NO_TEMPLATE:
+        _source_hint = template.data.metadata_source or None
+        _card_hint = template.data.card_strategy
+        _pag_hint = template.data.pagination_param
+        if not template.data.has_pagination:
+            _pag_hint = "none"
+
+    # Schema refinement: Generic → detect from JSON-LD in raw HTML
+    if schema_name == "Generic":
+        from .page_map_builder import _detect_schema_from_jsonld
+
+        detected = _detect_schema_from_jsonld(raw_html)
+        if detected is not None:
+            logger.info("Dynamic schema: Generic -> %s", detected)
+            schema_name = detected
+
+    # Step 1: Run pruning2 pipeline
+    t0 = _time.monotonic()
+    metadata: dict = {}
+    selected_chunks: list[HtmlChunk] = []
+    result = None
+    _pruning_exception: Exception | None = None
+    try:
+        _pruning_budget = max_tokens * 30 if max_tokens else None
+        result = prune_page(raw_html, site_id, page_id, schema_name, max_tokens=_pruning_budget, task_hint=task_hint)
+        pruned_html = result.pruned_html
+        selected_chunks = result.selected_chunks
+        logger.info(
+            "pruning2: %d → %d tokens (%.1f%% reduction)",
+            result.raw_token_count,
+            result.pruned_token_count,
+            result.token_reduction_pct,
+        )
+
+        # Step 2: Structured metadata extraction
+        t1 = _time.monotonic()
+        try:
+            from .metadata import extract_metadata
+
+            metadata = extract_metadata(
+                result.meta_chunks,
+                result.heading_chunks,
+                schema_name,
+                source_hint=_source_hint,
+                pruned_html=pruned_html,
+            )
+            if metadata:
+                logger.info("Structured metadata: %s", list(metadata.keys()))
+        except Exception as e:
+            logger.warning("Metadata extraction failed, using heuristic: %s", e)
+        t2 = _time.monotonic()
+
+    except Exception as e:
+        logger.warning("pruning2 failed, using raw HTML: %s", e)
+        _pruning_exception = e
+        pruned_html = raw_html
+        t1 = t2 = _time.monotonic()
+
+    # Phase 4.4: Propagate pruning failures to agent warnings
+    if _pruning_exception is not None or (result is not None and result.errors):
+        metadata["_pruning_warnings"] = [
+            "Page content extraction encountered issues; displayed content may be incomplete"
+        ]
+
+    # Phase 4.1: Expose pruned regions for context coherence annotation
+    if result is not None:
+        from .pruning.aom_filter import derive_pruned_regions
+
+        metadata["_pruned_regions"] = derive_pruned_regions(result.aom_filter_stats)
+
+    # Expose PruningResult for template learning (popped by caller in page_map_builder)
+    if _template_caching_active and result is not None:
+        metadata["_pruning_result"] = result
+
+    # Step 3: Apply page-type-specific aggressive compression (dispatch table)
+    _doc = result.doc if result is not None else None
+    _decisions = result.selected_decisions if result is not None else None
+    ctx = CompressorContext(
+        pruned_html=pruned_html,
+        max_tokens=max_tokens,
+        chunks=selected_chunks,
+        metadata=metadata,
+        lc=lc,
+        card_strategy_hint=_card_hint,
+        doc=_doc,
+        enable_lang_filter=enable_lang_filter,
+        schema_name=schema_name,
+        raw_html=raw_html,
+        decisions=_decisions,
+    )
+    # Schema overrides take priority (e.g. WikiArticle, VideoObject override page_type compressor)
+    if schema_name in _SCHEMA_OVERRIDES and schema_name in _SCHEMA_COMPRESSORS:
+        compressor = _SCHEMA_COMPRESSORS[schema_name]
+        logger.debug("Schema override: %s (page_type=%s)", schema_name, page_type)
+    else:
+        compressor = _COMPRESSORS.get(page_type)
+        if compressor is None:
+            compressor = _SCHEMA_COMPRESSORS.get(schema_name, _compress_default_dispatch)
+            if compressor is not _compress_default_dispatch:
+                logger.debug("Schema compressor: %s (page_type=%s)", schema_name, page_type)
+    context = compressor(ctx)
+    # Release DOM reference and raw HTML (memory)
+    ctx.doc = None
+    ctx.raw_html = ""
+    if result is not None:
+        result.doc = None
+    t3 = _time.monotonic()
+
+    # Append pagination info for listing/search pages
+    if page_type in ("listing", "search_results"):
+        pagination = _extract_pagination_info(raw_html, lc=lc, pagination_hint=_pag_hint)
+        if pagination:
+            context = context.rstrip() + "\n" + pagination
+
+    # MCG: Minimum Content Guarantee — never return empty for a real page
+    context_tokens = count_tokens(context) if context.strip() else 0
+    _mcg_activated = False
+    if context_tokens < _MCG_MIN_TOKENS and page_type not in _MCG_SKIP_TYPES and len(raw_html) > 500:
+        context = _extract_minimum_content(
+            meta_chunks=result.meta_chunks if result else [],
+            pruned_html=pruned_html,
+            raw_html=raw_html,
+            max_tokens=max_tokens,
+            lc=lc,
+        )
+        _mcg_activated = True
+        metadata["_mcg_activated"] = True
+        logger.warning("MCG activated: original context had %d tokens", context_tokens)
+
+    token_count = count_tokens(context) if _mcg_activated else context_tokens
+    _template_status = "hit" if (template is not None and template is not _NO_TEMPLATE) else "miss"
+    logger.info(
+        "pruned_context: %d tokens (budget: %d) prune=%.0fms meta=%.0fms compress=%.0fms template=%s",
+        token_count,
+        max_tokens,
+        (t1 - t0) * 1000,
+        (t2 - t1) * 1000,
+        (t3 - t2) * 1000,
+        _template_status,
+    )
+
+    # Extraction Quality Score (EQS) — page-type-aware
+    _total_chunks = result.chunk_count_total if result else 0
+    _selected_chunks = result.chunk_count_selected if result else 0
+    _has_errors = bool(result.errors) if result else False
+    _chunk_ratio = _selected_chunks / _total_chunks if _total_chunks > 0 else 0.0
+    _token_ratio = min(token_count / max_tokens, 1.0) if max_tokens > 0 else 0.0
+    _grid_wl_count = result.aom_filter_stats.grid_whitelist_count if result else 0
+    try:
+        from .diagnostics.eq_score import compute_eq_score, should_warn_eq
+
+        _eqs = compute_eq_score(
+            token_ratio=_token_ratio,
+            chunk_ratio=_chunk_ratio,
+            mcg_activated=_mcg_activated,
+            has_errors=_has_errors,
+            page_type=page_type,
+            grid_whitelist_count=_grid_wl_count,
+        )
+        if should_warn_eq(_eqs, page_type):
+            metadata.setdefault("_pruning_warnings", []).append(
+                f"Low extraction quality ({_eqs:.2f}) for '{page_type}'"
+            )
+    except Exception:
+        _eqs = round(
+            0.3 * _token_ratio + 0.3 * _chunk_ratio + 0.2 * (not _mcg_activated) + 0.2 * (not _has_errors),
+            3,
+        )
+    metadata["_extraction_quality"] = _eqs
+
+    try:
+        from pagemap.telemetry import emit
+        from pagemap.telemetry.events import (
+            CONTENT_RESCUE,
+            GRID_WHITELIST_APPLIED,
+            MCG_ACTIVATED,
+            PRUNED_CONTEXT_COMPLETE,
+        )
+
+        if _mcg_activated:
+            emit(
+                MCG_ACTIVATED,
+                {"original_tokens": context_tokens, "rescued_tokens": token_count, "page_type": page_type},
+            )
+        if _grid_wl_count > 0:
+            emit(GRID_WHITELIST_APPLIED, {"container_count": _grid_wl_count})
+        _rescue_count = result.aom_filter_stats.content_rescue_count if result else 0
+        if _rescue_count > 0:
+            emit(CONTENT_RESCUE, {"rescued_count": _rescue_count})
+
+        emit(
+            PRUNED_CONTEXT_COMPLETE,
+            {
+                "tokens": token_count,
+                "budget": max_tokens,
+                "prune_ms": round((t1 - t0) * 1000, 1),
+                "meta_ms": round((t2 - t1) * 1000, 1),
+                "compress_ms": round((t3 - t2) * 1000, 1),
+                "template_status": _template_status,
+                "page_type": page_type,
+                "schema_name": schema_name,
+                "extraction_quality": _eqs,
+                "mcg_activated": _mcg_activated,
+                "grid_whitelist_count": _grid_wl_count,
+            },
+        )
+    except Exception:  # nosec B110
+        pass
+
+    return context, token_count, metadata
+
+
+def build_pruned_context_from_snapshot(
+    snapshot: Any,
+    page_type: str = "default",
+    schema_name: str = "Product",
+    max_tokens: int = DEFAULT_MAX_TOKENS,
+    locale: str | None = None,
+) -> tuple[str, int, dict]:
+    """Build pruned context from a PageSnapshot object (offline mode).
+
+    Args:
+        snapshot: PageSnapshot from collect.py
+        page_type: page type classification
+        schema_name: schema for pruning heuristics
+        max_tokens: token budget
+        locale: locale code (e.g. "ko", "ja"). None → default ("ko").
+
+    Returns:
+        (pruned_context_text, token_count, metadata_dict)
+    """
+    return build_pruned_context(
+        raw_html=snapshot.html_raw,
+        page_type=page_type,
+        site_id=snapshot.site_id,
+        page_id=snapshot.page_id,
+        schema_name=schema_name,
+        max_tokens=max_tokens,
+        locale=locale,
+    )

@@ -35,6 +35,9 @@ jobs:
       - name: Bandit security scan
         run: uv run bandit -r src/pagemap/ -c pyproject.toml
 
+      - name: Dependency direction check
+        run: bash scripts/check_dependency_direction.sh
+
   test:
     runs-on: ubuntu-latest
     strategy:
