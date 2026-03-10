@@ -7,7 +7,7 @@
 ARG PAGEMAP_VERSION=0.0.0
 
 # ── Stage 1: Build ────────────────────────────────────────────────────
-FROM python:3.14-slim-bookworm AS builder
+FROM python:3.14-slim-trixie AS builder
 
 ARG PAGEMAP_VERSION
 COPY --from=ghcr.io/astral-sh/uv:0.8 /uv /usr/local/bin/uv
@@ -22,7 +22,7 @@ ENV PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers
 RUN playwright install --with-deps chromium
 
 # ── Stage 2: Runtime ─────────────────────────────────────────────────
-FROM python:3.14-slim-bookworm
+FROM python:3.14-slim-trixie
 
 ARG PAGEMAP_VERSION=0.0.0
 
@@ -47,7 +47,7 @@ RUN apt-get update && \
         libnss3 libnspr4 libdbus-1-3 libatk1.0-0 libatk-bridge2.0-0 \
         libcups2 libdrm2 libxkbcommon0 libatspi2.0-0 libxcomposite1 \
         libxdamage1 libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 \
-        libcairo2 libasound2 libwayland-client0 && \
+        libcairo2 libasound2t64 libwayland-client0 && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
 ENV PATH="/opt/pagemap/bin:$PATH"
