@@ -72,8 +72,32 @@ except ImportError:
         "execute_action": "Call get_page_map to refresh refs and retry.",
     }
 
+    import re as _re
+
+    _SECRET_PATTERNS: list[tuple[_re.Pattern[str], str]] = [
+        (_re.compile(r"sk-[a-zA-Z0-9_-]{8,}"), "<redacted>"),
+        (_re.compile(r"Bearer\s+\S+"), "Bearer <redacted>"),
+        (_re.compile(r"(?:API_KEY|SECRET|TOKEN|PASSWORD|CREDENTIAL)\s*[=:]\s*\S+", _re.IGNORECASE), "<redacted>"),
+        (_re.compile(r"Basic\s+[A-Za-z0-9+/=]{8,}"), "Basic <redacted>"),
+        (_re.compile(r"://[^@\s]+@"), "://<redacted>@"),
+        (_re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"), "<redacted>"),
+        (_re.compile(r"AKIA[0-9A-Z]{16}"), "<redacted>"),
+        (_re.compile(r"(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{30,}"), "<redacted>"),
+    ]
+    _PATH_PATTERN = _re.compile(
+        r"(/(?:Users|home|tmp|var|etc|opt|root|srv|proc|sys|usr|Library"
+        r"|Applications|private|snap|mnt|media|nix)/[\w./-]+"
+        r"|[A-Z]:\\[\w.\\-]+)"
+    )
+
+    def _sanitize_detail(text: str) -> str:
+        for pattern, replacement in _SECRET_PATTERNS:
+            text = pattern.sub(replacement, text)
+        text = _PATH_PATTERN.sub("<path>", text)
+        return text[:200] + "..." if len(text) > 200 else text
+
     def from_exception(exc, *, tool_context="", instance="", extensions=None):  # type: ignore[misc]
-        detail = str(exc)[:200]
+        detail = _sanitize_detail(str(exc))
         hint = _RECOVERY_HINTS.get(tool_context, "")
         if hint:
             return type(
