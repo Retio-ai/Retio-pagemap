@@ -123,7 +123,7 @@ jobs:
       - name: Generate CycloneDX SBOM
         uses: anchore/sbom-action@17ae1740179002c89186b61233e0f892c3118b11  # v0.23.0
         with:
-          image: ${{ env.GHCR_IMAGE }}:${{ steps.version.outputs.version }}
+          image: ${{ env.GHCR_IMAGE }}@${{ steps.build.outputs.digest }}
           format: cyclonedx-json
           output-file: sbom.cyclonedx.json
           artifact-name: pagemap-sbom
@@ -137,7 +137,7 @@ jobs:
           DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           cosign sign --yes "${{ env.GHCR_IMAGE }}@${DIGEST}"
-          cosign sign --yes "${{ env.DOCKERHUB_IMAGE }}:${{ steps.version.outputs.version }}-hardened"
+          cosign sign --yes "${{ env.DOCKERHUB_IMAGE }}@${DIGEST}"
 
       - name: Attest SBOM with Cosign
         env:
@@ -146,14 +146,24 @@ jobs:
           cosign attest --yes --type cyclonedx \
             --predicate sbom.cyclonedx.json \
             "${{ env.GHCR_IMAGE }}@${DIGEST}"
+          cosign attest --yes --type cyclonedx \
+            --predicate sbom.cyclonedx.json \
+            "${{ env.DOCKERHUB_IMAGE }}@${DIGEST}"
 
       # ── GitHub native attestation ─────────────────────────────
-      - name: GitHub attestation
+      - name: GitHub attestation (GHCR)
         uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26  # v4.1.0
         with:
           subject-name: ${{ env.GHCR_IMAGE }}
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
+
+      - name: GitHub attestation (Docker Hub)
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26  # v4.1.0
+        with:
+          subject-name: ${{ env.DOCKERHUB_IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: false
 
       # ── Trivy vulnerability scan ──────────────────────────────
       - name: Trivy scan (fail on CRITICAL)

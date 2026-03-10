@@ -1,7 +1,7 @@
 # Stage 1: uv로 패키지 설치
 FROM python:3.14-slim-bookworm AS builder
 ARG PAGEMAP_VERSION=1.0.0
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+COPY --from=ghcr.io/astral-sh/uv:0.8 /uv /usr/local/bin/uv
 RUN uv venv /opt/pagemap && \
     uv pip install --python /opt/pagemap/bin/python \
         "retio-pagemap==${PAGEMAP_VERSION}"
