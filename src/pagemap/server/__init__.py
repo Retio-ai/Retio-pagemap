@@ -99,6 +99,11 @@ except ImportError:
     def from_exception(exc, *, tool_context="", instance="", extensions=None):  # type: ignore[misc]
         detail = _sanitize_detail(str(exc))
         hint = _RECOVERY_HINTS.get(tool_context, "")
+        if not hint:
+            for prefix in _RECOVERY_HINTS:
+                if tool_context.startswith(prefix):
+                    hint = _RECOVERY_HINTS[prefix]
+                    break
         if hint:
             return type(
                 "P",
