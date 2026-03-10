@@ -1,0 +1,67 @@
+# Copyright (C) 2025-2026 Retio AI
+# SPDX-License-Identifier: AGPL-3.0-only
+
+# Multi-stage Chainguard-based hardened container for PageMap
+# Zero-CVE base image with automatic security patches
+
+ARG PAGEMAP_VERSION=0.0.0
+
+# ── Stage 1: Build ────────────────────────────────────────────────────
+FROM cgr.dev/chainguard/python:latest-dev AS builder
+
+WORKDIR /build
+
+# Install build dependencies
+COPY pyproject.toml ./
+COPY src/ src/
+
+RUN pip install --no-cache-dir --target=/deps .
+
+# Install Playwright Chromium only
+ENV PLAYWRIGHT_BROWSERS_PATH=/browsers
+RUN pip install --no-cache-dir --target=/deps playwright \
+    && python -m playwright install chromium --with-deps
+
+# ── Stage 2: Runtime ─────────────────────────────────────────────────
+FROM cgr.dev/chainguard/python:latest
+
+# OCI image labels (https://github.com/opencontainers/image-spec/blob/main/annotations.md)
+LABEL org.opencontainers.image.title="PageMap" \
+      org.opencontainers.image.description="MCP server for efficient web page interaction — compressed, actionable page maps for AI agents" \
+      org.opencontainers.image.version="${PAGEMAP_VERSION}" \
+      org.opencontainers.image.vendor="Retio AI" \
+      org.opencontainers.image.url="https://github.com/Retio-ai/pagemap" \
+      org.opencontainers.image.source="https://github.com/Retio-ai/pagemap" \
+      org.opencontainers.image.documentation="https://github.com/Retio-ai/pagemap#readme" \
+      org.opencontainers.image.licenses="AGPL-3.0-only" \
+      org.opencontainers.image.base.name="cgr.dev/chainguard/python:latest" \
+      io.retio.security.hardened="true" \
+      io.retio.security.base="chainguard-zero-cve"
+
+# Non-root user (Chainguard default UID 65532 'nonroot')
+USER nonroot
+
+WORKDIR /app
+
+# Copy application and dependencies
+COPY --from=builder /deps /deps
+COPY --from=builder /browsers /browsers
+COPY src/ src/
+
+ENV PYTHONPATH=/deps:/app/src
+ENV PLAYWRIGHT_BROWSERS_PATH=/browsers
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV PAGEMAP_CONTAINER_MODE=1
+
+# Security: no new privileges
+# (enforced via docker run --security-opt no-new-privileges:true)
+
+EXPOSE 8080
+
+# Health check using Python (no curl in distroless/Chainguard images)
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"
+
+ENTRYPOINT ["python", "-m", "pagemap"]
+CMD ["--transport", "streamable-http", "--port", "8080"]
