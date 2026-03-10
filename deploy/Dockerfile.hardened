@@ -20,6 +20,7 @@ RUN mkdir -p /deps && pip install --no-cache-dir --target=/deps .
 
 # Install Playwright Chromium only
 ENV PLAYWRIGHT_BROWSERS_PATH=/browsers
+ENV PYTHONPATH=/deps
 RUN pip install --no-cache-dir --target=/deps playwright \
     && python -m playwright install chromium --with-deps
 
