@@ -735,6 +735,7 @@ _cqp_thompson: object | None = None  # ThompsonSampler
 _EQPV_CACHE_MAP: dict[str, str] = {"A": "hit", "B": "refresh", "C": "miss"}
 _outbox_poller: object | None = None  # S3: OutboxPoller — initialized when PAGEMAP_ENABLE_OUTBOX=1
 _paddle_config: object | None = None  # S8: PaddleConfig — initialized in _run_http_mode()
+_creem_config: object | None = None  # CreemConfig — initialized in _run_http_mode()
 _usage_sync: object | None = None  # S8: UsageSyncBuffer — initialized when ENABLE_METERING=1
 _webhook_cleanup: object | None = None  # S8: WebhookCleanup — initialized when Paddle is enabled
 _sli_tracker: object | None = None  # S7: ErrorBudgetTracker — initialized in _run_http_server()
