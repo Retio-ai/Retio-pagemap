@@ -8,6 +8,7 @@ ARG PAGEMAP_VERSION=0.0.0
 
 # ── Stage 1: Build ────────────────────────────────────────────────────
 FROM cgr.dev/chainguard/python:latest-dev AS builder
+USER root
 
 WORKDIR /build
 
@@ -15,7 +16,7 @@ WORKDIR /build
 COPY pyproject.toml README.md ./
 COPY src/ src/
 
-RUN pip install --no-cache-dir --target=/deps .
+RUN mkdir -p /deps && pip install --no-cache-dir --target=/deps .
 
 # Install Playwright Chromium only
 ENV PLAYWRIGHT_BROWSERS_PATH=/browsers
