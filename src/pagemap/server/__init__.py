@@ -321,6 +321,13 @@ PAGE_MAP_TIMEOUT_SECONDS = 60
 _max_stdio_navigations: int = int(os.environ.get("PAGEMAP_MAX_NAVIGATIONS", "50"))
 _max_stdio_session_age: float = float(os.environ.get("PAGEMAP_MAX_SESSION_AGE", "1800"))
 
+# Auto-dismiss barrier feature flags (opt-in, default OFF)
+_AUTO_DISMISS_ENABLED: bool = os.environ.get("PAGEMAP_AUTO_DISMISS", "0").lower() in ("1", "true", "yes")
+_COOKIE_POLICY: str = os.environ.get("PAGEMAP_COOKIE_POLICY", "reject").lower()
+if _COOKIE_POLICY not in ("reject", "accept", "dismiss", "none"):
+    _COOKIE_POLICY = "reject"
+_AUTO_DISMISS_BARRIER_TYPES = frozenset({"cookie_consent", "age_verification", "popup_overlay"})
+
 # Detail level → token budget mapping for pruned content
 _DETAIL_LEVEL_TOKENS: dict[str, int] = {
     "compact": 1500,  # DEFAULT_PRUNED_CONTEXT_TOKENS (current default)
@@ -1503,6 +1510,54 @@ async def _get_page_map_inner(
                 )
             except Exception:  # nosec B110
                 pass
+
+        # ── Auto-dismiss barrier (opt-in, max 1 attempt) ──
+        if _AUTO_DISMISS_ENABLED and page_map.barrier is not None:
+            _ad_barrier = page_map.barrier
+            if (
+                _ad_barrier.auto_dismissible
+                and (_ad_barrier.accept_ref is not None or _ad_barrier.js_dismiss_call)
+                and _ad_barrier.barrier_type.value in _AUTO_DISMISS_BARRIER_TYPES
+            ):
+                _ad_elapsed_s = (_time.monotonic_ns() - timer._start_ns) / 1e9
+                _ad_remaining = PAGE_MAP_TIMEOUT_SECONDS - _ad_elapsed_s
+                if _ad_remaining >= 8.0:
+                    try:
+                        from .barrier_dismisser import try_auto_dismiss
+
+                        timer.stage("auto_dismiss")
+                        _ad_result = await try_auto_dismiss(
+                            session,
+                            page_map,
+                            page_map.interactables,
+                            _COOKIE_POLICY,
+                        )
+                        if _ad_result.success:
+                            cache.invalidate(InvalidationReason.BARRIER_DISMISSED)
+                            timer.stage("barrier_rebuild")
+                            page_map = await asyncio.wait_for(
+                                build_page_map_live(
+                                    session=session,
+                                    url=None,
+                                    enable_tier3=True,
+                                    max_pruned_tokens=budget,
+                                    template_cache=ctx.template_cache,
+                                    timer=timer,
+                                    task_hint=task_hint,
+                                ),
+                                timeout=_ad_remaining - 3.0,
+                            )
+                            fp = await capture_dom_fingerprint(session.page)
+                            cache.store(page_map, fp)
+                            if page_map.metadata is None:
+                                page_map.metadata = {}  # type: ignore[assignment]
+                            page_map.metadata["barrier_auto_dismissed"] = {
+                                "type": _ad_result.barrier_type,
+                                "method": _ad_result.method,
+                                "elapsed_ms": round(_ad_result.elapsed_ms, 1),
+                            }
+                    except Exception as _ad_exc:
+                        logger.debug("Auto-dismiss pipeline error: %s", _ad_exc)
 
         # Discard any dialogs that appeared during navigation/page-map build
         session.drain_dialogs()

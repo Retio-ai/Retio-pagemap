@@ -20,6 +20,9 @@ class CookieConsentPattern:
     confidence: float  # 0.0–1.0
     signals: tuple[str, ...]  # matched evidence
     accept_terms: tuple[str, ...]  # i18n accept button text patterns
+    reject_terms: tuple[str, ...] = ()  # i18n reject/necessary-only button text
+    dismiss_terms: tuple[str, ...] = ()  # i18n close/dismiss button text
+    js_dismiss_call: str = ""  # CMP JS API call (e.g. "Cookiebot.dialog && ...")
 
 
 # ── Module-level pre-compiled regex patterns ───────────────────────
@@ -42,6 +45,125 @@ _GENERIC_COOKIE_RE = re.compile(
     r')[^"\']*["\']',
     re.IGNORECASE,
 )
+
+# ── i18n reject/necessary-only button text patterns ───────────────
+
+_REJECT_TERMS: tuple[str, ...] = (
+    # en
+    "reject all",
+    "decline all",
+    "deny all",
+    "refuse all",
+    "only necessary",
+    "necessary only",
+    "essential only",
+    "only essential",
+    "manage preferences",
+    # ko
+    "모두 거부",
+    "필수만",
+    "필수 쿠키만",
+    "거부",
+    # ja
+    "すべて拒否",
+    "必須のみ",
+    "拒否",
+    # fr
+    "tout refuser",
+    "refuser tout",
+    "essentiels uniquement",
+    # de
+    "alle ablehnen",
+    "nur notwendige",
+    "ablehnen",
+    # zh
+    "全部拒绝",
+    "仅必要",
+    # es
+    "rechazar todo",
+    "rechazar todas",
+    "solo necesarias",
+    # it
+    "rifiuta tutto",
+    "rifiuta tutti",
+    "solo necessari",
+    # pt
+    "rejeitar tudo",
+    "rejeitar todos",
+    "apenas necessários",
+    # nl
+    "alles weigeren",
+    "alleen noodzakelijke",
+)
+
+# ── i18n close/dismiss button text patterns ───────────────────────
+
+_DISMISS_TERMS: tuple[str, ...] = (
+    # en
+    "close",
+    "dismiss",
+    "no thanks",
+    "not now",
+    "maybe later",
+    "skip",
+    # ko
+    "닫기",
+    "건너뛰기",
+    "나중에",
+    "괜찮습니다",
+    # ja
+    "閉じる",
+    "後で",
+    # fr
+    "fermer",
+    "non merci",
+    "plus tard",
+    # de
+    "schließen",
+    "nein danke",
+    "später",
+    # zh
+    "关闭",
+    "以后再说",
+    # es
+    "cerrar",
+    "no gracias",
+    "más tarde",
+    # it
+    "chiudi",
+    "no grazie",
+    "più tardi",
+    # pt
+    "fechar",
+    "não obrigado",
+    "mais tarde",
+    # nl
+    "sluiten",
+    "nee bedankt",
+    "later",
+)
+
+# ── Unicode close symbols ─────────────────────────────────────────
+
+_CLOSE_SYMBOLS: frozenset[str] = frozenset({"×", "✕", "✖", "✗", "X", "x"})
+
+# ── CMP JS API mappings (reject-first, accept fallback) ──────────
+
+_CMP_JS_REJECT: dict[str, str] = {
+    "cookiebot": "Cookiebot.dialog && Cookiebot.dialog.submitDecline()",
+    "onetrust": "OneTrust.RejectAll()",
+    "trustarc": "truste.eu.clickListener({target:{className:'call'}})",
+    "didomi": "Didomi.setUserDisagreeToAll()",
+    "quantcast": "__tcfapi && __tcfapi('addEventListener', 2, function(){})",
+    "usercentrics": "UC_UI && UC_UI.denyAllConsents()",
+}
+
+_CMP_JS_ACCEPT: dict[str, str] = {
+    "cookiebot": "Cookiebot.dialog && Cookiebot.dialog.submitConsent()",
+    "onetrust": "OneTrust.AllowAll()",
+    "didomi": "Didomi.setUserAgreeToAll()",
+    "usercentrics": "UC_UI && UC_UI.acceptAllConsents()",
+}
 
 # ── i18n accept button text patterns (10 locales) ─────────────────
 
@@ -128,6 +250,9 @@ def _detect_named_cmp(html_lower: str) -> CookieConsentPattern | None:
                 confidence=confidence,
                 signals=(f"cmp:{provider}:{match.group()}",),
                 accept_terms=_ACCEPT_TERMS_ALL,
+                reject_terms=_REJECT_TERMS,
+                dismiss_terms=_DISMISS_TERMS,
+                js_dismiss_call=_CMP_JS_REJECT.get(provider, ""),
             )
 
     return None
@@ -142,6 +267,8 @@ def _detect_generic_cookie(html_lower: str) -> CookieConsentPattern | None:
             confidence=0.70,
             signals=(f"generic_cookie:{match.group()}",),
             accept_terms=_ACCEPT_TERMS_ALL,
+            reject_terms=_REJECT_TERMS,
+            dismiss_terms=_DISMISS_TERMS,
         )
     return None
 

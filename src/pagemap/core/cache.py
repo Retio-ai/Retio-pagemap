@@ -48,6 +48,7 @@ class InvalidationReason(StrEnum):
     WAIT_FOR = "wait_for"
     FILL_FORM = "fill_form"
     BOT_BLOCKED = "bot_blocked"
+    BARRIER_DISMISSED = "barrier_dismissed"
 
 
 # Hard invalidation: active cache AND URL LRU entry removed

@@ -12,7 +12,7 @@ from __future__ import annotations
 import pytest
 
 from pagemap.ecommerce import BarrierResult, BarrierType
-from pagemap.ecommerce.barrier_handler import detect_barriers
+from pagemap.ecommerce.barrier_handler import _find_dismiss_ref, detect_barriers
 from pagemap.ecommerce.cookie_patterns import detect_cookie_provider
 from pagemap.ecommerce.login_detector import (
     detect_age_gate,
@@ -299,6 +299,212 @@ class TestBarrierResult:
         )
         updated = result.with_matched_ref([make_interactable()])
         assert updated.accept_ref is None
+
+
+# ── 5-Tier Cascade Tests ──────────────────────────────────────────
+
+
+class TestFindDismissRef:
+    """Tests for the 5-tier cascade dismiss ref finder."""
+
+    def test_reject_terms_match(self, make_interactable):
+        """Tier 1: reject terms should match."""
+        interactables = [
+            make_interactable(ref=1, role="button", name="Reject All", affordance="click"),
+        ]
+        ref, tier, _ = _find_dismiss_ref(
+            interactables,
+            reject_terms=("reject all",),
+            cookie_policy="reject",
+        )
+        assert ref == 1
+        assert tier == "reject"
+
+    def test_dismiss_terms_match(self, make_interactable):
+        """Tier 3: dismiss terms should match."""
+        interactables = [
+            make_interactable(ref=5, role="button", name="Close", affordance="click"),
+        ]
+        ref, tier, _ = _find_dismiss_ref(
+            interactables,
+            dismiss_terms=("close",),
+            cookie_policy="reject",
+        )
+        assert ref == 5
+        assert tier == "dismiss"
+
+    def test_close_symbol_match(self, make_interactable):
+        """Tier 4: close symbol should match when barrier_confirmed=True."""
+        interactables = [
+            make_interactable(ref=10, role="button", name="×", affordance="click"),
+        ]
+        ref, tier, _ = _find_dismiss_ref(
+            interactables,
+            barrier_confirmed=True,
+        )
+        assert ref == 10
+        assert tier == "symbol"
+
+    def test_close_symbol_requires_barrier_confirmed(self, make_interactable):
+        """Tier 4: close symbol should NOT match when barrier_confirmed=False."""
+        interactables = [
+            make_interactable(ref=10, role="button", name="×", affordance="click"),
+        ]
+        ref, tier, _ = _find_dismiss_ref(
+            interactables,
+            barrier_confirmed=False,
+        )
+        assert ref is None
+
+    def test_cascade_priority_reject_over_accept(self, make_interactable):
+        """Reject should take priority over Accept when policy=reject."""
+        interactables = [
+            make_interactable(ref=1, role="button", name="Accept All", affordance="click"),
+            make_interactable(ref=2, role="button", name="Reject All", affordance="click"),
+            make_interactable(ref=3, role="button", name="Close", affordance="click"),
+        ]
+        ref, tier, _ = _find_dismiss_ref(
+            interactables,
+            accept_terms=("accept all",),
+            reject_terms=("reject all",),
+            dismiss_terms=("close",),
+            cookie_policy="reject",
+        )
+        assert ref == 2
+        assert tier == "reject"
+
+    def test_cascade_priority_accept_first_when_policy_accept(self, make_interactable):
+        """Accept should take priority when policy=accept."""
+        interactables = [
+            make_interactable(ref=1, role="button", name="Accept All", affordance="click"),
+            make_interactable(ref=2, role="button", name="Reject All", affordance="click"),
+        ]
+        ref, tier, _ = _find_dismiss_ref(
+            interactables,
+            accept_terms=("accept all",),
+            reject_terms=("reject all",),
+            cookie_policy="accept",
+        )
+        assert ref == 1
+        assert tier == "accept"
+
+    def test_policy_dismiss_only_close(self, make_interactable):
+        """Dismiss policy should only use dismiss terms."""
+        interactables = [
+            make_interactable(ref=1, role="button", name="Accept All", affordance="click"),
+            make_interactable(ref=2, role="button", name="Reject All", affordance="click"),
+            make_interactable(ref=3, role="button", name="Close", affordance="click"),
+        ]
+        ref, tier, _ = _find_dismiss_ref(
+            interactables,
+            accept_terms=("accept all",),
+            reject_terms=("reject all",),
+            dismiss_terms=("close",),
+            cookie_policy="dismiss",
+        )
+        assert ref == 3
+        assert tier == "dismiss"
+
+    def test_role_filter_link_excluded(self, make_interactable):
+        """role=link should not match (button only)."""
+        interactables = [
+            make_interactable(ref=1, role="link", name="Accept All", affordance="click"),
+        ]
+        ref, tier, _ = _find_dismiss_ref(
+            interactables,
+            accept_terms=("accept all",),
+            cookie_policy="accept",
+        )
+        assert ref is None
+
+    def test_name_length_limit(self, make_interactable):
+        """Button names > 50 chars should be skipped."""
+        long_name = "Accept All Cookies " + "x" * 40  # > 50 chars
+        interactables = [
+            make_interactable(ref=1, role="button", name=long_name, affordance="click"),
+        ]
+        ref, tier, _ = _find_dismiss_ref(
+            interactables,
+            accept_terms=("accept all",),
+            cookie_policy="accept",
+        )
+        assert ref is None
+
+    def test_empty_interactables(self):
+        ref, tier, _ = _find_dismiss_ref([], accept_terms=("accept",))
+        assert ref is None
+        assert tier == ""
+
+
+class TestBarrierWithNewFields:
+    """Test BarrierResult with new fields."""
+
+    def test_cookie_barrier_has_reject_terms(self, make_interactable):
+        html = COOKIEBOT_HTML
+        interactables = [
+            make_interactable(ref=1, role="button", name="Reject All", affordance="click"),
+        ]
+        result = detect_barriers(html, html.lower(), "https://example.com", interactables, "unknown")
+        assert result is not None
+        assert result.barrier_type == BarrierType.COOKIE_CONSENT
+        assert len(result.reject_terms) > 0
+        assert result.js_dismiss_call != ""  # Cookiebot has JS API
+
+    def test_cookie_barrier_match_tier(self, make_interactable):
+        html = COOKIEBOT_HTML
+        interactables = [
+            make_interactable(ref=1, role="button", name="Reject All", affordance="click"),
+        ]
+        result = detect_barriers(html, html.lower(), "https://example.com", interactables, "unknown")
+        assert result is not None
+        assert result.match_tier == "reject"
+
+    def test_with_matched_ref_cascade(self, make_interactable):
+        """with_matched_ref should use 5-tier cascade."""
+        result = BarrierResult(
+            barrier_type=BarrierType.COOKIE_CONSENT,
+            provider="cookiebot",
+            auto_dismissible=True,
+            accept_ref=99,  # stale ref
+            confidence=0.95,
+            accept_terms=("accept all",),
+            reject_terms=("reject all",),
+            dismiss_terms=("close",),
+        )
+        final_interactables = [
+            make_interactable(ref=1, role="link", name="Home"),
+            make_interactable(ref=2, role="button", name="Reject All", affordance="click"),
+            make_interactable(ref=3, role="button", name="Accept All", affordance="click"),
+        ]
+        updated = result.with_matched_ref(final_interactables)
+        # Should pick reject (tier 1) over accept (tier 2)
+        assert updated.accept_ref == 2
+        assert updated.match_tier == "reject"
+
+
+class TestPopupBarrier:
+    """Test popup overlay detection through barrier handler."""
+
+    def test_popup_detected_via_dialog(self, make_interactable):
+        interactables = [
+            make_interactable(ref=1, role="dialog", name="Newsletter signup"),
+            make_interactable(ref=2, role="button", name="Close", affordance="click"),
+        ]
+        html = "<div>Normal page</div>"
+        result = detect_barriers(html, html.lower(), "https://example.com", interactables, "unknown")
+        assert result is not None
+        assert result.barrier_type == BarrierType.POPUP_OVERLAY
+
+    def test_cookie_priority_over_popup(self, make_interactable):
+        """Cookie consent should take priority over popup."""
+        interactables = [
+            make_interactable(ref=1, role="dialog", name="Newsletter signup"),
+            make_interactable(ref=2, role="button", name="Accept All", affordance="click"),
+        ]
+        html = COOKIEBOT_HTML + '<div class="newsletter-popup">Subscribe</div>'
+        result = detect_barriers(html, html.lower(), "https://example.com", interactables, "unknown")
+        assert result is not None
+        assert result.barrier_type == BarrierType.COOKIE_CONSENT
 
 
 # ── False positive checks ──────────────────────────────────────────

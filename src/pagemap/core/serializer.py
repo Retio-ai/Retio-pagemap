@@ -271,17 +271,30 @@ def to_agent_prompt(
 
     # Barrier section (v0.8.0 Layer 0)
     if page_map.barrier:
-        lines.append("## Barrier")
-        lines.append(f"Type: {page_map.barrier.barrier_type.value}")
-        if page_map.barrier.accept_ref is not None:
-            lines.append(f"Dismiss: [{page_map.barrier.accept_ref}]")
-        if page_map.barrier.form_fields:
-            lines.append("Login form:")
-            for f in page_map.barrier.form_fields:
-                lines.append(f"  - {f['field_type']}: {f['name']}")
-        if page_map.barrier.oauth_providers:
-            lines.append(f"OAuth: {', '.join(page_map.barrier.oauth_providers)}")
-        lines.append("")
+        # Check if barrier was auto-dismissed
+        _auto_dismissed = page_map.metadata.get("barrier_auto_dismissed") if page_map.metadata else None
+        if _auto_dismissed:
+            lines.append("## Barrier")
+            _ad_type = _auto_dismissed.get("type", "")
+            _ad_method = _auto_dismissed.get("method", "")
+            _ad_provider = page_map.barrier.provider
+            lines.append(f"Auto-dismissed: {_ad_type} ({_ad_provider}) via {_ad_method}")
+            lines.append("")
+        else:
+            lines.append("## Barrier")
+            lines.append(f"Type: {page_map.barrier.barrier_type.value}")
+            if page_map.barrier.match_tier == "symbol" and page_map.barrier.accept_ref is not None:
+                lines.append(f"Close: [{page_map.barrier.accept_ref}] (close icon — verify before clicking)")
+            elif page_map.barrier.accept_ref is not None:
+                tier_hint = f" ({page_map.barrier.match_tier})" if page_map.barrier.match_tier else ""
+                lines.append(f"Dismiss: [{page_map.barrier.accept_ref}]{tier_hint}")
+            if page_map.barrier.form_fields:
+                lines.append("Login form:")
+                for f in page_map.barrier.form_fields:
+                    lines.append(f"  - {f['field_type']}: {f['name']}")
+            if page_map.barrier.oauth_providers:
+                lines.append(f"OAuth: {', '.join(page_map.barrier.oauth_providers)}")
+            lines.append("")
 
     # Diagnostics section (S9)
     if page_map.diagnostics:

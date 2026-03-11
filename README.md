@@ -36,7 +36,7 @@ PageMap gives your agent a **compressed, actionable** view of any web page:
 | **Avg tokens / task** | **2,710** | 13,737 | 13,888 | 11,424 |
 | **Cost / 94 tasks** | **$1.06** | $4.09 | $3.98 | $2.26 |
 
-> Benchmarked across 11 e-commerce sites, 94 static tasks, 7 conditions. 5,200+ tests passing.
+> Benchmarked across 11 e-commerce sites, 94 static tasks, 7 conditions. 8,100+ tests passing.
 
 ---
 
@@ -106,8 +106,9 @@ Structured extraction of prices, options (size/color), ratings, availability —
 
 PageMap detects problems and tells your agent what to do:
 
-- **Barrier detection** — Login required? Bot blocked? Out of stock? Age verification? PageMap adds a `barrier` field with the diagnosis and suggested next steps
-- **Cookie consent** — Automatically dismissed. Your agent never needs to handle cookie popups
+- **Barrier detection** — Login required? Bot blocked? Out of stock? Age verification? Popup overlay? PageMap adds a `barrier` field with the diagnosis and suggested next steps
+- **Cookie consent auto-dismiss** — 7 CMP providers auto-detected (Cookiebot, OneTrust, TrustArc, Didomi, Quantcast, Usercentrics, generic fallback). 5-tier dismiss cascade: CMP JS API → Reject → Accept → Dismiss → Close symbol. GDPR reject-first default policy
+- **Popup overlay detection** — AX tree `role="dialog"` + HTML regex 2-phase detection. Promotional popups (newsletter, exit-intent) auto-dismissed
 - **Bot detection awareness** — Detects Cloudflare, Turnstile, reCAPTCHA, hCaptcha, and Akamai. Reports the provider and suggests wait/retry strategies
 - **Stale ref recovery** — When DOM changes invalidate refs, PageMap returns clear guidance to re-fetch
 
@@ -312,7 +313,7 @@ State:
   barrier_hint: "Login form detected with email + password fields. Use fill_form to authenticate."
 ```
 
-Possible barriers: `login_required`, `bot_blocked`, `out_of_stock`, `empty_results`, `error_page`, `age_verification`, `region_restricted`.
+Possible barriers: `cookie_consent`, `login_required`, `bot_blocked`, `out_of_stock`, `empty_results`, `error_page`, `age_verification`, `region_restricted`, `popup_overlay`.
 
 **When you see a barrier:** follow the `barrier_hint` guidance. For `bot_blocked`, wait and retry. For `login_required`, use `fill_form` with credentials.
 

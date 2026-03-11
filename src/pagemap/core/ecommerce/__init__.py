@@ -58,6 +58,10 @@ class BarrierResult:
     oauth_providers: tuple[str, ...] = ()  # "google", "kakao", etc.
     accept_terms: tuple[str, ...] = ()  # terms used to match accept button
     gate_type: str = ""  # "click_through" | "date_entry" (age gate only)
+    reject_terms: tuple[str, ...] = ()  # GDPR reject/necessary-only button text
+    dismiss_terms: tuple[str, ...] = ()  # close/dismiss button text
+    match_tier: str = ""  # "js_api"|"reject"|"accept"|"dismiss"|"symbol"|""
+    js_dismiss_call: str = ""  # CMP JS API call string
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dict for metadata storage."""
@@ -68,8 +72,11 @@ class BarrierResult:
     def warning_message(self) -> str:
         """Human-readable warning for agent prompt."""
         if self.barrier_type == BarrierType.COOKIE_CONSENT:
+            tier_label = f" ({self.match_tier})" if self.match_tier else ""
+            if self.match_tier == "js_api":
+                return f"Cookie consent ({self.provider}) — auto-rejected via JS API"
             if self.accept_ref is not None:
-                return f"Cookie consent ({self.provider}) — dismiss with [{self.accept_ref}]"
+                return f"Cookie consent ({self.provider}) — dismiss with [{self.accept_ref}]{tier_label}"
             return f"Cookie consent ({self.provider}) detected"
         if self.barrier_type == BarrierType.LOGIN_REQUIRED:
             return "Login required — page content may be restricted"
@@ -77,26 +84,32 @@ class BarrierResult:
             return "Age verification required"
         if self.barrier_type == BarrierType.REGION_RESTRICTED:
             return "Region-restricted content"
+        if self.barrier_type == BarrierType.POPUP_OVERLAY:
+            if self.accept_ref is not None:
+                return f"Popup overlay ({self.provider}) — close with [{self.accept_ref}]"
+            return f"Popup overlay ({self.provider}) detected"
         return f"Popup overlay detected ({self.provider})"
 
     def with_matched_ref(self, interactables: list[Interactable]) -> BarrierResult:
         """Return a copy with accept_ref matched against final interactables.
 
         After budget filtering renumbers refs, the original accept_ref
-        may be stale.  This re-scans final interactables for the accept
-        button using ``accept_terms``.
+        may be stale.  This re-scans final interactables using the
+        5-tier cascade: js_api → reject → accept → dismiss → symbol.
         """
-        if not self.accept_terms or not interactables:
+        if not interactables:
             return self
 
-        for item in interactables:
-            name_lower = item.name.lower()
-            for term in self.accept_terms:
-                if term in name_lower:
-                    return dataclasses.replace(self, accept_ref=item.ref)
+        from .barrier_handler import _find_dismiss_ref
 
-        # No match in final interactables — clear the ref
-        return dataclasses.replace(self, accept_ref=None)
+        ref, tier, _js = _find_dismiss_ref(
+            interactables,
+            accept_terms=self.accept_terms,
+            reject_terms=self.reject_terms,
+            dismiss_terms=self.dismiss_terms,
+            barrier_confirmed=True,
+        )
+        return dataclasses.replace(self, accept_ref=ref, match_tier=tier)
 
 
 # ── Layer 1: Engine output dataclasses ─────────────────────────────
