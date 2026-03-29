@@ -40,6 +40,10 @@ PageMap gives your agent a **compressed, actionable** view of any web page:
 
 ---
 
+## Hosted deployment
+
+A hosted deployment is available on [Fronteir AI](https://fronteir.ai/mcp/retio-ai-pagemap).
+
 ## Quick Start
 
 Chromium is auto-installed on first use — no manual `playwright install` needed.
